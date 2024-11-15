@@ -1,0 +1,500 @@
+package gofi
+
+import (
+	"log"
+	"reflect"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/michaelolof/gofi/validators"
+
+	"github.com/michaelolof/gofi/utils"
+)
+
+type ISchema interface {
+}
+
+type Schema struct {
+}
+
+type Info struct {
+	// Prevent path from being documented
+	Hidden       bool
+	OperationId  string
+	Summary      string
+	Deprecated   bool
+	Method       string
+	Url          string
+	Description  string
+	ExternalDocs []ExternalDocs
+}
+
+type schemaField string
+
+const (
+	schemaOperationId schemaField = "OperationId"
+	schemaSummary     schemaField = "Summary"
+	schemaHttpMethod  schemaField = "Method"
+	schemaUrl         schemaField = "Url"
+	schemaDeprecated  schemaField = "Deprecated"
+	schemaReq         schemaField = "Request"
+	schemaHeaders     schemaField = "Header"
+	schemaCookies     schemaField = "Cookie"
+	schemaQuery       schemaField = "Query"
+	schemaPath        schemaField = "Path"
+	schemaBody        schemaField = "Body"
+)
+
+func (s schemaField) reqSchemaIn() string {
+	switch s {
+	case schemaPath:
+		return "path"
+	case schemaQuery:
+		return "query"
+	case schemaHeaders:
+		return "header"
+	case schemaCookies:
+		return "cookie"
+	default:
+		return "<unknown>"
+	}
+}
+
+type routeSchema struct {
+	specs openapiOperationObject
+	rules schemaRules
+}
+
+func compileSchema(schema ISchema, info Info) routeSchema {
+
+	var strct = reflect.TypeOf(schema)
+	if strct.Kind() == reflect.Pointer || strct.Kind() == reflect.Interface {
+		strct = strct.Elem()
+	}
+
+	optsObj := initOpenapiOperationObject()
+	sRules := newSchemaRules()
+
+	optsObj.OperationId = info.OperationId
+	optsObj.method = info.Method
+	optsObj.Summary = info.Summary
+	optsObj.urlPath = info.Url
+	optsObj.Description = info.Description
+	optsObj.ExternalDocs = info.ExternalDocs
+	if info.Deprecated {
+		optsObj.Deprecated = &info.Deprecated
+	}
+
+	for _, sf := range reflect.VisibleFields(strct) {
+
+		// Schena fields must be a struct to be valid
+		if sf.Type.Kind() != reflect.Struct {
+			continue
+		}
+
+		obj := reflect.ValueOf(schema).Elem().FieldByName(sf.Name)
+
+		if sf.Name == string(schemaReq) {
+			for _, rqf := range reflect.VisibleFields(sf.Type) {
+				rqn := schemaField(rqf.Name)
+				kind := rqf.Type.Kind()
+
+				switch rqn {
+				case schemaHeaders, schemaCookies, schemaQuery, schemaPath:
+					if kind != reflect.Struct {
+						continue
+					}
+
+					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
+					pruleDefs := newRuleDef(kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
+					in := rqn.reqSchemaIn()
+
+					for _, rqff := range reflect.VisibleFields(rqf.Type) {
+						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
+						name := getFieldName(rqff)
+						if in == "header" {
+							name = strings.ToLower(name)
+						}
+						ruleDefs := getFieldRuleDefs(rqff, name, val)
+						pruleDefs.attach(name, ruleDefs)
+						var required *bool
+						if v := ruleDefs.hasRule("required"); v {
+							required = &v
+						}
+
+						tInfo := getTypeInfo(rqff.Type, val, name, ruleDefs)
+						optsObj.Parameters = append(
+							optsObj.Parameters,
+							newOpenapiParameters(in, name, required, tInfo),
+						)
+						sRules.setReq(sf.Name, pruleDefs)
+					}
+
+				case schemaBody:
+					val := getPrimitiveValFromParent(obj, rqf)
+					name := getFieldName(rqf)
+					ruleDefs := getFieldRuleDefs(rqf, name, val)
+					optsObj.bodySchema = getTypeInfo(rqf.Type, val, name, ruleDefs)
+					sRules.setReq(sf.Name, ruleDefs)
+				}
+			}
+		} else if _, ok := statuses[sf.Name]; ok {
+			for _, rqf := range reflect.VisibleFields(sf.Type) {
+				rqn := schemaField(rqf.Name)
+				kind := rqf.Type.Kind()
+				responseParameters := make(openapiParameters, 0, 10)
+
+				switch rqn {
+				case schemaHeaders, schemaCookies:
+					if kind != reflect.Struct {
+						continue
+					}
+
+					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
+					pruleDefs := newRuleDef(kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
+					in := rqn.reqSchemaIn()
+
+					for _, rqff := range reflect.VisibleFields(rqf.Type) {
+						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
+						name := getFieldName(rqff)
+						ruleDefs := getFieldRuleDefs(rqff, name, val)
+						pruleDefs.attach(name, ruleDefs)
+						var required *bool
+						if v := ruleDefs.hasRule("required"); v {
+							required = &v
+						}
+
+						tInfo := getTypeInfo(rqff.Type, val, name, ruleDefs)
+						responseParameters = append(
+							responseParameters,
+							newOpenapiParameters(in, name, required, tInfo),
+						)
+						sRules.setResps(sf.Name, pruleDefs)
+					}
+					optsObj.responsesParameters[sf.Name] = responseParameters
+
+				case schemaBody:
+					val := getPrimitiveValFromParent(obj, rqf)
+					name := getFieldName(rqf)
+					ruleDefs := getFieldRuleDefs(rqf, name, val)
+					optsObj.responsesSchema[sf.Name] = getTypeInfo(rqf.Type, val, name, ruleDefs)
+					sRules.setResps(sf.Name, ruleDefs)
+				}
+			}
+		}
+	}
+
+	return routeSchema{
+		specs: optsObj,
+		rules: sRules,
+	}
+}
+
+func getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *ruleDef) openapiSchema {
+
+	kind := typ.Kind()
+
+	var typeStr string
+	var pattern string
+	var format string
+	var enum []any
+	var optStr []string
+	var min *float64
+	var max *float64
+	var items *openapiSchema
+	var addProps *openapiSchema
+	var example any
+	var deprecated *bool
+	var description string
+	properties := make(map[string]openapiSchema)
+	requiredProps := make([]string, 0)
+
+	var pRequired bool
+
+	if ruleDefs != nil {
+		minOpts := ruleDefs.ruleOptions("min")
+		minOpts = append(minOpts, ruleDefs.ruleOptions("gte")...)
+		for _, opt := range minOpts {
+			i, err := strconv.ParseFloat(opt, 64)
+			if err == nil {
+				min = &i
+				break
+			}
+		}
+
+		maxOpts := ruleDefs.ruleOptions("max")
+		maxOpts = append(maxOpts, ruleDefs.ruleOptions("lte")...)
+		for _, opt := range maxOpts {
+			i, err := strconv.ParseFloat(opt, 64)
+			if err == nil {
+				max = &i
+				break
+			}
+		}
+
+		// var items structFieldInfo
+		optStr = ruleDefs.ruleOptions("oneof")
+		pRequired = ruleDefs.required
+
+		if v, ok := ruleDefs.xtraTags["example"]; ok {
+			if v, err := validators.PrimitiveFromStr(typ.Kind(), v); err == nil && validators.IsPrimitive(v) {
+				example = v
+			}
+		}
+
+		if v, ok := ruleDefs.xtraTags["deprecated"]; ok {
+			if v, err := strconv.ParseBool(v); err == nil && v {
+				deprecated = &v
+			}
+		}
+
+		if v, ok := ruleDefs.xtraTags["description"]; ok {
+			description = v
+		}
+
+		if v, ok := ruleDefs.xtraTags["pattern"]; ok {
+			pattern = v
+		}
+	}
+
+	switch kind {
+	case reflect.String:
+		enum = optsMapper(optStr, nil)
+		format = ruleDefs.findRules([]string{"date", "date-time", "password", "byte", "binary", "email", "uuid", "uri", "hostname", "ipv4", "ipv6"}, "")
+		typeStr = "string"
+
+	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Uint8, reflect.Uint16, reflect.Uint32:
+		enum = optsMapper(optStr, func(s string) any {
+			v, err := strconv.Atoi(s)
+			if err != nil {
+				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+			}
+			return int32(v)
+		})
+		format = "int32"
+		typeStr = "integer"
+
+	case reflect.Int, reflect.Int64, reflect.Uint, reflect.Uint64:
+		enum = optsMapper(optStr, func(s string) any {
+			v, err := strconv.Atoi(s)
+			if err != nil {
+				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+			}
+			return int64(v)
+		})
+		format = "int64"
+		typeStr = "integer"
+
+	case reflect.Float32, reflect.Float64:
+		enum = optsMapper(optStr, func(s string) any {
+			v, err := strconv.ParseFloat(s, 32)
+			if err != nil {
+				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+			}
+			return float64(v)
+		})
+		format = "float"
+		typeStr = "number"
+
+	case reflect.Bool:
+		enum = []any{true, false}
+		typeStr = "boolean"
+		format = "bool"
+
+	case reflect.Slice, reflect.Array:
+		typeStr = "array"
+		_ruleDefs := getItemRuleDef(typ.Elem())
+		ruleDefs.append(_ruleDefs)
+		i := getTypeInfo(typ.Elem(), value, name, _ruleDefs)
+		items = &i
+
+	case reflect.Map:
+		typeStr = "object"
+		_ruleDefs := getItemRuleDef(typ.Elem())
+		ruleDefs.addProps(_ruleDefs)
+		i := getTypeInfo(typ.Elem(), value, name, _ruleDefs)
+		addProps = &i
+
+	case reflect.Struct:
+		switch typ {
+		case utils.TimeType:
+			enum = optsMapper(optStr, nil)
+			typeStr = "string"
+			format = string(utils.TimeObjectFormat)
+			ruleDefs.format = utils.TimeObjectFormat
+			if pattern == "" {
+				pattern = time.RFC3339Nano
+			}
+
+		case utils.CookieType:
+			enum = optsMapper(optStr, nil)
+			typeStr = "string"
+			format = string(utils.CookieObjectFormat)
+			ruleDefs.format = utils.CookieObjectFormat
+
+		default:
+			typeStr = "object"
+			obj := reflect.ValueOf(value)
+			for _, sf := range reflect.VisibleFields(typ) {
+				val := getPrimitiveValFromParent(obj, sf)
+				name := getFieldName(sf)
+				_ruleDefs := getFieldRuleDefs(sf, name, val)
+				ruleDefs.attach(name, _ruleDefs)
+				if _ruleDefs.hasRule("required") {
+					requiredProps = append(requiredProps, name)
+				}
+				properties[name] = getTypeInfo(sf.Type, val, name, _ruleDefs)
+			}
+		}
+
+	case reflect.Pointer:
+		ruleDefs.kind = typ.Elem().Kind()
+		return getTypeInfo(typ.Elem(), value, name, ruleDefs)
+	}
+
+	ruleDefs.pattern = pattern
+
+	return newOpenapiSchema(
+		format,
+		typeStr,
+		pattern,
+		value,
+		min,
+		max,
+		enum,
+		items,
+		addProps,
+		properties,
+		requiredProps,
+		deprecated,
+		description,
+		example,
+		pRequired,
+	)
+}
+
+func getItemRuleDef(typ reflect.Type) *ruleDef {
+	return newRuleDef(typ.Kind(), "", "", "", nil, nil, false, nil, nil, nil, nil)
+}
+
+func getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *ruleDef {
+	xtraTags := []string{"example", "deprecated", "description", "pattern"}
+
+	vtags := strings.Split(sf.Tag.Get("validate"), ",")
+	defStr := sf.Tag.Get("default")
+	if len(vtags) == 0 || vtags[0] == "" {
+		rtn := newRuleDef(sf.Type.Kind(), tagName, sf.Name, defStr, defVal, nil, false, nil, nil, nil, nil)
+		rtn.xtraTags = make(map[string]string)
+		for _, tag := range xtraTags {
+			if v, ok := sf.Tag.Lookup(tag); ok {
+				rtn.xtraTags[tag] = v
+			}
+		}
+
+		return rtn
+	}
+
+	required := false
+	var max *float64 = nil
+	rules := make([]ruleOpts, 0, len(vtags))
+	for _, tag := range vtags {
+		v := strings.Split(tag, "=")
+		var options []string
+		if len(v) > 1 {
+			options = strings.Split(v[1], " ")
+		}
+
+		if v[0] == "required" {
+			required = true
+		}
+
+		if (v[0] == "max" || v[0] == "lte") && len(v) > 1 {
+			flt, err := strconv.ParseFloat(options[0], 64)
+			if err == nil {
+				max = &flt
+			}
+		}
+
+		rules = append(rules, newRuleOpts(sf.Type.Kind(), v[0], options))
+	}
+
+	rtn := newRuleDef(sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
+	rtn.xtraTags = make(map[string]string)
+
+	for _, tag := range xtraTags {
+		if v, ok := sf.Tag.Lookup(tag); ok {
+			rtn.xtraTags[tag] = v
+		}
+	}
+
+	return rtn
+}
+
+func getFieldName(sf reflect.StructField) string {
+	jsonTags := strings.Split(sf.Tag.Get("json"), ",")
+	var name string
+	if len(jsonTags) > 0 && jsonTags[0] != "" {
+		name = jsonTags[0]
+	} else {
+		name = sf.Name
+	}
+	return name
+}
+
+func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any {
+	var fieldVal any
+	if parent.IsValid() && parent.Kind() == reflect.Struct {
+		fv := parent.FieldByName(f.Name)
+		if fv.IsValid() && fv.Comparable() {
+			fieldVal = fv.Interface()
+			if kt := reflect.New(f.Type).Elem(); kt.IsValid() && kt.Comparable() {
+				ktv := kt.Interface()
+				if fieldVal != ktv {
+					return fieldVal
+				}
+			}
+		}
+	}
+	tagVal := f.Tag.Get("default")
+	kind := f.Type.Kind()
+
+	val, err := validators.PrimitiveFromStr(kind, tagVal)
+	if err != nil {
+		if fieldVal != nil {
+			return fieldVal
+		} else {
+			return nil
+		}
+	}
+
+	if validators.NotPrimitive(val) {
+		return nil
+	}
+
+	return val
+}
+
+func optsMapper(opts []string, fn func(string) any) []any {
+	if opts == nil {
+		return nil
+	}
+
+	ropts := make([]any, 0, len(opts))
+	for _, opt := range opts {
+		var v any
+		if fn != nil {
+			v = fn(opt)
+		} else {
+			v = opt
+		}
+
+		ropts = append(ropts, v)
+	}
+	return ropts
+}
+
+// ipType         = reflect.TypeOf(net.IP{})
+// ipAddrType     = reflect.TypeOf(netip.Addr{})
+// urlType        = reflect.TypeOf(url.URL{})
+// rawMessageType = reflect.TypeOf(json.RawMessage{})
