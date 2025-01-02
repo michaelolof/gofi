@@ -25,6 +25,10 @@ type RouteOptions struct {
 	Handler func(c Context) error
 }
 
+func DefineHandler(opts RouteOptions) RouteOptions {
+	return opts
+}
+
 func applyMiddleware(handler HandlerFunc, middleware []MiddlewareFunc) HandlerFunc {
 	for i := len(middleware) - 1; i >= 0; i-- {
 		handler = middleware[i](handler)
