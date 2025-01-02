@@ -9,75 +9,43 @@ import (
 	"strings"
 	"time"
 
+	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
 	"github.com/michaelolof/gofi/validators"
-
-	"github.com/michaelolof/gofi/cont"
-
 	"github.com/valyala/fastjson"
 )
 
 type Context interface {
+	// Returns the http writer instance for the request
 	Writer() http.ResponseWriter
+	// Returns the http request instance for the request
 	Request() *http.Request
-	// JSON sends a JSON response with status code.
+	// Access global store defined on the server router instance
+	GlobalStore() ReadOnlyStore
+	// Access route context data store. Useful for passing and retrieving during a request lifetime
+	DataStore() GofiStore
+	// Access static meta information defined on the route
+	Meta() ContextMeta
+	// Sends a JSON response with status code.
 	JSON(code int, i any) error
-	Send(code int, i ISchema) error
-}
-
-type requestVal struct {
-	key                  string
-	kind                 reflect.Kind
-	val                  any
-	items                []*requestVal
-	additionalProperties map[string]*requestVal
-	properties           map[string]*requestVal
-	size                 int
-}
-
-type requestValues struct {
-	query   map[string]requestVal
-	path    map[string]requestVal
-	headers map[string]requestVal
-	cookies map[string]requestVal
-	body    *requestVal
-}
-
-func (r *requestValues) setVal(field schemaField, name string, key string, val any) {
-	v := requestVal{key: key, val: val}
-	switch field {
-	case schemaQuery:
-		r.query[name] = v
-	case schemaPath:
-		r.path[name] = v
-	case schemaHeaders:
-		r.headers[name] = v
-	case schemaCookies:
-		r.cookies[name] = v
-	}
-}
-
-func (r *requestValues) setNVal(schema schemaField, val *requestVal) {
-	r.body = val
 }
 
 type context struct {
-	r        *http.Request
-	w        http.ResponseWriter
-	rules    *schemaRules
-	pReqVals requestValues
+	w           http.ResponseWriter
+	r           *http.Request
+	rules       *schemaRules
+	routeMeta   metaMap
+	globalStore ReadOnlyStore
+	dataStore   GofiStore
 }
 
-func NewContext(w http.ResponseWriter, r *http.Request) *context {
+func newContext(w http.ResponseWriter, r *http.Request) *context {
 	return &context{
-		r: r,
-		w: w,
-		pReqVals: requestValues{
-			query:   make(map[string]requestVal),
-			path:    make(map[string]requestVal),
-			headers: make(map[string]requestVal),
-			cookies: make(map[string]requestVal),
-		},
+		w:           w,
+		r:           r,
+		routeMeta:   map[string]map[string]any{},
+		globalStore: NewGlobalStore(),
+		dataStore:   NewDataStore(),
 	}
 }
 
@@ -87,6 +55,18 @@ func (c *context) Writer() http.ResponseWriter {
 
 func (c *context) Request() *http.Request {
 	return c.r
+}
+
+func (c *context) GlobalStore() ReadOnlyStore {
+	return c.globalStore
+}
+
+func (c *context) DataStore() GofiStore {
+	return c.dataStore
+}
+
+func (c *context) Meta() ContextMeta {
+	return &contextMeta{c: c}
 }
 
 func (c *context) JSON(code int, resp any) error {
@@ -113,7 +93,7 @@ func (c *context) JSON(code int, resp any) error {
 	}
 
 	err = c.checkAndSetHeaders(rules, rv.FieldByName(string(schemaHeaders)), func(s string) bool {
-		return s == "content-type"
+		return s == "content-type" || s == "-"
 	})
 	if err != nil {
 		return err
@@ -125,25 +105,6 @@ func (c *context) JSON(code int, resp any) error {
 	}
 
 	return nil
-}
-
-func (c *context) Send(code int, schema ISchema) error {
-	_, _, err := c.rules.getRespRulesByCode(code)
-	if err != nil {
-		return err
-	}
-
-	// err = checkAndSetHeaders(c, name, rps, schema)
-	// if err != nil {
-	// 	return err
-	// }
-
-	c.w.WriteHeader(code)
-	return nil
-}
-
-func (c *context) setSchemaRules(rules *schemaRules) {
-	c.rules = rules
 }
 
 func Validate(c Context) error {
@@ -160,7 +121,7 @@ func Validate(c Context) error {
 	return nil
 }
 
-func ValidateAndBind[T ISchema](c Context) (*T, error) {
+func ValidateAndBind[T any](c Context) (*T, error) {
 	ctx, ok := c.(*context)
 	if !ok {
 		return nil, errors.New("unknown context object passed")
@@ -172,6 +133,12 @@ func ValidateAndBind[T ISchema](c Context) (*T, error) {
 	}
 
 	return s, nil
+}
+
+func (c *context) setContextSettings(rules *schemaRules, routeMeta metaMap, globalStore GofiStore) {
+	c.rules = rules
+	c.routeMeta = routeMeta
+	c.globalStore = globalStore
 }
 
 func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
@@ -363,6 +330,12 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	return schemaPtr, errors.Join(errs...)
 }
 
+type walkFinishStatus struct{}
+
+var walkFinished = walkFinishStatus{}
+
+const DEFAULT_ARRAY_SIZE = 50
+
 func validateAndOrBindJson(c *context, pdef *ruleDef, body io.ReadCloser, shouldBind bool, reqStruct *reflect.Value, ptr any) error {
 
 	body = http.MaxBytesReader(c.w, body, 1048576)
@@ -441,13 +414,6 @@ func validateAndOrBindJson(c *context, pdef *ruleDef, body io.ReadCloser, should
 		return newErrReport(RequestErr, schemaBody, "", "parser", errors.New("couldn't parse request body"))
 	}
 }
-
-type walkFinishStatus struct {
-}
-
-var walkFinished = walkFinishStatus{}
-
-const DEFAULT_ARRAY_SIZE = 50
 
 func walkJsonContent(s *jsonContentState, strct *reflect.Value, keys []string, def *ruleDef) (any, error) {
 	kp := strings.Join(keys, ".")
@@ -693,19 +659,6 @@ func bindValOnElem(strct *reflect.Value, val any) {
 	default:
 		strct.Set(reflect.ValueOf(val).Convert(strct.Type()))
 	}
-}
-
-func runValidation(typ errorType, val any, schema schemaField, keypath string, rules []ruleOpts) error {
-	errs := make([]error, 0, len(rules))
-
-	for _, rule := range rules {
-		err := rule.dator(val)
-		if err != nil {
-			errs = append(errs, newErrReport(typ, schema, keypath, rule.rule, err))
-		}
-	}
-
-	return errors.Join(errs...)
 }
 
 type jsonContentState struct {

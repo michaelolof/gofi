@@ -2,9 +2,10 @@ package gofi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-
-	"github.com/michaelolof/gofi/cont"
+	"net/http"
+	"path"
 )
 
 type Docs struct {
@@ -13,26 +14,28 @@ type Docs struct {
 	*DocsOptions
 }
 
-func (d *DocsOptions) getDocs(m *ServeMux) Docs {
-
-	d.Info.Title = fallback(d.Info.Title, "My Awesome API")
-	d.Info.Version = fallback(d.Info.Version, "0.0.1")
-
-	docs := Docs{
-		OpenApi:     "3.0.3",
-		Paths:       &m.paths,
-		DocsOptions: d,
-	}
-
-	return docs
-}
+type docsPaths map[string]map[string]openapiOperationObject
 
 type DocsOptions struct {
 	Info         DocsInfoOptions     `json:"info,omitempty"`
 	Servers      []DocsServerOptions `json:"servers,omitempty"`
 	ExternalDocs *ExternalDocs       `json:"externalDocs,omitempty"`
 	Tags         *DocsInfoTag        `json:"tags,omitempty"`
-	Ui           DocsUiOptions       `json:"-"`
+	Views        []DocsView          `json:"-"`
+}
+
+func (d *DocsOptions) getMatchingDocs(m *serveMux, match func(url string) bool) Docs {
+	mpaths := make(docsPaths)
+	for url, v := range m.paths {
+		if match(url) {
+			mpaths[url] = v
+		}
+	}
+	return Docs{
+		OpenApi:     "3.0.3",
+		Paths:       &mpaths,
+		DocsOptions: d,
+	}
 }
 
 type DocsInfoOptions struct {
@@ -81,6 +84,13 @@ type DocsServerVariable struct {
 type DocsUiOptions struct {
 	RoutePrefix string
 	Template    DocsUiTemplate
+}
+
+type DocsView struct {
+	RoutePrefix string
+	Template    DocsUiTemplate
+	UrlMatch    func(url string) bool
+	DocsPath    string
 }
 
 type DocsUiTemplate interface {
@@ -278,260 +288,51 @@ func (u *uiTemplate) HTML(specPath string) []byte {
 	return []byte(fmt.Sprintf(u.html, specPath))
 }
 
-type docsPaths map[string]map[string]openapiOperationObject
+func ServeDocs(r Router, opts DocsOptions) error {
+	const docsPath = "/q/openapi"
 
-type openapiOperationObject struct {
-	OperationId  string                           `json:"operationId,omitempty"`
-	Summary      string                           `json:"summary,omitempty"`
-	Description  string                           `json:"description,omitempty"`
-	Deprecated   *bool                            `json:"deprecated,omitempty"`
-	Parameters   openapiParameters                `json:"parameters,omitempty"`
-	RequestBody  *openapiRequestObject            `json:"requestBody,omitempty"`
-	Responses    map[string]openapiResponseObject `json:"responses,omitempty"`
-	ExternalDocs []ExternalDocs                   `json:"externalDocs,omitempty"`
-
-	urlPath             string
-	method              string
-	bodySchema          openapiSchema
-	responsesParameters map[string]openapiParameters
-	responsesSchema     map[string]openapiSchema
-}
-
-func initOpenapiOperationObject() openapiOperationObject {
-	return openapiOperationObject{
-		Responses:           make(map[string]openapiResponseObject),
-		responsesParameters: make(map[string]openapiParameters),
-		responsesSchema:     make(map[string]openapiSchema),
+	m, ok := r.(*serveMux)
+	if !ok {
+		return errors.New("invalid server mux passed when serving docs")
 	}
-}
 
-func (o *openapiOperationObject) normalize(method string, path string) {
+	var cerr error
 
-	// generateOperationIdAndSummary := func(method string, path string) (op string, sum string) {
-	// 	paths := regexp.MustCompile("[/_-]+").Split(path, -1)
-	// 	rtn := strings.ToLower(method)
-	// 	s := utils.ToUpperFirst(method)
+	for _, vopt := range opts.Views {
 
-	// 	for i, p := range paths {
-	// 		if p == "" {
-	// 			continue
-	// 		}
+		if vopt.RoutePrefix == "" {
+			continue
+		}
 
-	// 		if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}") && len(p) > 2 {
-	// 			v := p[1 : len(p)-1]
-	// 			rtn = rtn + ("By" + utils.ToUpperFirst(v))
-	// 			if i == len(paths)-1 {
-	// 				s = s + " by " + strings.ToLower(v)
-	// 			} else {
-	// 				s = s + " by " + strings.ToLower(v) + " and"
-	// 			}
-	// 		} else {
-	// 			rtn = rtn + utils.ToUpperFirst(p)
-	// 			s = s + " " + strings.ToLower(p)
-	// 		}
-	// 	}
-
-	// 	return rtn, s
-	// }
-
-	o.method = method
-	o.urlPath = path
-
-	// op, sum := generateOperationIdAndSummary(method, path)
-	// if o.OperationId == "" {
-	// 	o.OperationId = op
-	// }
-	// if o.Summary == "" {
-	// 	o.Summary = sum
-	// }
-
-	if !o.bodySchema.IsEmpty() {
-		var contentType = string(cont.AnyContenType)
-		if v := o.Parameters.findByNameIn("content-type", "header"); v != nil {
-			if def, ok := v.Schema.Default.(string); ok && def != "" {
-				contentType = def
+		m.sm.HandleFunc(fmt.Sprintf("GET %s", path.Join(vopt.RoutePrefix, docsPath)), func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("content-type", "application/json")
+			var d Docs
+			if vopt.UrlMatch == nil {
+				d = opts.getMatchingDocs(m, func(url string) bool { return true })
+			} else {
+				d = opts.getMatchingDocs(m, vopt.UrlMatch)
 			}
-		}
 
-		o.RequestBody = &openapiRequestObject{
-			Required: o.bodySchema.ParentRequired,
-			Content: map[string]openapiMediaObject{
-				contentType: {
-					Schema: o.bodySchema,
-				},
-			},
-		}
-	}
-
-	if len(o.responsesParameters) > 0 || len(o.responsesSchema) > 0 {
-		if o.Responses == nil {
-			o.Responses = make(map[string]openapiResponseObject)
-		}
-
-		for field, params := range o.responsesParameters {
-			sinfos := statuses[field]
-
-			for _, sinfo := range sinfos {
-				headersMap := make(map[string]openapiHeaderObject)
-				for _, param := range params {
-					if param.In == "header" {
-						v, ok := param.Schema.Default.(string)
-						if !ok || v == "" {
-							v = string(cont.AnyContenType)
-						}
-						headersMap[param.Name] = newOpenapiHeaderObject(param.Required, v, param.Schema)
-					}
-				}
-
-				if v, ok := o.Responses[sinfo.Code]; ok {
-					v.Headers = headersMap
-					v.Description = sinfo.Description
-				} else {
-					o.Responses[sinfo.Code] = openapiResponseObject{Headers: headersMap, Description: sinfo.Description}
-				}
+			ds, err := json.Marshal(d)
+			if err != nil {
+				cerr = err
+				return
 			}
-		}
 
-		for field, schema := range o.responsesSchema {
-			sinfo := statuses[field]
+			w.Write(ds)
+		})
 
-			for _, sinfo := range sinfo {
-				contentType := string(cont.AnyContenType)
-				if v, ok := o.Responses[sinfo.Code]; ok {
-					v.Description = sinfo.Description
-					if c, ok := v.Headers["content-type"]; ok {
-						contentType = c.value
-					}
-					v.Content = map[string]openapiMediaObject{
-						contentType: {
-							Schema: schema,
-						},
-					}
-					v.Required = schema.ParentRequired
-					o.Responses[sinfo.Code] = v
-				} else {
-					o.Responses[sinfo.Code] = openapiResponseObject{
-						Required:    schema.ParentRequired,
-						Description: sinfo.Description,
-						Content: map[string]openapiMediaObject{
-							contentType: {
-								Schema: schema,
-							},
-						},
-					}
-				}
+		m.sm.HandleFunc(fmt.Sprintf("GET %s", vopt.RoutePrefix), func(w http.ResponseWriter, r *http.Request) {
+			tmplt := vopt.Template
+			if tmplt == nil {
+				// Make swagger the default template :(
+				tmplt = SwaggerTemplate()
 			}
-		}
+			w.Header().Set("content-type", "text/html")
+			w.Write(tmplt.HTML(path.Join(vopt.RoutePrefix, docsPath)))
+		})
+
 	}
 
-}
-
-type openapiParameter struct {
-	In       string        `json:"in"`
-	Name     string        `json:"name"`
-	Required *bool         `json:"required,omitempty"`
-	Schema   openapiSchema `json:"schema,omitempty"`
-}
-
-func newOpenapiParameters(in string, name string, required *bool, schema openapiSchema) openapiParameter {
-	return openapiParameter{
-		In:       in,
-		Name:     name,
-		Required: required,
-		Schema:   schema,
-	}
-}
-
-type openapiParameters []openapiParameter
-
-func (o openapiParameters) findByName(name string) *openapiParameter {
-	for _, v := range o {
-		if v.Name == name {
-			return &v
-		}
-	}
-	return nil
-}
-
-func (o openapiParameters) findByNameIn(name string, in string) *openapiParameter {
-	for _, v := range o {
-		if v.Name == name && v.In == in {
-			return &v
-		}
-	}
-	return nil
-}
-
-type openapiSchema struct {
-	Format               string                   `json:"format,omitempty"`
-	Type                 string                   `json:"type,omitempty"`
-	Pattern              string                   `json:"pattern,omitempty"`
-	Default              any                      `json:"default,omitempty"`
-	Minimum              *float64                 `json:"minimum,omitempty"`
-	Maximum              *float64                 `json:"maximum,omitempty"`
-	Enum                 []any                    `json:"enum,omitempty"`
-	Items                *openapiSchema           `json:"items,omitempty"`
-	AdditionalProperties *openapiSchema           `json:"additionalProperties,omitempty"`
-	Properties           map[string]openapiSchema `json:"properties,omitempty"`
-	Required             []string                 `json:"required,omitempty"`
-	Deprecated           *bool                    `json:"deprecated,omitempty"`
-	Description          string                   `json:"description,omitempty"`
-	Example              any                      `json:"example,omitempty"`
-
-	ParentRequired bool `json:"-"`
-}
-
-func (o *openapiSchema) IsEmpty() bool {
-	return o == nil || o.Type == ""
-}
-
-func newOpenapiSchema(format string, typ string, pattn string, deflt any, min *float64, max *float64, enum []any, items *openapiSchema, addprops *openapiSchema, properties map[string]openapiSchema, required []string, deprecated *bool, describe string, example any, pRequired bool) openapiSchema {
-	return openapiSchema{
-		Format:               format,
-		Type:                 typ,
-		Pattern:              pattn,
-		Default:              deflt,
-		Minimum:              min,
-		Maximum:              max,
-		Enum:                 enum,
-		Items:                items,
-		AdditionalProperties: addprops,
-		Properties:           properties,
-		Required:             required,
-		Deprecated:           deprecated,
-		Description:          describe,
-		Example:              example,
-		ParentRequired:       pRequired,
-	}
-}
-
-type openapiRequestObject struct {
-	Description string                        `json:"description,omitempty"`
-	Required    bool                          `json:"required,omitempty"`
-	Content     map[string]openapiMediaObject `json:"content,omitempty"`
-}
-
-type openapiResponseObject struct {
-	Description string                         `json:"description,omitempty"`
-	Headers     map[string]openapiHeaderObject `json:"headers,omitempty"`
-	Required    bool                           `json:"required,omitempty"`
-	Content     map[string]openapiMediaObject  `json:"content,omitempty"`
-}
-
-type openapiHeaderObject struct {
-	Required *bool         `json:"required,omitempty"`
-	Schema   openapiSchema `json:"schema,omitempty"`
-	value    string
-}
-
-func newOpenapiHeaderObject(required *bool, value string, schema openapiSchema) openapiHeaderObject {
-	return openapiHeaderObject{
-		Required: required,
-		value:    value,
-		Schema:   schema,
-	}
-}
-
-type openapiMediaObject struct {
-	Schema openapiSchema `json:"schema,omitempty"`
+	return cerr
 }

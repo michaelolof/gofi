@@ -1,141 +1,88 @@
 package gofi
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path"
 	"strings"
 )
 
-var customValidators = make(map[string]func([]any) func(any) error)
-
-type ServeMux struct {
+type serveMux struct {
 	sm          *http.ServeMux
+	opts        *MuxOptions
 	paths       docsPaths
+	routeMeta   metaMap
+	globalStore GofiStore
 	errHandler  func(err error, c Context)
 	middlewares Middlewares
 }
 
-func (s *ServeMux) Route(method string, path string, opts HandlerOptions) {
-	var rules *schemaRules
-	if opts.Schema != nil {
-
-		rs := compileSchema(opts.Schema, opts.Info)
-		rs.specs.normalize(method, path)
-		if len(s.paths[path]) == 0 {
-			v := map[string]openapiOperationObject{
-				strings.ToLower(method): rs.specs,
-			}
-
-			if !opts.Info.Hidden {
-				s.paths[path] = v
-			}
-		} else {
-			if !opts.Info.Hidden {
-				s.paths[path][strings.ToLower(method)] = rs.specs
-			}
-		}
-
-		rules = &rs.rules
-	}
-
-	s.sm.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
-		c := NewContext(w, r)
-		c.setSchemaRules(rules)
-
-		err := opts.Handler(c)
-		if err != nil {
-			s.errHandler(err, c)
-			return
-		}
-	})
+func NewServeMux() Router {
+	middlewares := make(Middlewares, 0, 15)
+	return serveMuxBuilder(
+		http.NewServeMux(),
+		map[string]map[string]openapiOperationObject{},
+		map[string]map[string]any{},
+		NewGlobalStore(),
+		defaultErrorHandler,
+		middlewares,
+	)
 }
 
-func (s *ServeMux) Get(path string, handler HandlerOptions) {
-	s.Route("GET", path, handler)
+func (s *serveMux) Route(method string, path string, opts RouteOptions) {
+	s.route(method, path, opts)
 }
 
-func (s *ServeMux) Post(path string, handler HandlerOptions) {
-	s.Route("POST", path, handler)
+func (s *serveMux) Get(path string, opts RouteOptions) {
+	s.route(http.MethodGet, path, opts)
 }
 
-func (s *ServeMux) Put(path string, handler HandlerOptions) {
-	s.Route("PUT", path, handler)
+func (s *serveMux) Post(path string, opts RouteOptions) {
+	s.route(http.MethodPost, path, opts)
 }
 
-func (s *ServeMux) Patch(path string, handler HandlerOptions) {
-	s.Route("PATCH", path, handler)
+func (s *serveMux) Put(path string, opts RouteOptions) {
+	s.route(http.MethodPut, path, opts)
 }
 
-func (s *ServeMux) Delete(path string, handler HandlerOptions) {
-	s.Route("DELETE", path, handler)
+func (s *serveMux) Delete(path string, opts RouteOptions) {
+	s.route(http.MethodDelete, path, opts)
 }
 
-func (s *ServeMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error) {
-	r, err := http.NewRequest(opts.Method, opts.Path, opts.Body)
-	for name, value := range opts.Paths {
-		r.SetPathValue(name, value)
-	}
-
-	for _, cookie := range opts.Cookies {
-		r.AddCookie(&cookie)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-	def := opts.Handler
-	if def == nil {
-		return nil, fmt.Errorf("gofi controller not defined for the given method '%s' and path '%s'", opts.Method, opts.Path)
-	}
-
-	rules := compileSchema(def.Schema, def.Info)
-	rules.specs.normalize(opts.Method, opts.Path)
-
-	w := httptest.NewRecorder()
-	c := NewContext(w, r)
-	c.setSchemaRules(&rules.rules)
-
-	err = def.Handler(c)
-	if err != nil {
-		s.errHandler(err, c)
-		return w, nil
-	}
-
-	return w, nil
+func (s *serveMux) Patch(path string, opts RouteOptions) {
+	s.route(http.MethodPatch, path, opts)
 }
 
-// With adds inline middlewares for an endpoint handler.
-func (s *ServeMux) With(middlewares ...func(http.Handler) http.Handler) *ServeMux {
-
-	// Copy middlewares from parent inline muxs
-	mws := append(middlewares, middlewares...)
-
-	im := &ServeMux{
-		sm:          http.NewServeMux(),
-		paths:       map[string]map[string]openapiOperationObject{},
-		errHandler:  defaultErrorHandler,
-		middlewares: mws,
-	}
-
-	return im
+func (s *serveMux) Head(path string, opts RouteOptions) {
+	s.route(http.MethodHead, path, opts)
 }
 
-func (s *ServeMux) Handle(pattern string, handler http.Handler) {
+func (s *serveMux) Options(path string, opts RouteOptions) {
+	s.route(http.MethodOptions, path, opts)
+}
+
+func (s *serveMux) Trace(path string, opts RouteOptions) {
+	s.route(http.MethodTrace, path, opts)
+}
+
+func (s *serveMux) Connect(path string, opts RouteOptions) {
+	s.route(http.MethodConnect, path, opts)
+}
+
+func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
+	s.middlewares = append(s.middlewares, middlewares...)
+}
+
+func (s *serveMux) Handle(pattern string, handler http.Handler) {
 	s.sm.Handle(pattern, handler)
 }
 
-func (s *ServeMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+func (s *serveMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
 	s.sm.HandleFunc(pattern, handler)
 }
 
-func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var h http.Handler = s.sm
 	middlewares := s.middlewares
 	if len(middlewares) > 0 {
@@ -148,104 +95,133 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-func (s *ServeMux) Use(middlewares ...func(http.Handler) http.Handler) {
-	s.middlewares = append(s.middlewares, middlewares...)
+type MuxOptions struct {
+	ErrorHandler     func(err error, c Context)
+	CustomValidators map[string]func([]any) func(any) error
+	CompilerHooks    any
 }
 
-func (s *ServeMux) RegisterValidators(validators map[string]func([]any) func(any) error) {
-	customValidators = validators
-}
-
-func NewServeMux() *ServeMux {
-	middlewares := make(Middlewares, 0, 10)
-	return &ServeMux{
-		sm:          http.NewServeMux(),
-		paths:       map[string]map[string]openapiOperationObject{},
-		errHandler:  defaultErrorHandler,
-		middlewares: middlewares,
+func (s *serveMux) DefineMuxOptions(opts MuxOptions) {
+	s.opts = &opts
+	if opts.ErrorHandler != nil {
+		s.errHandler = opts.ErrorHandler
 	}
 }
 
-func ListenAndServe(addr string, handler http.Handler) error {
-	return http.ListenAndServe(addr, handler)
+func (s *serveMux) GlobalStore() GofiStore {
+	return s.globalStore
 }
 
-const docsPath = "/q/openapi"
-
-func ServeDocs(r Router, opts DocsOptions) error {
-	m, ok := r.(*ServeMux)
-	if !ok {
-		return errors.New("invalid server mux passed when serving docs")
-	}
-
-	if opts.Ui.RoutePrefix == "" {
-		return nil
-	}
-
-	d := opts.getDocs(m)
-
-	var cerr error
-
-	m.sm.HandleFunc(fmt.Sprintf("GET %s", path.Join(opts.Ui.RoutePrefix, docsPath)), func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		ds, err := json.Marshal(d)
-		if err != nil {
-			cerr = err
-			return
-		}
-
-		os.WriteFile("openapi.json", ds, 0647)
-		w.Write(ds)
-	})
-
-	m.sm.HandleFunc(fmt.Sprintf("GET %s", opts.Ui.RoutePrefix), func(w http.ResponseWriter, r *http.Request) {
-		tmplt := opts.Ui.Template
-		if tmplt == nil {
-			// Make swagger the default template :(
-			tmplt = SwaggerTemplate()
-		}
-		w.Header().Set("content-type", "text/html")
-		w.Write(tmplt.HTML(path.Join(opts.Ui.RoutePrefix, docsPath)))
-	})
-
-	return cerr
-}
-
-func fallback[T comparable](v T, d T) T {
-	var e T
-	if v == e {
-		return d
-	} else {
-		return v
-	}
-}
-
-type defaultErrResp struct {
-	Status     string `json:"status"`
-	StatusCode int    `json:"statusCode"`
-	Message    string `json:"message"`
-}
-
-func defaultErrorHandler(err error, c Context) {
-	c.Writer().Header().Set("content-type", "application/json; charset-utf8")
-	c.Writer().WriteHeader(500)
-	bs, err := json.Marshal(defaultErrResp{
-		Status:     "error",
-		StatusCode: 500,
-		Message:    err.Error(),
-	})
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	c.Writer().Write(bs)
+func (s *serveMux) Meta() RouterMeta {
+	return s.routeMeta
 }
 
 type InjectOptions struct {
 	Path    string
 	Method  string
 	Paths   map[string]string
+	Headers map[string]string
 	Cookies []http.Cookie
 	Body    io.Reader
-	Handler *HandlerOptions
+	Handler *RouteOptions
+}
+
+func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error) {
+	r, err := http.NewRequest(opts.Method, opts.Path, opts.Body)
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range opts.Paths {
+		r.SetPathValue(name, value)
+	}
+
+	for _, cookie := range opts.Cookies {
+		r.AddCookie(&cookie)
+	}
+
+	for name, value := range opts.Headers {
+		r.Header.Add(name, value)
+	}
+
+	def := opts.Handler
+	if def == nil {
+		return nil, fmt.Errorf("gofi controller not defined for the given method '%s' and path '%s'", opts.Method, opts.Path)
+	}
+
+	rules := s.compileSchema(def.Schema, def.Info)
+	rules.specs.normalize(opts.Method, opts.Path)
+
+	w := httptest.NewRecorder()
+	c := newContext(w, r)
+	var routeMeta metaMap
+	if opts.Handler.Meta != nil {
+		v := map[string]any{strings.ToLower(opts.Method): opts.Handler.Meta}
+		s.routeMeta[opts.Path] = v
+		routeMeta = s.routeMeta
+	}
+	c.setContextSettings(&rules.rules, routeMeta, s.globalStore)
+	handler := applyMiddleware(def.Handler, def.Middlewares)
+	err = handler(c)
+	if err != nil {
+		s.errHandler(err, c)
+		return w, nil
+	}
+
+	return w, nil
+}
+
+func ListenAndServe(addr string, handler http.Handler) error {
+	return http.ListenAndServe(addr, handler)
+}
+
+func (s *serveMux) route(method string, path string, opts RouteOptions) {
+
+	var rules *schemaRules
+
+	if opts.Schema != nil {
+		comps := s.compileSchema(opts.Schema, opts.Info)
+		comps.specs.normalize(method, path)
+
+		if len(s.paths[path]) == 0 {
+			v := map[string]openapiOperationObject{
+				strings.ToLower(method): comps.specs,
+			}
+
+			if !opts.Info.Hidden {
+				s.paths[path] = v
+			}
+		} else {
+			if !opts.Info.Hidden {
+				s.paths[path][strings.ToLower(method)] = comps.specs
+			}
+		}
+
+		rules = &comps.rules
+	}
+
+	if opts.Meta != nil {
+		v := map[string]any{strings.ToLower(method): opts.Meta}
+		s.routeMeta[path] = v
+	}
+
+	s.sm.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
+		c := newContext(w, r)
+		c.setContextSettings(rules, s.routeMeta, s.globalStore)
+
+		err := applyMiddleware(opts.Handler, opts.Middlewares)(c)
+		if err != nil {
+			s.errHandler(err, c)
+		}
+	})
+}
+
+func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, errH func(e error, c Context), m Middlewares) *serveMux {
+	return &serveMux{
+		sm:          sm,
+		paths:       paths,
+		routeMeta:   rm,
+		globalStore: globalStore,
+		errHandler:  errH,
+		middlewares: m,
+	}
 }

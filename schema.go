@@ -1,21 +1,221 @@
 package gofi
 
 import (
-	"log"
-	"reflect"
-	"strconv"
-	"strings"
-	"time"
+	"errors"
 
-	"github.com/michaelolof/gofi/validators"
-
-	"github.com/michaelolof/gofi/utils"
+	"github.com/michaelolof/gofi/cont"
 )
 
-type ISchema interface {
+type openapiSchema struct {
+	Format               string                   `json:"format,omitempty"`
+	Type                 string                   `json:"type,omitempty"`
+	Pattern              string                   `json:"pattern,omitempty"`
+	Default              any                      `json:"default,omitempty"`
+	Minimum              *float64                 `json:"minimum,omitempty"`
+	Maximum              *float64                 `json:"maximum,omitempty"`
+	Enum                 []any                    `json:"enum,omitempty"`
+	Items                *openapiSchema           `json:"items,omitempty"`
+	AdditionalProperties *openapiSchema           `json:"additionalProperties,omitempty"`
+	Properties           map[string]openapiSchema `json:"properties,omitempty"`
+	Required             []string                 `json:"required,omitempty"`
+	Deprecated           *bool                    `json:"deprecated,omitempty"`
+	Description          string                   `json:"description,omitempty"`
+	Example              any                      `json:"example,omitempty"`
+
+	ParentRequired bool `json:"-"`
 }
 
-type Schema struct {
+func newOpenapiSchema(format string, typ string, pattn string, deflt any, min *float64, max *float64, enum []any, items *openapiSchema, addprops *openapiSchema, properties map[string]openapiSchema, required []string, deprecated *bool, describe string, example any, pRequired bool) openapiSchema {
+	return openapiSchema{
+		Format:               format,
+		Type:                 typ,
+		Pattern:              pattn,
+		Default:              deflt,
+		Minimum:              min,
+		Maximum:              max,
+		Enum:                 enum,
+		Items:                items,
+		AdditionalProperties: addprops,
+		Properties:           properties,
+		Required:             required,
+		Deprecated:           deprecated,
+		Description:          describe,
+		Example:              example,
+		ParentRequired:       pRequired,
+	}
+}
+
+func (o *openapiSchema) IsEmpty() bool {
+	return o == nil || o.Type == ""
+}
+
+type openapiParameter struct {
+	In       string        `json:"in"`
+	Name     string        `json:"name"`
+	Required *bool         `json:"required,omitempty"`
+	Schema   openapiSchema `json:"schema,omitempty"`
+}
+
+func newOpenapiParameter(in string, name string, required *bool, schema openapiSchema) openapiParameter {
+	return openapiParameter{
+		In:       in,
+		Name:     name,
+		Required: required,
+		Schema:   schema,
+	}
+}
+
+type openapiParameters []openapiParameter
+
+func (o openapiParameters) findByNameIn(name string, in string) *openapiParameter {
+	for _, v := range o {
+		if v.Name == name && v.In == in {
+			return &v
+		}
+	}
+	return nil
+}
+
+type openapiMediaObject struct {
+	Schema openapiSchema `json:"schema,omitempty"`
+}
+
+type openapiRequestObject struct {
+	Description string                        `json:"description,omitempty"`
+	Required    bool                          `json:"required,omitempty"`
+	Content     map[string]openapiMediaObject `json:"content,omitempty"`
+}
+
+type openapiHeaderObject struct {
+	Required *bool         `json:"required,omitempty"`
+	Schema   openapiSchema `json:"schema,omitempty"`
+	value    string
+}
+
+func newOpenapiHeaderObject(required *bool, value string, schema openapiSchema) openapiHeaderObject {
+	return openapiHeaderObject{
+		Required: required,
+		value:    value,
+		Schema:   schema,
+	}
+}
+
+type openapiResponseObject struct {
+	Description string                         `json:"description,omitempty"`
+	Headers     map[string]openapiHeaderObject `json:"headers,omitempty"`
+	Required    bool                           `json:"required,omitempty"`
+	Content     map[string]openapiMediaObject  `json:"content,omitempty"`
+}
+
+type openapiOperationObject struct {
+	OperationId  string                           `json:"operationId,omitempty"`
+	Summary      string                           `json:"summary,omitempty"`
+	Description  string                           `json:"description,omitempty"`
+	Deprecated   *bool                            `json:"deprecated,omitempty"`
+	Parameters   openapiParameters                `json:"parameters,omitempty"`
+	RequestBody  *openapiRequestObject            `json:"requestBody,omitempty"`
+	Responses    map[string]openapiResponseObject `json:"responses,omitempty"`
+	ExternalDocs []ExternalDocs                   `json:"externalDocs,omitempty"`
+
+	urlPath             string
+	method              string
+	bodySchema          openapiSchema
+	responsesParameters map[string]openapiParameters
+	responsesSchema     map[string]openapiSchema
+}
+
+func initOpenapiOperationObject() openapiOperationObject {
+	return openapiOperationObject{
+		Responses:           make(map[string]openapiResponseObject),
+		responsesParameters: make(map[string]openapiParameters),
+		responsesSchema:     make(map[string]openapiSchema),
+	}
+}
+
+func (o *openapiOperationObject) normalize(method string, path string) {
+
+	o.method = method
+	o.urlPath = path
+
+	if !o.bodySchema.IsEmpty() {
+		var contentType = string(cont.AnyContenType)
+		if v := o.Parameters.findByNameIn("content-type", "header"); v != nil {
+			if def, ok := v.Schema.Default.(string); ok && def != "" {
+				contentType = def
+			}
+		}
+
+		o.RequestBody = &openapiRequestObject{
+			Required: o.bodySchema.ParentRequired,
+			Content: map[string]openapiMediaObject{
+				contentType: {
+					Schema: o.bodySchema,
+				},
+			},
+		}
+	}
+
+	if len(o.responsesParameters) > 0 || len(o.responsesSchema) > 0 {
+		if o.Responses == nil {
+			o.Responses = make(map[string]openapiResponseObject)
+		}
+
+		for field, params := range o.responsesParameters {
+			sinfos := statuses[field]
+
+			for _, sinfo := range sinfos {
+				headersMap := make(map[string]openapiHeaderObject)
+				for _, param := range params {
+					if param.In == "header" {
+						v, ok := param.Schema.Default.(string)
+						if !ok || v == "" {
+							v = string(cont.AnyContenType)
+						}
+						headersMap[param.Name] = newOpenapiHeaderObject(param.Required, v, param.Schema)
+					}
+				}
+
+				if v, ok := o.Responses[sinfo.Code]; ok {
+					v.Headers = headersMap
+					v.Description = sinfo.Description
+				} else {
+					o.Responses[sinfo.Code] = openapiResponseObject{Headers: headersMap, Description: sinfo.Description}
+				}
+			}
+		}
+
+		for field, schema := range o.responsesSchema {
+			sinfo := statuses[field]
+
+			for _, sinfo := range sinfo {
+				contentType := string(cont.AnyContenType)
+				if v, ok := o.Responses[sinfo.Code]; ok {
+					v.Description = sinfo.Description
+					if c, ok := v.Headers["content-type"]; ok {
+						contentType = c.value
+					}
+					v.Content = map[string]openapiMediaObject{
+						contentType: {
+							Schema: schema,
+						},
+					}
+					v.Required = schema.ParentRequired
+					o.Responses[sinfo.Code] = v
+				} else {
+					o.Responses[sinfo.Code] = openapiResponseObject{
+						Required:    schema.ParentRequired,
+						Description: sinfo.Description,
+						Content: map[string]openapiMediaObject{
+							contentType: {
+								Schema: schema,
+							},
+						},
+					}
+				}
+			}
+		}
+	}
+
 }
 
 type Info struct {
@@ -61,440 +261,15 @@ func (s schemaField) reqSchemaIn() string {
 	}
 }
 
-type routeSchema struct {
-	specs openapiOperationObject
-	rules schemaRules
+func runValidation(typ errorType, val any, schema schemaField, keypath string, rules []ruleOpts) error {
+	errs := make([]error, 0, len(rules))
+
+	for _, rule := range rules {
+		err := rule.dator(val)
+		if err != nil {
+			errs = append(errs, newErrReport(typ, schema, keypath, rule.rule, err))
+		}
+	}
+
+	return errors.Join(errs...)
 }
-
-func compileSchema(schema ISchema, info Info) routeSchema {
-
-	var strct = reflect.TypeOf(schema)
-	if strct.Kind() == reflect.Pointer || strct.Kind() == reflect.Interface {
-		strct = strct.Elem()
-	}
-
-	optsObj := initOpenapiOperationObject()
-	sRules := newSchemaRules()
-
-	optsObj.OperationId = info.OperationId
-	optsObj.method = info.Method
-	optsObj.Summary = info.Summary
-	optsObj.urlPath = info.Url
-	optsObj.Description = info.Description
-	optsObj.ExternalDocs = info.ExternalDocs
-	if info.Deprecated {
-		optsObj.Deprecated = &info.Deprecated
-	}
-
-	for _, sf := range reflect.VisibleFields(strct) {
-
-		// Schena fields must be a struct to be valid
-		if sf.Type.Kind() != reflect.Struct {
-			continue
-		}
-
-		obj := reflect.ValueOf(schema).Elem().FieldByName(sf.Name)
-
-		if sf.Name == string(schemaReq) {
-			for _, rqf := range reflect.VisibleFields(sf.Type) {
-				rqn := schemaField(rqf.Name)
-				kind := rqf.Type.Kind()
-
-				switch rqn {
-				case schemaHeaders, schemaCookies, schemaQuery, schemaPath:
-					if kind != reflect.Struct {
-						continue
-					}
-
-					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
-					pruleDefs := newRuleDef(kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
-					in := rqn.reqSchemaIn()
-
-					for _, rqff := range reflect.VisibleFields(rqf.Type) {
-						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
-						name := getFieldName(rqff)
-						if in == "header" {
-							name = strings.ToLower(name)
-						}
-						ruleDefs := getFieldRuleDefs(rqff, name, val)
-						pruleDefs.attach(name, ruleDefs)
-						var required *bool
-						if v := ruleDefs.hasRule("required"); v {
-							required = &v
-						}
-
-						tInfo := getTypeInfo(rqff.Type, val, name, ruleDefs)
-						optsObj.Parameters = append(
-							optsObj.Parameters,
-							newOpenapiParameters(in, name, required, tInfo),
-						)
-						sRules.setReq(sf.Name, pruleDefs)
-					}
-
-				case schemaBody:
-					val := getPrimitiveValFromParent(obj, rqf)
-					name := getFieldName(rqf)
-					ruleDefs := getFieldRuleDefs(rqf, name, val)
-					optsObj.bodySchema = getTypeInfo(rqf.Type, val, name, ruleDefs)
-					sRules.setReq(sf.Name, ruleDefs)
-				}
-			}
-		} else if _, ok := statuses[sf.Name]; ok {
-			for _, rqf := range reflect.VisibleFields(sf.Type) {
-				rqn := schemaField(rqf.Name)
-				kind := rqf.Type.Kind()
-				responseParameters := make(openapiParameters, 0, 10)
-
-				switch rqn {
-				case schemaHeaders, schemaCookies:
-					if kind != reflect.Struct {
-						continue
-					}
-
-					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
-					pruleDefs := newRuleDef(kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
-					in := rqn.reqSchemaIn()
-
-					for _, rqff := range reflect.VisibleFields(rqf.Type) {
-						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
-						name := getFieldName(rqff)
-						ruleDefs := getFieldRuleDefs(rqff, name, val)
-						pruleDefs.attach(name, ruleDefs)
-						var required *bool
-						if v := ruleDefs.hasRule("required"); v {
-							required = &v
-						}
-
-						tInfo := getTypeInfo(rqff.Type, val, name, ruleDefs)
-						responseParameters = append(
-							responseParameters,
-							newOpenapiParameters(in, name, required, tInfo),
-						)
-						sRules.setResps(sf.Name, pruleDefs)
-					}
-					optsObj.responsesParameters[sf.Name] = responseParameters
-
-				case schemaBody:
-					val := getPrimitiveValFromParent(obj, rqf)
-					name := getFieldName(rqf)
-					ruleDefs := getFieldRuleDefs(rqf, name, val)
-					optsObj.responsesSchema[sf.Name] = getTypeInfo(rqf.Type, val, name, ruleDefs)
-					sRules.setResps(sf.Name, ruleDefs)
-				}
-			}
-		}
-	}
-
-	return routeSchema{
-		specs: optsObj,
-		rules: sRules,
-	}
-}
-
-func getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *ruleDef) openapiSchema {
-
-	kind := typ.Kind()
-
-	var typeStr string
-	var pattern string
-	var format string
-	var enum []any
-	var optStr []string
-	var min *float64
-	var max *float64
-	var items *openapiSchema
-	var addProps *openapiSchema
-	var example any
-	var deprecated *bool
-	var description string
-	properties := make(map[string]openapiSchema)
-	requiredProps := make([]string, 0)
-
-	var pRequired bool
-
-	if ruleDefs != nil {
-		minOpts := ruleDefs.ruleOptions("min")
-		minOpts = append(minOpts, ruleDefs.ruleOptions("gte")...)
-		for _, opt := range minOpts {
-			i, err := strconv.ParseFloat(opt, 64)
-			if err == nil {
-				min = &i
-				break
-			}
-		}
-
-		maxOpts := ruleDefs.ruleOptions("max")
-		maxOpts = append(maxOpts, ruleDefs.ruleOptions("lte")...)
-		for _, opt := range maxOpts {
-			i, err := strconv.ParseFloat(opt, 64)
-			if err == nil {
-				max = &i
-				break
-			}
-		}
-
-		// var items structFieldInfo
-		optStr = ruleDefs.ruleOptions("oneof")
-		pRequired = ruleDefs.required
-
-		if v, ok := ruleDefs.xtraTags["example"]; ok {
-			if v, err := validators.PrimitiveFromStr(typ.Kind(), v); err == nil && validators.IsPrimitive(v) {
-				example = v
-			}
-		}
-
-		if v, ok := ruleDefs.xtraTags["deprecated"]; ok {
-			if v, err := strconv.ParseBool(v); err == nil && v {
-				deprecated = &v
-			}
-		}
-
-		if v, ok := ruleDefs.xtraTags["description"]; ok {
-			description = v
-		}
-
-		if v, ok := ruleDefs.xtraTags["pattern"]; ok {
-			pattern = v
-		}
-	}
-
-	switch kind {
-	case reflect.String:
-		enum = optsMapper(optStr, nil)
-		format = ruleDefs.findRules([]string{"date", "date-time", "password", "byte", "binary", "email", "uuid", "uri", "hostname", "ipv4", "ipv6"}, "")
-		typeStr = "string"
-
-	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Uint8, reflect.Uint16, reflect.Uint32:
-		enum = optsMapper(optStr, func(s string) any {
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
-			}
-			return int32(v)
-		})
-		format = "int32"
-		typeStr = "integer"
-
-	case reflect.Int, reflect.Int64, reflect.Uint, reflect.Uint64:
-		enum = optsMapper(optStr, func(s string) any {
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
-			}
-			return int64(v)
-		})
-		format = "int64"
-		typeStr = "integer"
-
-	case reflect.Float32, reflect.Float64:
-		enum = optsMapper(optStr, func(s string) any {
-			v, err := strconv.ParseFloat(s, 32)
-			if err != nil {
-				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
-			}
-			return float64(v)
-		})
-		format = "float"
-		typeStr = "number"
-
-	case reflect.Bool:
-		enum = []any{true, false}
-		typeStr = "boolean"
-		format = "bool"
-
-	case reflect.Slice, reflect.Array:
-		typeStr = "array"
-		_ruleDefs := getItemRuleDef(typ.Elem())
-		ruleDefs.append(_ruleDefs)
-		i := getTypeInfo(typ.Elem(), value, name, _ruleDefs)
-		items = &i
-
-	case reflect.Map:
-		typeStr = "object"
-		_ruleDefs := getItemRuleDef(typ.Elem())
-		ruleDefs.addProps(_ruleDefs)
-		i := getTypeInfo(typ.Elem(), value, name, _ruleDefs)
-		addProps = &i
-
-	case reflect.Struct:
-		switch typ {
-		case utils.TimeType:
-			enum = optsMapper(optStr, nil)
-			typeStr = "string"
-			format = string(utils.TimeObjectFormat)
-			ruleDefs.format = utils.TimeObjectFormat
-			if pattern == "" {
-				pattern = time.RFC3339Nano
-			}
-
-		case utils.CookieType:
-			enum = optsMapper(optStr, nil)
-			typeStr = "string"
-			format = string(utils.CookieObjectFormat)
-			ruleDefs.format = utils.CookieObjectFormat
-
-		default:
-			typeStr = "object"
-			obj := reflect.ValueOf(value)
-			for _, sf := range reflect.VisibleFields(typ) {
-				val := getPrimitiveValFromParent(obj, sf)
-				name := getFieldName(sf)
-				_ruleDefs := getFieldRuleDefs(sf, name, val)
-				ruleDefs.attach(name, _ruleDefs)
-				if _ruleDefs.hasRule("required") {
-					requiredProps = append(requiredProps, name)
-				}
-				properties[name] = getTypeInfo(sf.Type, val, name, _ruleDefs)
-			}
-		}
-
-	case reflect.Pointer:
-		ruleDefs.kind = typ.Elem().Kind()
-		return getTypeInfo(typ.Elem(), value, name, ruleDefs)
-	}
-
-	ruleDefs.pattern = pattern
-
-	return newOpenapiSchema(
-		format,
-		typeStr,
-		pattern,
-		value,
-		min,
-		max,
-		enum,
-		items,
-		addProps,
-		properties,
-		requiredProps,
-		deprecated,
-		description,
-		example,
-		pRequired,
-	)
-}
-
-func getItemRuleDef(typ reflect.Type) *ruleDef {
-	return newRuleDef(typ.Kind(), "", "", "", nil, nil, false, nil, nil, nil, nil)
-}
-
-func getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *ruleDef {
-	xtraTags := []string{"example", "deprecated", "description", "pattern"}
-
-	vtags := strings.Split(sf.Tag.Get("validate"), ",")
-	defStr := sf.Tag.Get("default")
-	if len(vtags) == 0 || vtags[0] == "" {
-		rtn := newRuleDef(sf.Type.Kind(), tagName, sf.Name, defStr, defVal, nil, false, nil, nil, nil, nil)
-		rtn.xtraTags = make(map[string]string)
-		for _, tag := range xtraTags {
-			if v, ok := sf.Tag.Lookup(tag); ok {
-				rtn.xtraTags[tag] = v
-			}
-		}
-
-		return rtn
-	}
-
-	required := false
-	var max *float64 = nil
-	rules := make([]ruleOpts, 0, len(vtags))
-	for _, tag := range vtags {
-		v := strings.Split(tag, "=")
-		var options []string
-		if len(v) > 1 {
-			options = strings.Split(v[1], " ")
-		}
-
-		if v[0] == "required" {
-			required = true
-		}
-
-		if (v[0] == "max" || v[0] == "lte") && len(v) > 1 {
-			flt, err := strconv.ParseFloat(options[0], 64)
-			if err == nil {
-				max = &flt
-			}
-		}
-
-		rules = append(rules, newRuleOpts(sf.Type.Kind(), v[0], options))
-	}
-
-	rtn := newRuleDef(sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
-	rtn.xtraTags = make(map[string]string)
-
-	for _, tag := range xtraTags {
-		if v, ok := sf.Tag.Lookup(tag); ok {
-			rtn.xtraTags[tag] = v
-		}
-	}
-
-	return rtn
-}
-
-func getFieldName(sf reflect.StructField) string {
-	jsonTags := strings.Split(sf.Tag.Get("json"), ",")
-	var name string
-	if len(jsonTags) > 0 && jsonTags[0] != "" {
-		name = jsonTags[0]
-	} else {
-		name = sf.Name
-	}
-	return name
-}
-
-func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any {
-	var fieldVal any
-	if parent.IsValid() && parent.Kind() == reflect.Struct {
-		fv := parent.FieldByName(f.Name)
-		if fv.IsValid() && fv.Comparable() {
-			fieldVal = fv.Interface()
-			if kt := reflect.New(f.Type).Elem(); kt.IsValid() && kt.Comparable() {
-				ktv := kt.Interface()
-				if fieldVal != ktv {
-					return fieldVal
-				}
-			}
-		}
-	}
-	tagVal := f.Tag.Get("default")
-	kind := f.Type.Kind()
-
-	val, err := validators.PrimitiveFromStr(kind, tagVal)
-	if err != nil {
-		if fieldVal != nil {
-			return fieldVal
-		} else {
-			return nil
-		}
-	}
-
-	if validators.NotPrimitive(val) {
-		return nil
-	}
-
-	return val
-}
-
-func optsMapper(opts []string, fn func(string) any) []any {
-	if opts == nil {
-		return nil
-	}
-
-	ropts := make([]any, 0, len(opts))
-	for _, opt := range opts {
-		var v any
-		if fn != nil {
-			v = fn(opt)
-		} else {
-			v = opt
-		}
-
-		ropts = append(ropts, v)
-	}
-	return ropts
-}
-
-// ipType         = reflect.TypeOf(net.IP{})
-// ipAddrType     = reflect.TypeOf(netip.Addr{})
-// urlType        = reflect.TypeOf(url.URL{})
-// rawMessageType = reflect.TypeOf(json.RawMessage{})
