@@ -339,11 +339,10 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 		default:
 			isCustom := false
 			for id, ctype := range s.opts.customSchema {
-				if ctype.MatchType(typ) {
-					ts := ctype.CustomOpenapiTypes(typ)
+				if v, ok := ctype.IsCustomType(typ); ok {
 					enum = optsMapper(optStr, nil)
-					typeStr = ts.Type
-					format = ts.Format
+					typeStr = v.Type
+					format = v.Format
 					ruleDefs.format = utils.ObjectFormats(id)
 					isCustom = true
 					break

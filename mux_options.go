@@ -21,13 +21,12 @@ func defaultMuxOptions() *muxOptions {
 type CustomSchemaTypes map[string]CustomSchemaType
 
 type CustomSchemaType interface {
-	MatchType(typ reflect.Type) bool
-	CustomOpenapiTypes(typ reflect.Type) CustomOpenapiTypes
-	BindValueToType(val any) (any, error)
-	GetPrimitiveValue(obj any) (string, error)
+	IsCustomType(typ reflect.Type) (*CustomSchemaProps, bool)
+	CustomEncode(val any) (any, error)
+	CustomDecode(obj any) (string, error)
 }
 
-type CustomOpenapiTypes struct {
+type CustomSchemaProps struct {
 	Type   string
 	Format string
 }

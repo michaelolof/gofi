@@ -185,7 +185,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 				}
 			default:
 				if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
-					val, err = ctype.BindValueToType(qv)
+					val, err = ctype.CustomEncode(qv)
 					if err != nil {
 						return newErrReport(RequestErr, field, def.field, "typeCast", err)
 					}

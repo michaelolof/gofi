@@ -16,15 +16,15 @@ func TestCompilerHooksOpenAPISpecs(t *testing.T) {
 	type testSchema struct {
 		Ok struct {
 			Body struct {
-				Primitive string            `json:"primitive" validate:"required"`
-				Special   time.Time         `json:"special" validate:"required"`
-				Custom    specialStringType `json:"custom" validate:"required"`
+				Primitive string        `json:"primitive" validate:"required"`
+				Special   time.Time     `json:"special" validate:"required"`
+				Custom    specialString `json:"custom" validate:"required"`
 			}
 		}
 	}
 
 	r := newServeMux()
-	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &compilerHook{}})
+	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &specialStringResolver{}})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
@@ -38,8 +38,8 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 	type testSchema struct {
 		Request struct {
 			Path struct {
-				Primitive string            `json:"primitive" validate:"required"`
-				Custom    specialStringType `json:"custom" validate:"required"`
+				Primitive string        `json:"primitive" validate:"required"`
+				Custom    specialString `json:"custom" validate:"required"`
 			}
 		}
 	}
@@ -59,7 +59,7 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &compilerHook{}})
+	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &specialStringResolver{}})
 	r.Inject(InjectOptions{
 		Path:   "/test/:primitive/:custom",
 		Method: "GET",
@@ -73,8 +73,8 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 
 func TestCompilerHooksBindedResponse(t *testing.T) {
 	type testSchemaBody struct {
-		Primitive string            `json:"primitive" validate:"required"`
-		Custom    specialStringType `json:"custom" validate:"required"`
+		Primitive string        `json:"primitive" validate:"required"`
+		Custom    specialString `json:"custom" validate:"required"`
 	}
 
 	type testSchema struct {
@@ -92,13 +92,13 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 			}
 
 			s.Ok.Body.Primitive = "john"
-			s.Ok.Body.Custom = specialStringType{val: "doe"}
+			s.Ok.Body.Custom = specialString{val: "doe"}
 			return c.JSON(200, s.Ok)
 		},
 	}
 
 	r := newServeMux()
-	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &compilerHook{}})
+	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &specialStringResolver{}})
 	resp, err := r.Inject(InjectOptions{
 		Path:    "/test/:primitive/:custom",
 		Method:  "GET",
@@ -118,35 +118,35 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	assert.Equal(t, data.Custom.Val(), "doe")
 }
 
-type specialStringType struct {
+type specialString struct {
 	val string
 }
 
-func (s *specialStringType) Val() string {
+func (s *specialString) Val() string {
 	return s.val
 }
 
-type compilerHook struct {
+type specialStringResolver struct {
 }
 
-func (c *compilerHook) MatchType(t reflect.Type) bool {
-	return t == reflect.TypeOf(specialStringType{})
+func (c *specialStringResolver) IsCustomType(t reflect.Type) (*CustomSchemaProps, bool) {
+	if t == reflect.TypeOf(specialString{}) {
+		return &CustomSchemaProps{Type: "string", Format: "string"}, true
+	} else {
+		return nil, false
+	}
 }
 
-func (c *compilerHook) CustomOpenapiTypes(t reflect.Type) CustomOpenapiTypes {
-	return CustomOpenapiTypes{Type: "string", Format: "string"}
-}
-
-func (c *compilerHook) BindValueToType(val any) (any, error) {
+func (c *specialStringResolver) CustomEncode(val any) (any, error) {
 	if v, ok := val.(string); ok {
-		return specialStringType{val: v}, nil
+		return specialString{val: v}, nil
 	} else {
 		return nil, errors.New("error casting special string type")
 	}
 }
 
-func (c *compilerHook) GetPrimitiveValue(val any) (string, error) {
-	if v, ok := val.(specialStringType); ok {
+func (c *specialStringResolver) CustomDecode(val any) (string, error) {
+	if v, ok := val.(specialString); ok {
 		return v.Val(), nil
 	} else {
 		return "", errors.New("unknown value type. unable to convert to string")
