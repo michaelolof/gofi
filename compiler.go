@@ -261,95 +261,95 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 		}
 	}
 
-	switch kind {
-	case reflect.String:
-		enum = optsMapper(optStr, nil)
-		format = ruleDefs.findRules([]string{"date", "date-time", "password", "byte", "binary", "email", "uuid", "uri", "hostname", "ipv4", "ipv6"}, "")
-		typeStr = "string"
-
-	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Uint8, reflect.Uint16, reflect.Uint32:
-		enum = optsMapper(optStr, func(s string) any {
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
-			}
-			return int32(v)
-		})
-		format = "int32"
-		typeStr = "integer"
-
-	case reflect.Int, reflect.Int64, reflect.Uint, reflect.Uint64:
-		enum = optsMapper(optStr, func(s string) any {
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
-			}
-			return int64(v)
-		})
-		format = "int64"
-		typeStr = "integer"
-
-	case reflect.Float32, reflect.Float64:
-		enum = optsMapper(optStr, func(s string) any {
-			v, err := strconv.ParseFloat(s, 32)
-			if err != nil {
-				log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
-			}
-			return float64(v)
-		})
-		format = "float"
-		typeStr = "number"
-
-	case reflect.Bool:
-		enum = []any{true, false}
-		format = "bool"
-		typeStr = "boolean"
-
-	case reflect.Slice, reflect.Array:
-		typeStr = "array"
-		_ruleDefs := getItemRuleDef(typ.Elem())
-		ruleDefs.append(_ruleDefs)
-		i := s.getTypeInfo(typ.Elem(), value, name, _ruleDefs)
-		items = &i
-
-	case reflect.Map:
-		typeStr = "object"
-		_ruleDefs := getItemRuleDef(typ.Elem())
-		ruleDefs.addProps(_ruleDefs)
-		i := s.getTypeInfo(typ.Elem(), value, name, _ruleDefs)
-		addProps = &i
-
-	case reflect.Struct:
-		switch typ {
-		case utils.TimeType:
+	isCustom := false
+	for id, ctype := range s.opts.customSchema {
+		if v, ok := ctype.IsCustomType(typ); ok {
 			enum = optsMapper(optStr, nil)
-			typeStr = "string"
-			format = string(utils.TimeObjectFormat)
-			ruleDefs.format = utils.TimeObjectFormat
-			if pattern == "" {
-				pattern = time.RFC3339Nano
-			}
+			typeStr = v.Type
+			format = v.Format
+			ruleDefs.format = utils.ObjectFormats(id)
+			isCustom = true
+			break
+		}
+	}
 
-		case utils.CookieType:
+	if !isCustom {
+		switch kind {
+		case reflect.String:
 			enum = optsMapper(optStr, nil)
+			format = ruleDefs.findRules([]string{"date", "date-time", "password", "byte", "binary", "email", "uuid", "uri", "hostname", "ipv4", "ipv6"}, "")
 			typeStr = "string"
-			format = string(utils.CookieObjectFormat)
-			ruleDefs.format = utils.CookieObjectFormat
 
-		default:
-			isCustom := false
-			for id, ctype := range s.opts.customSchema {
-				if v, ok := ctype.IsCustomType(typ); ok {
-					enum = optsMapper(optStr, nil)
-					typeStr = v.Type
-					format = v.Format
-					ruleDefs.format = utils.ObjectFormats(id)
-					isCustom = true
-					break
+		case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Uint8, reflect.Uint16, reflect.Uint32:
+			enum = optsMapper(optStr, func(s string) any {
+				v, err := strconv.Atoi(s)
+				if err != nil {
+					log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
 				}
-			}
+				return int32(v)
+			})
+			format = "int32"
+			typeStr = "integer"
 
-			if !isCustom {
+		case reflect.Int, reflect.Int64, reflect.Uint, reflect.Uint64:
+			enum = optsMapper(optStr, func(s string) any {
+				v, err := strconv.Atoi(s)
+				if err != nil {
+					log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+				}
+				return int64(v)
+			})
+			format = "int64"
+			typeStr = "integer"
+
+		case reflect.Float32, reflect.Float64:
+			enum = optsMapper(optStr, func(s string) any {
+				v, err := strconv.ParseFloat(s, 32)
+				if err != nil {
+					log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+				}
+				return float64(v)
+			})
+			format = "float"
+			typeStr = "number"
+
+		case reflect.Bool:
+			enum = []any{true, false}
+			format = "bool"
+			typeStr = "boolean"
+
+		case reflect.Slice, reflect.Array:
+			typeStr = "array"
+			_ruleDefs := getItemRuleDef(typ.Elem())
+			ruleDefs.append(_ruleDefs)
+			i := s.getTypeInfo(typ.Elem(), value, name, _ruleDefs)
+			items = &i
+
+		case reflect.Map:
+			typeStr = "object"
+			_ruleDefs := getItemRuleDef(typ.Elem())
+			ruleDefs.addProps(_ruleDefs)
+			i := s.getTypeInfo(typ.Elem(), value, name, _ruleDefs)
+			addProps = &i
+
+		case reflect.Struct:
+			switch typ {
+			case utils.TimeType:
+				enum = optsMapper(optStr, nil)
+				typeStr = "string"
+				format = string(utils.TimeObjectFormat)
+				ruleDefs.format = utils.TimeObjectFormat
+				if pattern == "" {
+					pattern = time.RFC3339Nano
+				}
+
+			case utils.CookieType:
+				enum = optsMapper(optStr, nil)
+				typeStr = "string"
+				format = string(utils.CookieObjectFormat)
+				ruleDefs.format = utils.CookieObjectFormat
+
+			default:
 				typeStr = "object"
 				obj := reflect.ValueOf(value)
 				for _, sf := range reflect.VisibleFields(typ) {
@@ -366,13 +366,13 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 					}
 					properties[name] = s.getTypeInfo(sf.Type, val, name, _ruleDefs)
 				}
+
 			}
 
+		case reflect.Pointer:
+			ruleDefs.kind = typ.Elem().Kind()
+			return s.getTypeInfo(typ.Elem(), value, name, ruleDefs)
 		}
-
-	case reflect.Pointer:
-		ruleDefs.kind = typ.Elem().Kind()
-		return s.getTypeInfo(typ.Elem(), value, name, ruleDefs)
 	}
 
 	ruleDefs.pattern = pattern
