@@ -237,26 +237,42 @@ func (c *context) buildAndValidateJsonStruct(bs *buildState, def ruleDef, val re
 			} else {
 				return newErrReport(ResponseErr, schemaBody, kp, "typeMismatch", errors.New("could not cast given time value to string"))
 			}
+
 		default:
-			bs.appendByte('{')
-			l := len(def.properties)
-			count := 0
-			for pkey, pval := range def.properties {
-				bs.appendByte('"')
-				bs.appendBytes([]byte(pkey))
-				bs.appendByte('"')
-				bs.appendByte(':')
-				err := c.buildAndValidateJsonStruct(bs, *pval, val.FieldByName(pval.name), append(keys, pkey))
-				if err != nil {
-					return err
+			if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
+				if val.IsValid() {
+					v, err := ctype.GetPrimitiveValue(val.Interface())
+					if err != nil {
+						return newErrReport(ResponseErr, schemaBody, kp, "typeMismatch", err)
+					}
+					bs.appendByte('"')
+					bs.appendStr(v)
+					bs.appendByte('"')
+					return nil
+				} else {
+					return newErrReport(ResponseErr, schemaBody, kp, "typeMismatch", errors.New("could not cast given time value to string"))
 				}
-				count++
-				if count < l {
-					bs.appendByte(',')
+			} else {
+				bs.appendByte('{')
+				l := len(def.properties)
+				count := 0
+				for pkey, pval := range def.properties {
+					bs.appendByte('"')
+					bs.appendBytes([]byte(pkey))
+					bs.appendByte('"')
+					bs.appendByte(':')
+					err := c.buildAndValidateJsonStruct(bs, *pval, val.FieldByName(pval.name), append(keys, pkey))
+					if err != nil {
+						return err
+					}
+					count++
+					if count < l {
+						bs.appendByte(',')
+					}
 				}
+				bs.appendByte('}')
+				return nil
 			}
-			bs.appendByte('}')
-			return nil
 		}
 	case reflect.Array, reflect.Slice:
 		l := val.Len()

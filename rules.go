@@ -23,8 +23,8 @@ func newRuleOpts(kind reflect.Kind, rule string, opts []string, muxOpts *muxOpti
 	}
 
 	var customValidators validators.MappedValidators
-	if muxOpts != nil && muxOpts.CustomValidators != nil {
-		customValidators = muxOpts.CustomValidators
+	if muxOpts != nil && muxOpts.customValidators != nil {
+		customValidators = muxOpts.customValidators
 	}
 
 	return ruleOpts{

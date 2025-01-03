@@ -37,6 +37,7 @@ type context struct {
 	routeMeta   metaMap
 	globalStore ReadOnlyStore
 	dataStore   GofiStore
+	serverOpts  *muxOptions
 }
 
 func newContext(w http.ResponseWriter, r *http.Request) *context {
@@ -46,6 +47,7 @@ func newContext(w http.ResponseWriter, r *http.Request) *context {
 		routeMeta:   map[string]map[string]any{},
 		globalStore: NewGlobalStore(),
 		dataStore:   NewDataStore(),
+		serverOpts:  defaultMuxOptions(),
 	}
 }
 
@@ -135,10 +137,11 @@ func ValidateAndBind[T any](c Context) (*T, error) {
 	return s, nil
 }
 
-func (c *context) setContextSettings(rules *schemaRules, routeMeta metaMap, globalStore GofiStore) {
+func (c *context) setContextSettings(rules *schemaRules, routeMeta metaMap, globalStore GofiStore, serverOpts *muxOptions) {
 	c.rules = rules
 	c.routeMeta = routeMeta
 	c.globalStore = globalStore
+	c.serverOpts = serverOpts
 }
 
 func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
@@ -181,7 +184,14 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 					return newErrReport(RequestErr, field, def.field, "typeCast", err)
 				}
 			default:
-				return newErrReport(RequestErr, field, def.field, "typeCast", err)
+				if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
+					val, err = ctype.BindValueToType(qv)
+					if err != nil {
+						return newErrReport(RequestErr, field, def.field, "typeCast", err)
+					}
+				} else {
+					return newErrReport(RequestErr, field, def.field, "typeCast", err)
+				}
 			}
 		}
 

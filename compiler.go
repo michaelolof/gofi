@@ -141,50 +141,6 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	}
 }
 
-func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any {
-	var fieldVal any
-	if parent.IsValid() && parent.Kind() == reflect.Struct {
-		fv := parent.FieldByName(f.Name)
-		if fv.IsValid() && fv.Comparable() {
-			fieldVal = fv.Interface()
-			if kt := reflect.New(f.Type).Elem(); kt.IsValid() && kt.Comparable() {
-				ktv := kt.Interface()
-				if fieldVal != ktv {
-					return fieldVal
-				}
-			}
-		}
-	}
-	tagVal := f.Tag.Get("default")
-	kind := f.Type.Kind()
-
-	val, err := validators.PrimitiveFromStr(kind, tagVal)
-	if err != nil {
-		if fieldVal != nil {
-			return fieldVal
-		} else {
-			return nil
-		}
-	}
-
-	if validators.NotPrimitive(val) {
-		return nil
-	}
-
-	return val
-}
-
-func getFieldName(sf reflect.StructField) string {
-	jsonTags := strings.Split(sf.Tag.Get("json"), ",")
-	var name string
-	if len(jsonTags) > 0 && jsonTags[0] != "" {
-		name = jsonTags[0]
-	} else {
-		name = sf.Name
-	}
-	return name
-}
-
 func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *ruleDef {
 	xtraTags := []string{"example", "deprecated", "description", "pattern"}
 
@@ -346,8 +302,8 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 
 	case reflect.Bool:
 		enum = []any{true, false}
-		typeStr = "boolean"
 		format = "bool"
+		typeStr = "boolean"
 
 	case reflect.Slice, reflect.Array:
 		typeStr = "array"
@@ -381,23 +337,38 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 			ruleDefs.format = utils.CookieObjectFormat
 
 		default:
-
-			typeStr = "object"
-			obj := reflect.ValueOf(value)
-			for _, sf := range reflect.VisibleFields(typ) {
-				val := getPrimitiveValFromParent(obj, sf)
-				name := getFieldName(sf)
-				if name == "-" {
-					continue
+			isCustom := false
+			for id, ctype := range s.opts.customSchema {
+				if ctype.MatchType(typ) {
+					ts := ctype.CustomOpenapiTypes(typ)
+					enum = optsMapper(optStr, nil)
+					typeStr = ts.Type
+					format = ts.Format
+					ruleDefs.format = utils.ObjectFormats(id)
+					isCustom = true
+					break
 				}
-
-				_ruleDefs := s.getFieldRuleDefs(sf, name, val)
-				ruleDefs.attach(name, _ruleDefs)
-				if _ruleDefs.hasRule("required") {
-					requiredProps = append(requiredProps, name)
-				}
-				properties[name] = s.getTypeInfo(sf.Type, val, name, _ruleDefs)
 			}
+
+			if !isCustom {
+				typeStr = "object"
+				obj := reflect.ValueOf(value)
+				for _, sf := range reflect.VisibleFields(typ) {
+					val := getPrimitiveValFromParent(obj, sf)
+					name := getFieldName(sf)
+					if name == "-" {
+						continue
+					}
+
+					_ruleDefs := s.getFieldRuleDefs(sf, name, val)
+					ruleDefs.attach(name, _ruleDefs)
+					if _ruleDefs.hasRule("required") {
+						requiredProps = append(requiredProps, name)
+					}
+					properties[name] = s.getTypeInfo(sf.Type, val, name, _ruleDefs)
+				}
+			}
+
 		}
 
 	case reflect.Pointer:
@@ -426,6 +397,50 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 	)
 }
 
+func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any {
+	var fieldVal any
+	if parent.IsValid() && parent.Kind() == reflect.Struct {
+		fv := parent.FieldByName(f.Name)
+		if fv.IsValid() && fv.Comparable() {
+			fieldVal = fv.Interface()
+			if kt := reflect.New(f.Type).Elem(); kt.IsValid() && kt.Comparable() {
+				ktv := kt.Interface()
+				if fieldVal != ktv {
+					return fieldVal
+				}
+			}
+		}
+	}
+	tagVal := f.Tag.Get("default")
+	kind := f.Type.Kind()
+
+	val, err := validators.PrimitiveFromStr(kind, tagVal)
+	if err != nil {
+		if fieldVal != nil {
+			return fieldVal
+		} else {
+			return nil
+		}
+	}
+
+	if validators.NotPrimitive(val) {
+		return nil
+	}
+
+	return val
+}
+
+func getFieldName(sf reflect.StructField) string {
+	jsonTags := strings.Split(sf.Tag.Get("json"), ",")
+	var name string
+	if len(jsonTags) > 0 && jsonTags[0] != "" {
+		name = jsonTags[0]
+	} else {
+		name = sf.Name
+	}
+	return name
+}
+
 func optsMapper(opts []string, fn func(string) any) []any {
 	if opts == nil {
 		return nil
@@ -444,3 +459,5 @@ func optsMapper(opts []string, fn func(string) any) []any {
 	}
 	return ropts
 }
+
+type SpecialTypeIds = utils.ObjectFormats

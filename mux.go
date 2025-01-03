@@ -18,15 +18,7 @@ type serveMux struct {
 }
 
 func NewServeMux() Router {
-	middlewares := make(Middlewares, 0, 15)
-	return serveMuxBuilder(
-		http.NewServeMux(),
-		map[string]map[string]openapiOperationObject{},
-		map[string]map[string]any{},
-		NewGlobalStore(),
-		middlewares,
-		defaultMuxOptions(),
-	)
+	return newServeMux()
 }
 
 func (s *serveMux) Route(method string, path string, opts RouteOptions) {
@@ -104,7 +96,13 @@ func (s *serveMux) Meta() RouterMeta {
 
 func (s *serveMux) SetErrorHandler(handler func(err error, c Context)) {
 	if handler != nil {
-		s.opts.ErrorHandler = handler
+		s.opts.errHandler = handler
+	}
+}
+
+func (s *serveMux) SetCustomSchemaTypes(list CustomSchemaTypes) {
+	if list != nil {
+		s.opts.customSchema = list
 	}
 }
 
@@ -151,11 +149,11 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 		s.routeMeta[opts.Path] = v
 		routeMeta = s.routeMeta
 	}
-	c.setContextSettings(&rules.rules, routeMeta, s.globalStore)
+	c.setContextSettings(&rules.rules, routeMeta, s.globalStore, s.opts)
 	handler := applyMiddleware(def.Handler, def.Middlewares)
 	err = handler(c)
 	if err != nil {
-		s.opts.ErrorHandler(err, c)
+		s.opts.errHandler(err, c)
 		return w, nil
 	}
 
@@ -198,13 +196,25 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 
 	s.sm.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
 		c := newContext(w, r)
-		c.setContextSettings(rules, s.routeMeta, s.globalStore)
+		c.setContextSettings(rules, s.routeMeta, s.globalStore, s.opts)
 
 		err := applyMiddleware(opts.Handler, opts.Middlewares)(c)
 		if err != nil {
-			s.opts.ErrorHandler(err, c)
+			s.opts.errHandler(err, c)
 		}
 	})
+}
+
+func newServeMux() *serveMux {
+	middlewares := make(Middlewares, 0, 15)
+	return serveMuxBuilder(
+		http.NewServeMux(),
+		map[string]map[string]openapiOperationObject{},
+		map[string]map[string]any{},
+		NewGlobalStore(),
+		middlewares,
+		defaultMuxOptions(),
+	)
 }
 
 func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {

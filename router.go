@@ -23,5 +23,6 @@ type Router interface {
 	GlobalStore() GofiStore
 	Meta() RouterMeta
 	SetErrorHandler(func(err error, c Context))
+	SetCustomSchemaTypes(list CustomSchemaTypes)
 	Inject(opts InjectOptions) (*httptest.ResponseRecorder, error)
 }
