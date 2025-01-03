@@ -20,8 +20,8 @@ type Router interface {
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 	ServeHTTP(w http.ResponseWriter, r *http.Request)
-	DefineMuxOptions(opts MuxOptions)
 	GlobalStore() GofiStore
 	Meta() RouterMeta
+	SetErrorHandler(func(err error, c Context))
 	Inject(opts InjectOptions) (*httptest.ResponseRecorder, error)
 }

@@ -10,11 +10,10 @@ import (
 
 type serveMux struct {
 	sm          *http.ServeMux
-	opts        *MuxOptions
+	opts        *muxOptions
 	paths       docsPaths
 	routeMeta   metaMap
 	globalStore GofiStore
-	errHandler  func(err error, c Context)
 	middlewares Middlewares
 }
 
@@ -25,8 +24,8 @@ func NewServeMux() Router {
 		map[string]map[string]openapiOperationObject{},
 		map[string]map[string]any{},
 		NewGlobalStore(),
-		defaultErrorHandler,
 		middlewares,
+		defaultMuxOptions(),
 	)
 }
 
@@ -95,25 +94,18 @@ func (s *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-type MuxOptions struct {
-	ErrorHandler     func(err error, c Context)
-	CustomValidators map[string]func([]any) func(any) error
-	CompilerHooks    any
-}
-
-func (s *serveMux) DefineMuxOptions(opts MuxOptions) {
-	s.opts = &opts
-	if opts.ErrorHandler != nil {
-		s.errHandler = opts.ErrorHandler
-	}
-}
-
 func (s *serveMux) GlobalStore() GofiStore {
 	return s.globalStore
 }
 
 func (s *serveMux) Meta() RouterMeta {
 	return s.routeMeta
+}
+
+func (s *serveMux) SetErrorHandler(handler func(err error, c Context)) {
+	if handler != nil {
+		s.opts.ErrorHandler = handler
+	}
 }
 
 type InjectOptions struct {
@@ -163,7 +155,7 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	handler := applyMiddleware(def.Handler, def.Middlewares)
 	err = handler(c)
 	if err != nil {
-		s.errHandler(err, c)
+		s.opts.ErrorHandler(err, c)
 		return w, nil
 	}
 
@@ -210,18 +202,18 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 
 		err := applyMiddleware(opts.Handler, opts.Middlewares)(c)
 		if err != nil {
-			s.errHandler(err, c)
+			s.opts.ErrorHandler(err, c)
 		}
 	})
 }
 
-func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, errH func(e error, c Context), m Middlewares) *serveMux {
+func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
 	return &serveMux{
 		sm:          sm,
 		paths:       paths,
 		routeMeta:   rm,
 		globalStore: globalStore,
-		errHandler:  errH,
 		middlewares: m,
+		opts:        opts,
 	}
 }

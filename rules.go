@@ -16,7 +16,7 @@ type ruleOpts struct {
 	dator   validators.ValidatorFn
 }
 
-func newRuleOpts(kind reflect.Kind, rule string, opts []string, muxOpts *MuxOptions) ruleOpts {
+func newRuleOpts(kind reflect.Kind, rule string, opts []string, muxOpts *muxOptions) ruleOpts {
 	anyOpts := make([]any, 0, len(opts))
 	for _, v := range opts {
 		anyOpts = append(anyOpts, v)
