@@ -1,6 +1,7 @@
-package validators
+package utils
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -58,6 +59,17 @@ func PrimitiveFromStr(kind reflect.Kind, val string) (any, error) {
 	}
 }
 
+type primitives interface {
+	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64 | string | bool
+}
+
+// func PrimitiveFromAny[T primitives](kind reflect.Kind, val any) (T, error) {
+// 	switch kind {
+// 	case reflect.Int:
+// 		return
+// 	}
+// }
+
 func IsPrimitiveKind(kind reflect.Kind) bool {
 	switch kind {
 	case reflect.String,
@@ -80,10 +92,14 @@ func IsPrimitiveKind(kind reflect.Kind) bool {
 	}
 }
 
+func NotPrimitiveKind(kind reflect.Kind) bool {
+	return !IsPrimitiveKind(kind)
+}
+
 func toIntX(val string, bitSize int) (any, error) {
 	v, err := strconv.ParseInt(val, 10, bitSize)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("error converting value to int type")
 	}
 	switch bitSize {
 	case 0:
@@ -126,4 +142,11 @@ func IsPrimitive(val any) bool {
 
 func NotPrimitive(val any) bool {
 	return val == nonPrimitive
+}
+
+func ValidCookieType(typ reflect.Type) bool {
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	return IsPrimitiveKind(typ.Kind()) || typ == CookieType
 }

@@ -145,7 +145,7 @@ func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 
 		csb, err := json.Marshal(conf)
 		if err != nil {
-			fmt.Println(err)
+			panic(err)
 		} else {
 			cs = fmt.Sprintf("%q", string(csb))
 		}

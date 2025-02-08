@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/michaelolof/gofi/utils"
-	"github.com/michaelolof/gofi/validators"
 )
 
 type compiledSchema struct {
@@ -61,6 +60,10 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
+						if rqn == schemaCookies && !utils.ValidCookieType(rqff.Type) {
+							continue
+						}
+
 						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						name := getFieldName(rqff)
 						if in == "header" {
@@ -106,6 +109,11 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
+
+						if rqn == schemaCookies && !utils.ValidCookieType(rqff.Type) {
+							continue
+						}
+
 						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						name := getFieldName(rqff)
 						ruleDefs := s.getFieldRuleDefs(rqff, name, val)
@@ -142,55 +150,58 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 }
 
 func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *ruleDef {
-	xtraTags := []string{"example", "deprecated", "description", "pattern"}
-
-	vtags := strings.Split(sf.Tag.Get("validate"), ",")
-	defStr := sf.Tag.Get("default")
-	if len(vtags) == 0 || vtags[0] == "" {
-		rtn := newRuleDef(sf.Type.Kind(), tagName, sf.Name, defStr, defVal, nil, false, nil, nil, nil, nil)
-		rtn.xtraTags = make(map[string]string)
-		for _, tag := range xtraTags {
-			if v, ok := sf.Tag.Lookup(tag); ok {
-				rtn.xtraTags[tag] = v
-			}
-		}
-
-		return rtn
+	supportedTags := []string{
+		"json",
+		"validate",
+		"default",
+		"example",
+		"deprecated",
+		"description",
+		"pattern",
 	}
 
-	required := false
-	var max *float64 = nil
-	rules := make([]ruleOpts, 0, len(vtags))
-	for _, tag := range vtags {
-		v := strings.Split(tag, "=")
-		var options []string
-		if len(v) > 1 {
-			options = strings.Split(v[1], " ")
-		}
+	tagList := make(map[string][]string)
+	var defStr string
+	var rules []ruleOpts
+	var required bool
+	var max *float64
+	for _, stag := range supportedTags {
+		if tag, ok := sf.Tag.Lookup(stag); ok {
+			switch stag {
+			case "json", "example", "deprecated":
+				tagList[stag] = strings.Split(tag, ",")
+			case "default", "description", "pattern":
+				defStr = tag
+			case "validate":
+				vtags := strings.Split(tag, ",")
+				tagList[stag] = vtags
+				rules = make([]ruleOpts, 0, len(vtags))
+				for _, tag := range vtags {
+					v := strings.Split(tag, "=")
+					var options []string
+					if len(v) > 1 {
+						options = strings.Split(v[1], " ")
+					}
 
-		if v[0] == "required" {
-			required = true
-		}
+					if v[0] == "required" {
+						required = true
+					}
 
-		if (v[0] == "max" || v[0] == "lte") && len(v) > 1 {
-			flt, err := strconv.ParseFloat(options[0], 64)
-			if err == nil {
-				max = &flt
+					if (v[0] == "max" || v[0] == "lte") && len(v) > 1 {
+						flt, err := strconv.ParseFloat(options[0], 64)
+						if err == nil {
+							max = &flt
+						}
+					}
+
+					rules = append(rules, newRuleOpts(sf.Type.Kind(), v[0], options, s.opts))
+				}
 			}
 		}
-
-		rules = append(rules, newRuleOpts(sf.Type.Kind(), v[0], options, s.opts))
 	}
 
 	rtn := newRuleDef(sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
-	rtn.xtraTags = make(map[string]string)
-
-	for _, tag := range xtraTags {
-		if v, ok := sf.Tag.Lookup(tag); ok {
-			rtn.xtraTags[tag] = v
-		}
-	}
-
+	rtn.tags = tagList
 	return rtn
 }
 
@@ -240,24 +251,24 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 		optStr = ruleDefs.ruleOptions("oneof")
 		pRequired = ruleDefs.required
 
-		if v, ok := ruleDefs.xtraTags["example"]; ok {
-			if v, err := validators.PrimitiveFromStr(typ.Kind(), v); err == nil && validators.IsPrimitive(v) {
+		if v, ok := ruleDefs.tags["example"]; ok && len(v) > 0 {
+			if v, err := utils.PrimitiveFromStr(typ.Kind(), v[0]); err == nil && utils.IsPrimitive(v) {
 				example = v
 			}
 		}
 
-		if v, ok := ruleDefs.xtraTags["deprecated"]; ok {
-			if v, err := strconv.ParseBool(v); err == nil && v {
+		if v, ok := ruleDefs.tags["deprecated"]; ok && len(v) > 0 {
+			if v, err := strconv.ParseBool(v[0]); err == nil && v {
 				deprecated = &v
 			}
 		}
 
-		if v, ok := ruleDefs.xtraTags["description"]; ok {
-			description = v
+		if v, ok := ruleDefs.tags["description"]; ok && len(v) > 0 {
+			description = v[0]
 		}
 
-		if v, ok := ruleDefs.xtraTags["pattern"]; ok {
-			pattern = v
+		if v, ok := ruleDefs.tags["pattern"]; ok && len(v) > 0 {
+			pattern = v[0]
 		}
 	}
 
@@ -413,7 +424,7 @@ func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any 
 	tagVal := f.Tag.Get("default")
 	kind := f.Type.Kind()
 
-	val, err := validators.PrimitiveFromStr(kind, tagVal)
+	val, err := utils.PrimitiveFromStr(kind, tagVal)
 	if err != nil {
 		if fieldVal != nil {
 			return fieldVal
@@ -422,7 +433,7 @@ func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any 
 		}
 	}
 
-	if validators.NotPrimitive(val) {
+	if utils.NotPrimitive(val) {
 		return nil
 	}
 

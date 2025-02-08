@@ -261,6 +261,10 @@ func (s schemaField) reqSchemaIn() string {
 	}
 }
 
+func (s schemaField) String() string {
+	return string(s)
+}
+
 func runValidation(typ errorType, val any, schema schemaField, keypath string, rules []ruleOpts) error {
 	errs := make([]error, 0, len(rules))
 

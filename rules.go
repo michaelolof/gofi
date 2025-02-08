@@ -10,16 +10,16 @@ import (
 )
 
 type ruleOpts struct {
-	kind    reflect.Kind
-	rule    string
-	options []string
-	dator   validators.ValidatorFn
+	kind  reflect.Kind
+	rule  string
+	args  []string
+	dator validators.CompiledValidatorFn
 }
 
-func newRuleOpts(kind reflect.Kind, rule string, opts []string, muxOpts *muxOptions) ruleOpts {
-	anyOpts := make([]any, 0, len(opts))
-	for _, v := range opts {
-		anyOpts = append(anyOpts, v)
+func newRuleOpts(kind reflect.Kind, rule string, args []string, muxOpts *muxOptions) ruleOpts {
+	anyArgs := make([]any, 0, len(args))
+	for _, v := range args {
+		anyArgs = append(anyArgs, v)
 	}
 
 	var customValidators validators.MappedValidators
@@ -28,10 +28,10 @@ func newRuleOpts(kind reflect.Kind, rule string, opts []string, muxOpts *muxOpti
 	}
 
 	return ruleOpts{
-		kind:    kind,
-		rule:    rule,
-		options: opts,
-		dator:   validators.BuildValidators(kind, rule, anyOpts, customValidators),
+		kind:  kind,
+		rule:  rule,
+		args:  args,
+		dator: validators.BuildValidators(kind, rule, anyArgs, customValidators),
 	}
 }
 
@@ -51,7 +51,7 @@ type ruleDef struct {
 	max                  *float64
 	required             bool
 
-	xtraTags map[string]string
+	tags map[string][]string
 }
 
 func newRuleDef(kind reflect.Kind, field string, name string, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*ruleDef, items *ruleDef, addProps *ruleDef) *ruleDef {
@@ -139,7 +139,7 @@ func (r *ruleDef) ruleOptions(rule string) []string {
 
 	for _, l := range r.rules {
 		if l.rule == rule {
-			return l.options
+			return l.args
 		}
 	}
 	return nil
@@ -210,8 +210,8 @@ func (s *schemaRules) getReqRules(key schemaField) *ruleDef {
 
 func (s *schemaRules) reqContent() cont.ContentType {
 	hs := s.getReqRules(schemaHeaders)
-	if dv, ok := hs.xtraTags["content-type"]; ok {
-		return cont.ContentType(dv)
+	if dv, ok := hs.tags["content-type"]; ok && len(dv) > 0 {
+		return cont.ContentType(dv[0])
 	}
 
 	return cont.ApplicationJson

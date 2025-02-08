@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/michaelolof/gofi/utils"
-	"github.com/michaelolof/gofi/validators"
 )
 
 type headersSetter interface {
@@ -88,7 +87,7 @@ func (c *context) checkAndBuildJson(code int, rules ruleDefMap, body reflect.Val
 		return newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
 	}
 
-	if validators.IsPrimitiveKind(body.Kind()) {
+	if utils.IsPrimitiveKind(body.Kind()) {
 		bany := body.Interface()
 		err := runValidation(ResponseErr, bany, schemaBody, "", bdef.rules)
 		if err != nil {

@@ -11,7 +11,6 @@ import (
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
-	"github.com/michaelolof/gofi/validators"
 	"github.com/valyala/fastjson"
 )
 
@@ -28,6 +27,8 @@ type Context interface {
 	Meta() ContextMeta
 	// Sends a JSON response with status code.
 	JSON(code int, i any) error
+	// Sends a schema response object for the given status code
+	Send(code int, obj any) error
 }
 
 type context struct {
@@ -109,34 +110,6 @@ func (c *context) JSON(code int, resp any) error {
 	return nil
 }
 
-func Validate(c Context) error {
-	ctx, ok := c.(*context)
-	if !ok {
-		return errors.New("unknown context object passed")
-	}
-
-	_, err := validateAndOrBindRequest[any](ctx, false)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func ValidateAndBind[T any](c Context) (*T, error) {
-	ctx, ok := c.(*context)
-	if !ok {
-		return nil, errors.New("unknown context object passed")
-	}
-
-	s, err := validateAndOrBindRequest[T](ctx, true)
-	if err != nil {
-		return nil, err
-	}
-
-	return s, nil
-}
-
 func (c *context) setContextSettings(rules *schemaRules, routeMeta metaMap, globalStore GofiStore, serverOpts *muxOptions) {
 	c.rules = rules
 	c.routeMeta = routeMeta
@@ -144,7 +117,7 @@ func (c *context) setContextSettings(rules *schemaRules, routeMeta metaMap, glob
 	c.serverOpts = serverOpts
 }
 
-func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
+func old__validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	var schemaPtr *T
 	if shouldBind {
 		schemaPtr = new(T)
@@ -156,7 +129,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 	defer func() {
 		if e := recover(); e != nil {
-			fmt.Println(newErrReport(ResponseErr, schemaBody, "", "typeMismatch", e.(error)))
+			c.serverOpts.logger.Error(newErrReport(ResponseErr, schemaBody, "", "typeMismatch", e.(error)))
 		}
 	}()
 
@@ -174,8 +147,8 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			return nil
 		}
 
-		val, err := validators.PrimitiveFromStr(def.kind, qv)
-		if err != nil || validators.NotPrimitive(val) {
+		val, err := utils.PrimitiveFromStr(def.kind, qv)
+		if err != nil || utils.NotPrimitive(val) {
 			// Handle special cases.
 			switch def.format {
 			case utils.TimeObjectFormat:
@@ -287,7 +260,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			}
 
 		default:
-			cvs, err := validators.PrimitiveFromStr(def.kind, cv.Value)
+			cvs, err := utils.PrimitiveFromStr(def.kind, cv.Value)
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -358,8 +331,8 @@ func validateAndOrBindJson(c *context, pdef *ruleDef, body io.ReadCloser, should
 		return nil
 	}
 
-	val, err := validators.PrimitiveFromStr(pdef.kind, string(bs))
-	if validators.IsPrimitive(val) {
+	val, err := utils.PrimitiveFromStr(pdef.kind, string(bs))
+	if utils.IsPrimitive(val) {
 		if err != nil {
 			return newErrReport(RequestErr, schemaBody, "", "typeCast", err)
 		}
