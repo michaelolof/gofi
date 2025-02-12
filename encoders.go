@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
@@ -126,7 +127,7 @@ func (j *JSONSchemaEncoder) ValidateAndEncode(obj any, opts ResponseOptions) ([]
 
 	var buff bytes.Buffer
 	buff.Reset()
-	if err := encodeFieldValue(&buff, opts.Body, opts.SchemaRules, nil); err != nil {
+	if err := encodeFieldValue(opts.Context, &buff, opts.Body, opts.SchemaRules, nil); err != nil {
 		return nil, newErrReport(ResponseErr, schemaBody, "", "encoder", err)
 	}
 
@@ -395,7 +396,7 @@ func getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule 
 	return rtn
 }
 
-func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp []string) error {
+func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp []string) error {
 
 	isEmptyValue := func(v reflect.Value) bool {
 		switch v.Kind() {
@@ -447,7 +448,7 @@ func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp [
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			if err := encodeFieldValue(buf, val.Index(i), arules, append(kp, strconv.Itoa(i))); err != nil {
+			if err := encodeFieldValue(c, buf, val.Index(i), arules, append(kp, strconv.Itoa(i))); err != nil {
 				return err
 			}
 		}
@@ -476,11 +477,11 @@ func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp [
 				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("map key must be of type string"))
 			}
 
-			if err := encodeFieldValue(buf, key, mrules, append(kp, keyStr)); err != nil {
+			if err := encodeFieldValue(c, buf, key, mrules, append(kp, keyStr)); err != nil {
 				return err
 			}
 			buf.WriteString(":")
-			if err := encodeFieldValue(buf, mr.Value(), mrules, append(kp, keyStr)); err != nil {
+			if err := encodeFieldValue(c, buf, mr.Value(), mrules, append(kp, keyStr)); err != nil {
 				return err
 			}
 		}
@@ -505,7 +506,7 @@ func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp [
 			first = false
 
 			buf.WriteString(fmt.Sprintf(`"%s":`, field))
-			if err := encodeFieldValue(buf, fieldValue, frules, append(kp, field)); err != nil {
+			if err := encodeFieldValue(c, buf, fieldValue, frules, append(kp, field)); err != nil {
 				return err
 			}
 		}
@@ -514,8 +515,25 @@ func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp [
 		return nil
 	}
 
+	var vIsValid bool
+	var vany any
+	if val.IsValid() {
+		if rules != nil && rules.defStr != "" && isEmptyValue(val) {
+			if val.CanAddr() {
+				val.Set(reflect.ValueOf(rules.defVal).Convert(val.Type()))
+			} else {
+				ptr := reflect.New(val.Type())
+				ptr.Elem().Set(reflect.ValueOf(rules.defVal).Convert(val.Type()))
+				val = ptr.Elem()
+			}
+		}
+
+		vIsValid = true
+		vany = val.Interface()
+	}
+
 	if rules != nil {
-		if err := runValidation(ResponseErr, val.Interface(), schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
+		if err := runValidation(ResponseErr, vany, schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
 			return err
 		}
 	}
@@ -534,7 +552,7 @@ func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp [
 			}
 			return nil
 		}
-		return encodeFieldValue(buf, val.Elem(), rules, kp)
+		return encodeFieldValue(c, buf, val.Elem(), rules, kp)
 	case reflect.String:
 		encodeString(buf, val.String())
 		return nil
@@ -561,7 +579,27 @@ func encodeFieldValue(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp [
 	case reflect.Map:
 		return encodeMap(buf, val, rules, kp)
 	case reflect.Struct:
-		return encodeStruct(buf, val, rules, kp)
+		if rules.format == utils.TimeObjectFormat {
+			if v, ok := (vany).(time.Time); ok {
+				encodeString(buf, v.Format(rules.pattern))
+				return nil
+			} else {
+				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("cannot cast time field to string"))
+			}
+		} else if ctype, ok := c.serverOpts.customSchema[string(rules.format)]; ok {
+			if vIsValid {
+				v, err := ctype.CustomDecode(vany)
+				if err != nil {
+					return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+				}
+				encodeString(buf, v)
+				return nil
+			} else {
+				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given time value to string"))
+			}
+		} else {
+			return encodeStruct(buf, val, rules, kp)
+		}
 	}
 
 	return nil

@@ -13,17 +13,23 @@ import (
 	"github.com/michaelolof/gofi/utils"
 )
 
+var errValid error = errors.New("value is invalid")
+
 func IsRequired(kind reflect.Kind) func(val any) error {
 	errReq := errors.New("value is required")
-	errValid := errors.New("value is invalid")
 
-	return func(val any) error {
-		if val == nil {
-			return errReq
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
+			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsRequired(kind)(val)
+			} else {
+				return errValid
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			if v, ok := val.(string); ok {
 				if v == "" {
 					return errReq
@@ -31,7 +37,10 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 			} else {
 				return errValid
 			}
-		case reflect.Bool:
+			return nil
+		}
+	case reflect.Bool:
+		return func(val any) error {
 			if v, ok := val.(bool); ok {
 				if !v {
 					return errReq
@@ -39,10 +48,13 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 			} else {
 				return errValid
 			}
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-			reflect.Float32, reflect.Float64,
-			reflect.Complex64, reflect.Complex128:
+			return nil
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64,
+		reflect.Complex64, reflect.Complex128:
+		return func(val any) error {
 			switch v := val.(type) {
 			case int:
 				if v == 0 {
@@ -103,7 +115,10 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 			default:
 				return errValid
 			}
-		case reflect.Slice, reflect.Array:
+			return nil
+		}
+	case reflect.Slice, reflect.Array:
+		return func(val any) error {
 			if v := reflect.ValueOf(val); v.Kind() == kind {
 				if v.Len() == 0 {
 					return errReq
@@ -111,7 +126,10 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 			} else {
 				return errValid
 			}
-		case reflect.Map:
+			return nil
+		}
+	case reflect.Map:
+		return func(val any) error {
 			if v := reflect.ValueOf(val); v.Kind() == kind {
 				if v.Len() == 0 {
 					return errReq
@@ -119,7 +137,10 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 			} else {
 				return errValid
 			}
-		case reflect.Pointer:
+			return nil
+		}
+	default:
+		return func(val any) error {
 			if v := reflect.ValueOf(val); v.Kind() == kind {
 				if v.IsNil() {
 					return errReq
@@ -127,11 +148,8 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 			} else {
 				return errValid
 			}
-		default:
 			return nil
 		}
-
-		return nil
 	}
 }
 
@@ -173,14 +191,20 @@ func IsNotEmpty(kind reflect.Kind) func(val any) error {
 	}
 }
 
+// Validates if the value is a valid file url
 func IsFileURL(kind reflect.Kind) func(val any) error {
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsFileURL(kind)(val)
+			} else {
+				return errValid
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return errors.New("only string values are allowed as file url")
@@ -193,13 +217,16 @@ func IsFileURL(kind reflect.Kind) func(val any) error {
 			}
 
 			return isFileURL(s)
-		default:
+		}
+	default:
+		return func(val any) error {
 			return errors.New("only string values are allowed as file url")
 		}
 	}
 }
 
-func IssOneOf(kind reflect.Kind, args ...any) func(val any) error {
+// Validates if a primitive value is one of the defined arguments
+func IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
 
 	if !isPrimitiveKind(kind) {
 		return func(val any) error {
@@ -221,36 +248,48 @@ func IssOneOf(kind reflect.Kind, args ...any) func(val any) error {
 func IsCIDR(kind reflect.Kind) func(val any) error {
 	invalidErr := errors.New("invalid value passed. CIDR value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsCIDR(kind)(val)
+			} else {
+				return invalidErr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidErr
 			}
 			_, _, err := net.ParseCIDR(v)
 			return err
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidErr
 		}
-
 	}
 }
 
+// Validates if the value is a valid v4 CIDR address.
 func IsCIDRv4(kind reflect.Kind) func(val any) error {
 	invalidErr := errors.New("invalid CIDRv4 value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsCIDRv4(kind)(val)
+			} else {
+				return invalidErr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidErr
@@ -263,10 +302,11 @@ func IsCIDRv4(kind reflect.Kind) func(val any) error {
 				return errors.New("invalid CIDR value. ip and x values don't match")
 			}
 			return err
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidErr
 		}
-
 	}
 }
 
@@ -274,13 +314,18 @@ func IsCIDRv4(kind reflect.Kind) func(val any) error {
 func IsCIDRv6(kind reflect.Kind) func(val any) error {
 	invalidErr := errors.New("invalid CIDRv6 value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsCIDRv6(kind)(val)
+			} else {
+				return invalidErr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidErr
@@ -292,7 +337,9 @@ func IsCIDRv6(kind reflect.Kind) func(val any) error {
 			}
 
 			return err
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidErr
 		}
 	}
@@ -303,13 +350,18 @@ func IsDataURI(kind reflect.Kind) func(val any) error {
 	invalid := errors.New("invalid data uri value")
 	invalidStr := errors.New("invalid data uri value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsDataURI(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -327,22 +379,30 @@ func IsDataURI(kind reflect.Kind) func(val any) error {
 				return invalid
 			}
 			return nil
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
 }
 
+// Validates if the value is a valid FQDN value
 func IsFQDN(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid FQDN value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsFQDN(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -356,7 +416,9 @@ func IsFQDN(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalidStr
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -366,24 +428,34 @@ func IsFQDN(kind reflect.Kind) func(val any) error {
 func IsHostnameRFC952(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid hostname value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsHostnameRFC952(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
 			}
+			if v == "" {
+				return errors.New("invalid FQDN value. value cannot be empty")
+			}
 
-			if HostnameRegexRFC952.MatchString(v) {
+			if FqdnRegexRFC1123.MatchString(v) {
 				return nil
 			} else {
-				return errors.New("invalid hostname value")
+				return invalidStr
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -394,13 +466,18 @@ func IsHostnamePort(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid host port value. value must be a string")
 	invalid := errors.New("invalid host port value")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsHostnamePort(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -425,7 +502,9 @@ func IsHostnamePort(kind reflect.Kind) func(val any) error {
 			}
 
 			return nil
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -435,13 +514,18 @@ func IsHostnameRFC1123(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid host name value. value must be a string")
 	invalid := errors.New("invalid host name value")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsHostnameRFC1123(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -452,7 +536,9 @@ func IsHostnameRFC1123(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalid
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -463,13 +549,18 @@ func IsIP(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid ip value. value must be a string")
 	invalid := errors.New("invalid ip value")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsIP(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -478,7 +569,9 @@ func IsIP(kind reflect.Kind) func(val any) error {
 				return invalid
 			}
 			return nil
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -543,13 +636,18 @@ func IsIPv4(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid ipv4 value. value must be a string")
 	invalid := errors.New("invalid ipv4 value")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsIPv4(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -561,7 +659,9 @@ func IsIPv4(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalid
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -572,13 +672,18 @@ func IsIPv6(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid ipv6 value. value must be a string")
 	invalid := errors.New("invalid ipv6 value")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsIPv6(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -590,7 +695,9 @@ func IsIPv6(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalid
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -600,20 +707,27 @@ func IsIPv6(kind reflect.Kind) func(val any) error {
 func IsMAC(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid MAC value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsMAC(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
 			}
 			_, err := net.ParseMAC(v)
 			return err
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -740,20 +854,27 @@ func IsUDPAddrResolvable(kind reflect.Kind) func(val any) error {
 func IsUnixAddrResolvable(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid unix address. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsUnixAddrResolvable(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
 			}
 			_, err := net.ResolveUnixAddr("unix", v)
 			return err
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -763,13 +884,18 @@ func IsIP4Addr(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid ipv4 address. value must be a string")
 	invalid := errors.New("invalid ipv4 address")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsIP4Addr(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -786,7 +912,9 @@ func IsIP4Addr(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalid
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -796,13 +924,18 @@ func IsIP6Addr(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid ipv6 address. value must be a string")
 	invalid := errors.New("invalid ipv6 address")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsIP6Addr(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -821,7 +954,9 @@ func IsIP6Addr(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalid
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -831,13 +966,18 @@ func IsIP6Addr(kind reflect.Kind) func(val any) error {
 func IsURI(kind reflect.Kind) func(val any) error {
 	invalidStr := errors.New("invalid URI value. value must be a string")
 
-	return func(val any) error {
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsURI(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -856,7 +996,9 @@ func IsURI(kind reflect.Kind) func(val any) error {
 			_, err := url.ParseRequestURI(v)
 
 			return err
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -864,16 +1006,24 @@ func IsURI(kind reflect.Kind) func(val any) error {
 
 // Validates if the current value is a valid URL
 func IsURL(kind reflect.Kind) func(val any) error {
-	return func(val any) error {
-		if kind == reflect.Invalid {
-			kind = reflect.TypeOf(val).Kind()
-		}
 
-		switch kind {
-		case reflect.String:
+	invalidStr := errors.New("only string values are allowed as url")
+
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
+			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsURL(kind)(val)
+			} else {
+				return invalidStr
+			}
+		}
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
-				return errors.New("only string values are allowed as url")
+				return invalidStr
 			}
 
 			s := strings.ToLower(v)
@@ -897,8 +1047,10 @@ func IsURL(kind reflect.Kind) func(val any) error {
 			}
 
 			return nil
-		default:
-			return errors.New("only string values are allowed as url")
+		}
+	default:
+		return func(val any) error {
+			return invalidStr
 		}
 	}
 }
@@ -908,20 +1060,25 @@ func IsHttpURL(kind reflect.Kind) func(val any) error {
 	invalid := errors.New("invalid http(s) url")
 	invalidStr := errors.New("invalid http(s) url. value must be a string")
 
-	return func(val any) error {
-		if err := IsURL(kind)(val); err != nil {
-			return err
-		}
-
-		if kind == reflect.Invalid {
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsHttpURL(kind)(val)
+			} else {
+				return invalidStr
+			}
 		}
-
-		switch kind {
-		case reflect.String:
+	case reflect.String:
+		return func(val any) error {
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
+			}
+
+			if err := IsURL(kind)(val); err != nil {
+				return err
 			}
 
 			s := strings.ToLower(v)
@@ -935,7 +1092,9 @@ func IsHttpURL(kind reflect.Kind) func(val any) error {
 			} else {
 				return invalid
 			}
-		default:
+		}
+	default:
+		return func(val any) error {
 			return invalidStr
 		}
 	}
@@ -968,43 +1127,156 @@ func IsUrnRFC2141(kind reflect.Kind) func(val any) error {
 	}
 }
 
-func IsMax(kind reflect.Kind, args ...any) func(val any) error {
+// IsMax checks that a given value must be below or equal to a specific limit
+func IsMax(kind reflect.Kind, limit ...any) func(val any) error {
 	var err error
-	var arg float64
-	if len(args) != 1 {
-		err = errors.New("validation rule 'IsMax' requires 1 argument")
+	var max float64
+	if len(limit) != 1 {
+		err = errors.New("validation rule 'IsMax' requires 1 limit argument")
 	} else {
-		arg, err = utils.AnyValueToFloat(args[0])
+		max, err = utils.AnyValueToFloat(limit[0])
 	}
 
-	return func(val any) error {
-		if err != nil {
-			return err
+	check := func(isValid bool) error {
+		if isValid {
+			return nil
+		} else {
+			return fmt.Errorf("value must be equal or lesser than maximum limit of %f", max)
 		}
+	}
 
-		if utils.KindIsNumber(kind) {
-			v, err := utils.AnyValueToFloat(val)
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
 			if err != nil {
 				return err
 			}
 
-			if v <= arg {
-				return nil
+			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsMax(kind)(val)
 			} else {
-				return fmt.Errorf("value is greater than max allowed value %f", arg)
+				return errors.New("invalid value passed to IsMax function")
 			}
-		} else if kind == reflect.String {
-			if v, ok := val.(string); !ok {
-				return fmt.Errorf("invalid value passed to validation rule. expected string")
-			} else {
-				if float64(len(v)) <= arg {
-					return nil
-				} else {
-					return fmt.Errorf("value is greater than max allowed value %f", arg)
-				}
+		}
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return func(val any) error {
+			if err != nil {
+				return err
 			}
+
+			v := reflect.ValueOf(val)
+			return check(float64(v.Len()) <= max)
+		}
+	default:
+		return func(val any) error {
+			switch v := val.(type) {
+			case int:
+				return check(float64(v) <= max)
+			case int8:
+				return check(float64(v) <= max)
+			case int16:
+				return check(float64(v) <= max)
+			case int32:
+				return check(float64(v) <= max)
+			case int64:
+				return check(float64(v) <= max)
+			case uint:
+				return check(float64(v) <= max)
+			case uint8:
+				return check(float64(v) <= max)
+			case uint16:
+				return check(float64(v) <= max)
+			case uint32:
+				return check(float64(v) <= max)
+			case uint64:
+				return check(float64(v) <= max)
+			case float32:
+				return check(float64(v) <= max)
+			case float64:
+				return check(v <= max)
+			case string:
+				return check(float64(len(v)) <= max)
+			default:
+				return fmt.Errorf("unsupported type %T when validating maximum value", v)
+			}
+		}
+	}
+}
+
+// IsMin checks that a given value must be below or equal to a specific limit
+func IsMin(kind reflect.Kind, limit ...any) func(val any) error {
+	var err error
+	var min float64
+	if len(limit) != 1 {
+		err = errors.New("validation rule 'IsMin' requires 1 limit argument")
+	} else {
+		min, err = utils.AnyValueToFloat(limit[0])
+	}
+
+	check := func(isValid bool) error {
+		if isValid {
+			return nil
 		} else {
-			return errors.New("unknown value passed to validation rule")
+			return fmt.Errorf("value must be equal or greater than minimum limit of %f", min)
+		}
+	}
+
+	switch kind {
+	case reflect.Invalid:
+		return func(val any) error {
+			if err != nil {
+				return err
+			}
+
+			kind = reflect.TypeOf(val).Kind()
+			if kind != reflect.Invalid {
+				return IsMin(kind)(val)
+			} else {
+				return errors.New("invalid value passed to IsMin function")
+			}
+		}
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return func(val any) error {
+			if err != nil {
+				return err
+			}
+
+			v := reflect.ValueOf(val)
+			return check(float64(v.Len()) >= min)
+		}
+	default:
+		return func(val any) error {
+			switch v := val.(type) {
+			case int:
+				return check(float64(v) >= min)
+			case int8:
+				return check(float64(v) >= min)
+			case int16:
+				return check(float64(v) >= min)
+			case int32:
+				return check(float64(v) >= min)
+			case int64:
+				return check(float64(v) >= min)
+			case uint:
+				return check(float64(v) >= min)
+			case uint8:
+				return check(float64(v) >= min)
+			case uint16:
+				return check(float64(v) >= min)
+			case uint32:
+				return check(float64(v) >= min)
+			case uint64:
+				return check(float64(v) >= min)
+			case float32:
+				return check(float64(v) >= min)
+			case float64:
+				return check(v >= min)
+			case string:
+				return check(float64(len(v)) >= min)
+			default:
+				return fmt.Errorf("unsupported type %T when validating minimum value", v)
+			}
 		}
 	}
 }

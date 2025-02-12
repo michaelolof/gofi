@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -34,32 +35,31 @@ func TestSend(t *testing.T) {
 	}
 
 	type varmin struct {
-		One   string      `json:"one,omitempty" validate:"required"`
-		Two   int         `json:"two" validate:"required"`
-		Three [][]xcamile `json:"three" validate:"required"`
+		One   string       `json:"one,omitempty" validate:"required"`
+		Two   int          `json:"two" validate:"required"`
+		Three [][]xcamile  `json:"three"`
+		Four  time.Time    `json:"four" validate:"required"`
+		Five  customStruct `json:"five" validate:"required"`
 	}
 
 	type testSchema struct {
 		Ok struct {
-			Header struct {
-				// Une  string       `validate:"required" default:"one-in-french"`
-				// Duex time.Time    `json:"deux" validate:"required"`
-				// Tres customStruct `json:"tres" validate:"required"`
-			}
+			// Header struct {
+			// 	Une  string       `validate:"required" default:"one-in-french"`
+			// 	Duex time.Time    `json:"deux" validate:"required"`
+			// 	Tres customStruct `json:"tres" validate:"required"`
+			// }
+
 			// Cookie struct {
 			// 	One   string       `validate:"required" default:"startings"`
 			// 	Two   *http.Cookie `validate:"required" default:"two"`
 			// 	Three customStruct `validate:"required" default:"three"`
 			// }
 
-			// Body struct {
-			// 	One string `json:"one" validate:"required"`
-			// 	Two int    `json:"two" validate:"required"`
-			// 	// One int `json:"one" validate:"required"`
-			// } `validate:"required"`
-
 			Body struct {
-				Casttro map[string]varmin `json:"castor" validate:"required"`
+				Two int `json:"two" validate:"required" default:"20"`
+				// One     string            `json:"one" validate:"required"`
+				// Casttro map[string]varmin `json:"castor" validate:"required"`
 			} `validate:"required"`
 		}
 	}
@@ -73,11 +73,9 @@ func TestSend(t *testing.T) {
 		Schema: &testSchema{},
 		Handler: func(c Context) error {
 			s, _ := ValidateAndBind[testSchema](c)
-			// s.Ok.Header.Tres = customStruct{}
-
-			s.Ok.Body.Casttro = map[string]varmin{
-				"action": {One: "Unxier", Two: 344, Three: nil},
-			}
+			// s.Ok.Body.Casttro = map[string]varmin{
+			// 	"action": {One: "Unxier", Two: 344, Three: nil, Four: time.Now()},
+			// }
 			return c.Send(200, s.Ok)
 		},
 	}

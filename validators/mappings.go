@@ -42,5 +42,5 @@ var BaseValidators = map[string]ValidatorFn{
 
 var OptionValidators = map[string]ValidatorFnOptions{
 	"max":   IsMax,
-	"oneof": IssOneOf,
+	"oneof": IsOneOf,
 }
