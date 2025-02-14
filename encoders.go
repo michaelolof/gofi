@@ -131,9 +131,7 @@ func (j *JSONSchemaEncoder) ValidateAndEncode(obj any, opts ResponseOptions) ([]
 		return nil, newErrReport(ResponseErr, schemaBody, "", "encoder", err)
 	}
 
-	fmt.Println(">>>", buff.String())
-
-	return nil, nil
+	return buff.Bytes(), nil
 }
 
 func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkFinishStatus, error) {

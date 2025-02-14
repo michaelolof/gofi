@@ -87,8 +87,7 @@ func TestSend(t *testing.T) {
 	})
 
 	assert.Nil(t, err)
-	fmt.Println(">>>", res)
-	fmt.Println(">>> done <<<")
+	fmt.Println(res)
 }
 
 func TestCheckStuff(t *testing.T) {
