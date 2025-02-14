@@ -158,7 +158,7 @@ func old__validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, erro
 				}
 			default:
 				if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
-					val, err = ctype.CustomEncode(qv)
+					val, err = ctype.CustomDecode(qv)
 					if err != nil {
 						return newErrReport(RequestErr, field, def.field, "typeCast", err)
 					}

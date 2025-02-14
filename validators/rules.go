@@ -141,12 +141,8 @@ func IsRequired(kind reflect.Kind) func(val any) error {
 		}
 	default:
 		return func(val any) error {
-			if v := reflect.ValueOf(val); v.Kind() == kind {
-				if v.IsNil() {
-					return errReq
-				}
-			} else {
-				return errValid
+			if val == nil {
+				return errReq
 			}
 			return nil
 		}

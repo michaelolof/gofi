@@ -52,8 +52,8 @@ type SerializerFn func(cont.ContentType) (SchemaEncoder, bool)
 
 type CustomSchemaType interface {
 	IsCustomType(typ reflect.Type) (*CustomSchemaProps, bool)
-	CustomEncode(val any) (any, error)
-	CustomDecode(obj any) (string, error)
+	CustomDecode(val any) (any, error)
+	CustomEncode(obj any) (string, error)
 }
 
 type CustomSchemaProps struct {

@@ -142,7 +142,7 @@ func (c *context) buildAndValidateJsonStruct(bs *buildState, def ruleDef, val re
 
 	if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
 		if val.IsValid() {
-			v, err := ctype.CustomDecode(val.Interface())
+			v, err := ctype.CustomEncode(val.Interface())
 			if err != nil {
 				return newErrReport(ResponseErr, schemaBody, kp, "typeMismatch", err)
 			}

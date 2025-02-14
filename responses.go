@@ -102,59 +102,59 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 		}
 
 		hv := hf.Interface()
-		switch true {
-		case utils.IsPrimitiveKind(val.kind):
-			if utils.PrimitiveKindIsEmpty(val.kind, hv) && val.defVal != nil {
-				hv = val.defVal
+
+		if ctype, ok := c.serverOpts.customSchema[string(val.format)]; ok {
+			v, err := ctype.CustomEncode(hv)
+			if err != nil {
+				return newErrReport(ResponseErr, schemaBody, key, "typeMismatch", err)
 			}
-			err := runValidation(ResponseErr, hv, schemaHeaders, key, val.rules)
+
+			err = runValidation(ResponseErr, v, schemaHeaders, key, val.rules)
 			if err != nil {
 				return err
 			}
 
-			c.w.Header().Set(key, fmt.Sprintf("%v", hv))
-
-		case val.format == utils.TimeObjectFormat:
-			switch hf.Kind() {
-			case reflect.Pointer:
-				tv, ok := hv.(*time.Time)
-				if !ok {
-					return newErrReport(ResponseErr, schemaCookies, key, "parser", errors.New("unable to parse header"))
+			c.w.Header().Set(key, v)
+		} else {
+			switch true {
+			case utils.IsPrimitiveKind(val.kind):
+				if utils.PrimitiveKindIsEmpty(val.kind, hv) && val.defVal != nil {
+					hv = val.defVal
 				}
-
-				err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
+				err := runValidation(ResponseErr, hv, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}
 
-				c.w.Header().Set(key, tv.Format(val.pattern))
-			case reflect.Struct:
-				tv, ok := hv.(time.Time)
-				if !ok {
-					return newErrReport(ResponseErr, schemaCookies, key, "parser", errors.New("unable to parse header"))
+				c.w.Header().Set(key, fmt.Sprintf("%v", hv))
+
+			case val.format == utils.TimeObjectFormat:
+				switch hf.Kind() {
+				case reflect.Pointer:
+					tv, ok := hv.(*time.Time)
+					if !ok {
+						return newErrReport(ResponseErr, schemaCookies, key, "parser", errors.New("unable to parse header"))
+					}
+
+					err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
+					if err != nil {
+						return err
+					}
+
+					c.w.Header().Set(key, tv.Format(val.pattern))
+				case reflect.Struct:
+					tv, ok := hv.(time.Time)
+					if !ok {
+						return newErrReport(ResponseErr, schemaCookies, key, "parser", errors.New("unable to parse header"))
+					}
+
+					err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
+					if err != nil {
+						return err
+					}
+
+					c.w.Header().Set(key, tv.Format(val.pattern))
 				}
-
-				err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
-				if err != nil {
-					return err
-				}
-
-				c.w.Header().Set(key, tv.Format(val.pattern))
-			}
-
-		default:
-			if ctype, ok := c.serverOpts.customSchema[string(val.format)]; ok {
-				v, err := ctype.CustomDecode(hv)
-				if err != nil {
-					return newErrReport(ResponseErr, schemaBody, key, "typeMismatch", err)
-				}
-
-				err = runValidation(ResponseErr, v, schemaHeaders, key, val.rules)
-				if err != nil {
-					return err
-				}
-
-				c.w.Header().Set(key, v)
 			}
 		}
 	}

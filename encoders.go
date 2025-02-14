@@ -536,6 +536,19 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		}
 	}
 
+	if ctype, ok := c.serverOpts.customSchema[string(rules.format)]; ok {
+		if vIsValid {
+			v, err := ctype.CustomEncode(vany)
+			if err != nil {
+				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+			}
+			encodeString(buf, v)
+			return nil
+		} else {
+			return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given time value to string"))
+		}
+	}
+
 	switch val.Kind() {
 	case reflect.Invalid:
 		_, err := buf.WriteString("null")
@@ -583,17 +596,6 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 				return nil
 			} else {
 				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("cannot cast time field to string"))
-			}
-		} else if ctype, ok := c.serverOpts.customSchema[string(rules.format)]; ok {
-			if vIsValid {
-				v, err := ctype.CustomDecode(vany)
-				if err != nil {
-					return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
-				}
-				encodeString(buf, v)
-				return nil
-			} else {
-				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given time value to string"))
 			}
 		} else {
 			return encodeStruct(buf, val, rules, kp)

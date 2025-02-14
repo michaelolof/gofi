@@ -137,7 +137,7 @@ func (c *specialStringResolver) IsCustomType(t reflect.Type) (*CustomSchemaProps
 	}
 }
 
-func (c *specialStringResolver) CustomEncode(val any) (any, error) {
+func (c *specialStringResolver) CustomDecode(val any) (any, error) {
 	if v, ok := val.(string); ok {
 		return specialString{val: v}, nil
 	} else {
@@ -145,7 +145,7 @@ func (c *specialStringResolver) CustomEncode(val any) (any, error) {
 	}
 }
 
-func (c *specialStringResolver) CustomDecode(val any) (string, error) {
+func (c *specialStringResolver) CustomEncode(val any) (string, error) {
 	if v, ok := val.(specialString); ok {
 		return v.Val(), nil
 	} else {

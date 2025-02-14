@@ -20,11 +20,11 @@ func (c customStruct) IsCustomType(typ reflect.Type) (*CustomSchemaProps, bool) 
 	}
 }
 
-func (c customStruct) CustomDecode(val any) (string, error) {
+func (c customStruct) CustomEncode(val any) (string, error) {
 	return "custom-type", nil
 }
 
-func (c customStruct) CustomEncode(val any) (any, error) {
+func (c customStruct) CustomDecode(val any) (any, error) {
 	return customStruct{}, nil
 }
 

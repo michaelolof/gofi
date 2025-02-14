@@ -67,22 +67,24 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			return nil
 		}
 
-		val, err := utils.PrimitiveFromStr(def.kind, qv)
-		if err != nil || utils.NotPrimitive(val) {
-			// Handle special cases.
-			switch def.format {
-			case utils.TimeObjectFormat:
-				val, err = time.Parse(def.pattern, qv)
-				if err != nil {
-					return newErrReport(RequestErr, field, def.field, "typeCast", err)
-				}
-			default:
-				if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
-					val, err = ctype.CustomEncode(qv)
+		var val any
+		var err error
+		if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
+			val, err = ctype.CustomDecode(qv)
+			if err != nil {
+				return newErrReport(RequestErr, field, def.field, "typeCast", err)
+			}
+		} else {
+			val, err = utils.PrimitiveFromStr(def.kind, qv)
+			if err != nil || utils.NotPrimitive(val) {
+				// Handle special cases.
+				switch def.format {
+				case utils.TimeObjectFormat:
+					val, err = time.Parse(def.pattern, qv)
 					if err != nil {
 						return newErrReport(RequestErr, field, def.field, "typeCast", err)
 					}
-				} else {
+				default:
 					return newErrReport(RequestErr, field, def.field, "typeCast", err)
 				}
 			}
