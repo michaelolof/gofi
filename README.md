@@ -1,11 +1,23 @@
 # gofi (In Development)
 
-Gofi is an openapi 3 schema-first router for Golang.
+Gofi is an openapi3 schema-based http router for Golang.
+
+Features
+- Designed to be performant.
+- Simple and developer friendly interface.
+- Automatic request and response validation based on your schema.
+- Automatic API documentation with support for StopLight, Swagger, RapidDoc, Redocly, Scalar documentations and a developer friendly interface to bring in your own custom documentation.
+- General error handling
+- Support for documenting, encoding and decoding custom types
+<br/>
+<br/>
 
 Installation
-```go
+```sh
 go get -u github.com/michaelolof/gofi
 ```
+<br/>
+<br/>
 
 Example
 ```go
@@ -63,7 +75,7 @@ var PingHandler = gofi.DefineHandler(gofi.RouteOptions{
 			TimeStamp: int(time.Now().Unix()),
 		}
 
-		return c.JSON(200, s.Ok)
+		return c.Send(200, s.Ok)
 	},
 })
 	
@@ -96,9 +108,8 @@ func main() {
 }   
 ```
 
-Openapi 3 documentation is served at http://localhost:4200/api-docs
-gofi will generate an openapi3 documentation with request and response validations based on the schema struct defined.
+Openapi3 documentation will be served on http://localhost:4200/api-docs
 
-![Ping documentation screenshot](./assets/img/gofi_ping_doc.png)
+![Ping documentation screenshot](./docs/img/gofi_ping_doc.png)
 
 **Please note:** gofi is still in development and APIs are subject to change. Do not use in production.

@@ -93,13 +93,7 @@ func (r *ruleDef) attach(name string, item *ruleDef) {
 		return
 	}
 
-	if r == nil && item != nil {
-		r = &ruleDef{}
-		r.kind = item.kind
-		r.field = item.field
-		r.rules = item.rules
-		// r.children = list.children
-	} else {
+	if r != nil {
 		r.properties[name] = item
 	}
 }
@@ -121,13 +115,7 @@ func (r *ruleDef) addProps(props *ruleDef) {
 		return
 	}
 
-	if r == nil && props != nil {
-		r = &ruleDef{}
-		r.kind = props.kind
-		r.field = props.field
-		r.rules = props.rules
-		// r.children = item.children
-	} else {
+	if r != nil {
 		r.additionalProperties = props
 	}
 }

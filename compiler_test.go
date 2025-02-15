@@ -93,7 +93,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 
 			s.Ok.Body.Primitive = "john"
 			s.Ok.Body.Custom = specialString{val: "doe"}
-			return c.JSON(200, s.Ok)
+			return c.Send(200, s.Ok)
 		},
 	}
 

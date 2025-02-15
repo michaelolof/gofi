@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"fmt"
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -44,22 +45,22 @@ func TestSend(t *testing.T) {
 
 	type testSchema struct {
 		Ok struct {
-			// Header struct {
-			// 	Une  string       `validate:"required" default:"one-in-french"`
-			// 	Duex time.Time    `json:"deux" validate:"required"`
-			// 	Tres customStruct `json:"tres" validate:"required"`
-			// }
+			Header struct {
+				Une  string       `validate:"required" default:"one-in-french"`
+				Duex time.Time    `json:"deux" validate:"required"`
+				Tres customStruct `json:"tres" validate:"required"`
+			}
 
-			// Cookie struct {
-			// 	One   string       `validate:"required" default:"startings"`
-			// 	Two   *http.Cookie `validate:"required" default:"two"`
-			// 	Three customStruct `validate:"required" default:"three"`
-			// }
+			Cookie struct {
+				One   string       `validate:"required" default:"startings"`
+				Two   *http.Cookie `validate:"required" default:"two"`
+				Three customStruct `validate:"required" default:"three"`
+			}
 
 			Body struct {
-				Two int `json:"two" validate:"required" default:"20"`
-				// One     string            `json:"one" validate:"required"`
-				// Casttro map[string]varmin `json:"castor" validate:"required"`
+				Two     int               `json:"two" validate:"required" default:"20"`
+				One     string            `json:"one" validate:"required"`
+				Casttro map[string]varmin `json:"castor" validate:"required"`
 			} `validate:"required"`
 		}
 	}
