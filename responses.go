@@ -64,6 +64,7 @@ func (c *context) Send(code int, obj any) error {
 		return err
 	}
 
+	c.w.WriteHeader(code)
 	_, err = c.w.Write(bs)
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "writer", err)

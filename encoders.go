@@ -545,7 +545,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 			encodeString(buf, v)
 			return nil
 		} else {
-			return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given time value to string"))
+			return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
 		}
 	}
 
