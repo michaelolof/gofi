@@ -536,6 +536,14 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		}
 	}
 
+	if vany == nil {
+		_, err := buf.WriteString("null")
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
 	if ctype, ok := c.serverOpts.customSchema[string(rules.format)]; ok {
 		if vIsValid {
 			v, err := ctype.CustomEncode(vany)
