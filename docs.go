@@ -12,6 +12,7 @@ type Docs struct {
 	OpenApi string     `json:"openapi"`
 	Paths   *docsPaths `json:"paths,omitempty"`
 	*DocsOptions
+	Components DocsComponent `json:"components"`
 }
 
 type docsPaths map[string]map[string]openapiOperationObject
@@ -91,6 +92,11 @@ type DocsView struct {
 	Template    DocsUiTemplate
 	UrlMatch    func(url string) bool
 	DocsPath    string
+	Components  DocsComponent
+}
+
+type DocsComponent struct {
+	Schemas map[string]any `json:"schemas"`
 }
 
 type DocsUiTemplate interface {
@@ -313,6 +319,7 @@ func ServeDocs(r Router, opts DocsOptions) error {
 				d = opts.getMatchingDocs(m, vopt.UrlMatch)
 			}
 
+			d.Components = vopt.Components
 			ds, err := json.Marshal(d)
 			if err != nil {
 				cerr = err
