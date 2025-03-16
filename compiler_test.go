@@ -109,6 +109,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	}
 
 	var data testSchemaBody
+	// TODO: Figure out how to consolidate marshalling/unmarshalling of schema types along with JSON
 	err = json.Unmarshal(resp.Body.Bytes(), &data)
 	if err != nil {
 		log.Fatalln(err)

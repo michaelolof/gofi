@@ -212,7 +212,12 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return newErrReport(ResponseErr, schemaCookies, "", "parser", errors.New("unable to parse cookie"))
 				}
 
-				err := runValidation(ResponseErr, cook.Value, schemaHeaders, key, val.rules)
+				var cookV string
+				if cook != nil {
+					cookV = cook.Value
+				}
+
+				err := runValidation(ResponseErr, cookV, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}
