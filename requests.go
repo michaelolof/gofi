@@ -15,8 +15,17 @@ func Validate(c Context) error {
 		return errors.New("unknown context object passed")
 	}
 
+	if ctx.bindedCacheResult.bound {
+		if ctx.bindedCacheResult.err != nil {
+			return ctx.bindedCacheResult.err
+		} else {
+			return nil
+		}
+	}
+
 	_, err := validateAndOrBindRequest[any](ctx, false)
 	if err != nil {
+		ctx.bindedCacheResult = bindedResult{bound: true, err: err}
 		return err
 	}
 
@@ -29,11 +38,21 @@ func ValidateAndBind[T any](c Context) (*T, error) {
 		return nil, errors.New("unknown context object passed")
 	}
 
+	if ctx.bindedCacheResult.bound {
+		if ctx.bindedCacheResult.err != nil {
+			return nil, ctx.bindedCacheResult.err
+		} else if v, ok := ctx.bindedCacheResult.val.(*T); ok {
+			return v, nil
+		}
+	}
+
 	s, err := validateAndOrBindRequest[T](ctx, true)
 	if err != nil {
+		ctx.bindedCacheResult = bindedResult{bound: true, err: err}
 		return nil, err
 	}
 
+	ctx.bindedCacheResult = bindedResult{bound: true, val: s}
 	return s, nil
 }
 
@@ -256,13 +275,4 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 	return schemaPtr, errors.Join(errs...)
 
-	// switch contentType {
-	// case cont.ApplicationJson:
-	// 	err := validateAndOrBindJson(c, pdef, body, shouldBind, &reqStruct, schemaPtr)
-	// 	if err != nil {
-	// 		return schemaPtr, err
-	// 	}
-	// }
-
-	// return schemaPtr, errors.Join(errs...)
 }

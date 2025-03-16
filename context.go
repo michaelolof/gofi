@@ -5,6 +5,12 @@ import (
 	"reflect"
 )
 
+type bindedResult struct {
+	bound bool
+	err   error
+	val   any
+}
+
 type Context interface {
 	// Returns the http writer instance for the request
 	Writer() http.ResponseWriter
@@ -21,23 +27,25 @@ type Context interface {
 }
 
 type context struct {
-	w           http.ResponseWriter
-	r           *http.Request
-	rules       *schemaRules
-	routeMeta   metaMap
-	globalStore ReadOnlyStore
-	dataStore   GofiStore
-	serverOpts  *muxOptions
+	w                 http.ResponseWriter
+	r                 *http.Request
+	rules             *schemaRules
+	routeMeta         metaMap
+	globalStore       ReadOnlyStore
+	dataStore         GofiStore
+	serverOpts        *muxOptions
+	bindedCacheResult bindedResult
 }
 
 func newContext(w http.ResponseWriter, r *http.Request) *context {
 	return &context{
-		w:           w,
-		r:           r,
-		routeMeta:   map[string]map[string]any{},
-		globalStore: NewGlobalStore(),
-		dataStore:   NewDataStore(),
-		serverOpts:  defaultMuxOptions(),
+		w:                 w,
+		r:                 r,
+		routeMeta:         map[string]map[string]any{},
+		globalStore:       NewGlobalStore(),
+		dataStore:         NewDataStore(),
+		serverOpts:        defaultMuxOptions(),
+		bindedCacheResult: bindedResult{bound: false},
 	}
 }
 

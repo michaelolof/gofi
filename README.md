@@ -83,7 +83,7 @@ func main() {
     
     mux := gofi.NewServeMux()
 
-    err := gofi.ServeDocs(r, gofi.DocsOptions{
+    err := gofi.ServeDocs(mux, gofi.DocsOptions{
 		Info: gofi.DocsInfoOptions{
 			Title:       "My Awesome Service",
 			Version:     "0.0.1",
