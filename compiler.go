@@ -171,7 +171,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 			case "json":
 				tagList[stag] = strings.Split(tag, ",")
 			case "example", "deprecated", "description", "pattern":
-				tagList[stag] = []string{stag}
+				tagList[stag] = []string{tag}
 			case "default":
 				defStr = tag
 			case "validate":
