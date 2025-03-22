@@ -109,6 +109,7 @@ func (s *serveMux) SetCustomSchemaTypes(list CustomSchemaTypes) {
 type InjectOptions struct {
 	Path    string
 	Method  string
+	Query   map[string]string
 	Paths   map[string]string
 	Headers map[string]string
 	Cookies []http.Cookie
@@ -121,6 +122,15 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	if err != nil {
 		return nil, err
 	}
+
+	if len(opts.Query) > 0 {
+		qParams := r.URL.Query()
+		for name, value := range opts.Query {
+			qParams.Add(name, value)
+		}
+		r.URL.RawQuery = qParams.Encode()
+	}
+
 	for name, value := range opts.Paths {
 		r.SetPathValue(name, value)
 	}

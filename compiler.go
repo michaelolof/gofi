@@ -168,9 +168,11 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 	for _, stag := range supportedTags {
 		if tag, ok := sf.Tag.Lookup(stag); ok {
 			switch stag {
-			case "json", "example", "deprecated":
+			case "json":
 				tagList[stag] = strings.Split(tag, ",")
-			case "default", "description", "pattern":
+			case "example", "deprecated", "description", "pattern":
+				tagList[stag] = []string{stag}
+			case "default":
 				defStr = tag
 			case "validate":
 				vtags := strings.Split(tag, ",")
