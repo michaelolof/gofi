@@ -149,6 +149,29 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	assert.Equal(t, data.Custom.Val(), "doe")
 }
 
+func TestDynamicStructTags(t *testing.T) {
+	type testSchema struct {
+		Ok struct {
+			Body struct {
+				Primitive string         `json:"primitive" validate:"required,oneof=june july august"`
+				Special   time.Time      `json:"special" validate:"required"`
+				Custom    dynamicTagType `json:"custom" validate:"required,oneof@OneOf" spec:"dynamic" description:"@MyDescription"`
+			}
+		}
+	}
+
+	r := newServeMux()
+	r.SetCustomSpecs(map[string]CustomSchemaProps{
+		"dynamic": {Type: "string", Format: "string"},
+	})
+	cs := r.compileSchema(&testSchema{}, Info{})
+
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Enum, []any{"june", "july", "august"})
+	assert.Contains(t, cs.specs.responsesSchema["Ok"].Required, "special")
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["custom"].Enum, []any{"monday", "tuesday"})
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["custom"].Description, "this is a description")
+}
+
 type vendorType struct {
 	val string
 }
@@ -185,4 +208,14 @@ func vendorEncoder(val any) (string, error) {
 	} else {
 		return "", errors.New("unable to encode vendor")
 	}
+}
+
+type dynamicTagType struct{}
+
+func (d dynamicTagType) OneOf() string {
+	return "monday tuesday"
+}
+
+func (d dynamicTagType) MyDescription() string {
+	return "this is a description"
 }

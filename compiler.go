@@ -3,6 +3,7 @@ package gofi
 import (
 	"log"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -172,32 +173,41 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 			case "json":
 				tagList[stag] = strings.Split(tag, ",")
 			case "example", "deprecated", "description", "pattern", "spec":
-				tagList[stag] = []string{tag}
+				tagList[stag] = []string{parseTagValue(tag, sf.Type)}
 			case "default":
-				defStr = tag
+				defStr = parseTagValue(tag, sf.Type)
 			case "validate":
 				vtags := strings.Split(tag, ",")
-				tagList[stag] = vtags
 				rules = make([]ruleOpts, 0, len(vtags))
 				for _, tag := range vtags {
-					v := strings.Split(tag, "=")
-					var options []string
-					if len(v) > 1 {
-						options = strings.Split(v[1], " ")
+					tagFieldRegex := regexp.MustCompile(`([a-zA-Z0-9_]+)(?:=([^,]+)|@([^,]+))?`)
+					maches := tagFieldRegex.FindStringSubmatch(tag)
+					ruleName := maches[1]
+					optionStr := maches[2]
+
+					if v := maches[3]; len(v) != 0 {
+						if ts, ok := checkTagReference(v, sf.Type); ok {
+							optionStr = ts
+						}
 					}
 
-					if v[0] == "required" {
+					var options []string
+					if len(optionStr) > 1 {
+						options = strings.Split(optionStr, " ")
+					}
+
+					if ruleName == "required" {
 						required = true
 					}
 
-					if (v[0] == "max" || v[0] == "lte") && len(v) > 1 {
+					if (ruleName == "max" || ruleName == "lte") && len(options) > 1 {
 						flt, err := strconv.ParseFloat(options[0], 64)
 						if err == nil {
 							max = &flt
 						}
 					}
 
-					rules = append(rules, newRuleOpts(sf.Type.Kind(), v[0], options, s.opts))
+					rules = append(rules, newRuleOpts(sf.Type.Kind(), ruleName, options, s.opts))
 				}
 			}
 		}
@@ -476,6 +486,27 @@ func optsMapper(opts []string, fn func(string) any) []any {
 		ropts = append(ropts, v)
 	}
 	return ropts
+}
+
+func parseTagValue(tag string, typ reflect.Type) string {
+	if methodName, found := strings.CutPrefix(tag, "@"); found {
+		if v, ok := checkTagReference(methodName, typ); ok {
+			return v
+		}
+	}
+	return tag
+}
+
+func checkTagReference(methodName string, typ reflect.Type) (string, bool) {
+	method := reflect.New(typ).Elem().MethodByName(methodName)
+	if method.IsValid() && !method.IsNil() {
+		if results := method.Call(nil); len(results) > 0 {
+			if v, ok := (results[0].Interface()).(string); ok {
+				return v, true
+			}
+		}
+	}
+	return "", false
 }
 
 type SpecialTypeIds = utils.ObjectFormats
