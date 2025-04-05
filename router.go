@@ -24,4 +24,5 @@ type Router interface {
 	Meta() RouterMeta
 	SetErrorHandler(func(err error, c Context))
 	Inject(opts InjectOptions) (*httptest.ResponseRecorder, error)
+	SetCustomSpecs(list map[string]CustomSchemaProps)
 }
