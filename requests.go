@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
@@ -88,10 +89,29 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 		var val any
 		var err error
-		if ctype, ok := c.serverOpts.customSchema[string(def.format)]; ok {
-			val, err = ctype.CustomDecode(qv)
-			if err != nil {
-				return newErrReport(RequestErr, field, def.field, "typeCast", err)
+		if spec, ok := c.serverOpts.customSpecs[string(def.format)]; ok {
+			if spec.Decoder != nil {
+				val, err = spec.Decoder(qv)
+				if err != nil {
+					return newErrReport(RequestErr, field, def.field, "typeCast", err)
+				}
+			} else {
+				sf := reqStruct.FieldByName(string(field)).FieldByName(def.name)
+				// Only support structs cause pointers will default to nil which is not possible to mutate
+				if sf.Kind() == reflect.Struct {
+					sfp := reflect.New(sf.Type())
+					if sfp.Type().NumMethod() > 0 && sfp.CanInterface() {
+						if v, ok := (sfp.Interface()).(json.Unmarshaler); ok {
+							if err := v.UnmarshalJSON([]byte(qv)); err != nil {
+								return newErrReport(RequestErr, field, def.field, "json-unmarshal", err)
+							}
+
+							va := reflect.ValueOf(v).Elem()
+							sf.Set(va.Convert(sf.Type()))
+							return nil
+						}
+					}
+				}
 			}
 		} else {
 			val, err = utils.PrimitiveFromStr(def.kind, qv)

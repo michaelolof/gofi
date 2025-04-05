@@ -100,9 +100,9 @@ func (s *serveMux) SetErrorHandler(handler func(err error, c Context)) {
 	}
 }
 
-func (s *serveMux) SetCustomSchemaTypes(list CustomSchemaTypes) {
+func (s *serveMux) SetCustomSpecs(list map[string]CustomSchemaProps) {
 	if list != nil {
-		s.opts.customSchema = list
+		s.opts.customSpecs = list
 	}
 }
 

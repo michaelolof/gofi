@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -544,14 +545,25 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		return nil
 	}
 
-	if ctype, ok := c.serverOpts.customSchema[string(rules.format)]; ok {
+	if spec, ok := c.serverOpts.customSpecs[string(rules.format)]; ok {
 		if vIsValid {
-			v, err := ctype.CustomEncode(vany)
-			if err != nil {
-				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+			if spec.Encoder != nil {
+				v, err := spec.Encoder(vany)
+				if err != nil {
+					return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+				}
+				encodeString(buf, v)
+				return nil
+			} else {
+				if vm, ok := vany.(json.Marshaler); ok {
+					v, err := vm.MarshalJSON()
+					if err != nil {
+						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "json-marshal", err)
+					}
+					encodeString(buf, string(v))
+					return nil
+				}
 			}
-			encodeString(buf, v)
-			return nil
 		} else {
 			return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
 		}

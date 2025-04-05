@@ -4,27 +4,54 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCompilerHooksOpenAPISpecs(t *testing.T) {
+func TestOpenAPISpecsMethod(t *testing.T) {
 
 	type testSchema struct {
 		Ok struct {
 			Body struct {
-				Primitive string        `json:"primitive" validate:"required"`
-				Special   time.Time     `json:"special" validate:"required"`
-				Custom    specialString `json:"custom" validate:"required"`
+				Primitive string     `json:"primitive" validate:"required"`
+				Special   time.Time  `json:"special" validate:"required"`
+				Custom    vendorType `json:"custom" validate:"required" spec:"custom"`
 			}
 		}
 	}
 
 	r := newServeMux()
-	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &specialStringResolver{}})
+	r.SetCustomSpecs(map[string]CustomSchemaProps{
+		"custom": {Type: "string", Format: "string", Decoder: vendorDecoder, Encoder: vendorEncoder},
+	})
+	cs := r.compileSchema(&testSchema{}, Info{})
+
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["special"].Type, "string", "special type is correctly set")
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["special"].Format, "date-time", "special format is correctly set")
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["custom"].Type, "string", "custom type is correctly set")
+	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["custom"].Format, "string", "custom format is correctly set")
+}
+
+func TestCompilerHooksOpenAPISpecs(t *testing.T) {
+
+	type testSchema struct {
+		Ok struct {
+			Body struct {
+				Primitive string     `json:"primitive" validate:"required"`
+				Special   time.Time  `json:"special" validate:"required"`
+				Custom    vendorType `json:"custom" validate:"required" spec:"custom"`
+			}
+		}
+	}
+
+	r := newServeMux()
+	r.SetCustomSpecs(map[string]CustomSchemaProps{
+		"custom": {Type: "string", Format: "string", Decoder: vendorDecoder, Encoder: vendorEncoder},
+	})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
@@ -38,8 +65,8 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 	type testSchema struct {
 		Request struct {
 			Path struct {
-				Primitive string        `json:"primitive" validate:"required"`
-				Custom    specialString `json:"custom" validate:"required"`
+				Primitive string     `json:"primitive" validate:"required"`
+				Custom    vendorType `json:"custom" validate:"required" spec:"custom"`
 			}
 		}
 	}
@@ -59,7 +86,9 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &specialStringResolver{}})
+	r.SetCustomSpecs(map[string]CustomSchemaProps{
+		"custom": {Type: "string", Format: "string"},
+	})
 	r.Inject(InjectOptions{
 		Path:   "/test/:primitive/:custom",
 		Method: "GET",
@@ -73,8 +102,8 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 
 func TestCompilerHooksBindedResponse(t *testing.T) {
 	type testSchemaBody struct {
-		Primitive string        `json:"primitive" validate:"required"`
-		Custom    specialString `json:"custom" validate:"required"`
+		Primitive string     `json:"primitive" validate:"required"`
+		Custom    vendorType `json:"custom" validate:"required" spec:"custom"`
 	}
 
 	type testSchema struct {
@@ -92,13 +121,15 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 			}
 
 			s.Ok.Body.Primitive = "john"
-			s.Ok.Body.Custom = specialString{val: "doe"}
+			s.Ok.Body.Custom = vendorType{val: "doe"}
 			return c.Send(200, s.Ok)
 		},
 	}
 
 	r := newServeMux()
-	r.SetCustomSchemaTypes(CustomSchemaTypes{"special-string-type": &specialStringResolver{}})
+	r.SetCustomSpecs(map[string]CustomSchemaProps{
+		"custom": {Type: "string", Format: "string"},
+	})
 	resp, err := r.Inject(InjectOptions{
 		Path:    "/test/:primitive/:custom",
 		Method:  "GET",
@@ -109,7 +140,6 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	}
 
 	var data testSchemaBody
-	// TODO: Figure out how to consolidate marshalling/unmarshalling of schema types along with JSON
 	err = json.Unmarshal(resp.Body.Bytes(), &data)
 	if err != nil {
 		log.Fatalln(err)
@@ -119,37 +149,40 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	assert.Equal(t, data.Custom.Val(), "doe")
 }
 
-type specialString struct {
+type vendorType struct {
 	val string
 }
 
-func (s *specialString) Val() string {
+func (s *vendorType) Val() string {
 	return s.val
 }
 
-type specialStringResolver struct {
+func (u vendorType) MarshalJSON() ([]byte, error) {
+	return []byte(u.val), nil
 }
 
-func (c *specialStringResolver) IsCustomType(t reflect.Type) (*CustomSchemaProps, bool) {
-	if t == reflect.TypeOf(specialString{}) {
-		return &CustomSchemaProps{Type: "string", Format: "string"}, true
+func (s *vendorType) UnmarshalJSON(data []byte) error {
+	v, err := strconv.Unquote(string(data))
+	if err == nil {
+		s.val = v
 	} else {
-		return nil, false
+		s.val = string(data)
 	}
+	return nil
 }
 
-func (c *specialStringResolver) CustomDecode(val any) (any, error) {
+func vendorDecoder(val any) (any, error) {
 	if v, ok := val.(string); ok {
-		return specialString{val: v}, nil
+		return vendorType{val: v}, nil
 	} else {
-		return nil, errors.New("error casting special string type")
+		return nil, errors.New("unable to decode vendor")
 	}
 }
 
-func (c *specialStringResolver) CustomEncode(val any) (string, error) {
-	if v, ok := val.(specialString); ok {
-		return v.Val(), nil
+func vendorEncoder(val any) (string, error) {
+	if v, ok := val.(vendorType); ok {
+		return v.val, nil
 	} else {
-		return "", errors.New("unknown value type. unable to convert to string")
+		return "", errors.New("unable to encode vendor")
 	}
 }

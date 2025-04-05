@@ -104,8 +104,8 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 
 		hv := hf.Interface()
 
-		if ctype, ok := c.serverOpts.customSchema[string(val.format)]; ok {
-			v, err := ctype.CustomEncode(hv)
+		if spec, ok := c.serverOpts.customSpecs[string(val.format)]; ok && spec.Encoder != nil {
+			v, err := spec.Encoder(hv)
 			if err != nil {
 				return newErrReport(ResponseErr, schemaBody, key, "typeMismatch", err)
 			}

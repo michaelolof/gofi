@@ -158,6 +158,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 		"deprecated",
 		"description",
 		"pattern",
+		"spec",
 	}
 
 	tagList := make(map[string][]string)
@@ -170,7 +171,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 			switch stag {
 			case "json":
 				tagList[stag] = strings.Split(tag, ",")
-			case "example", "deprecated", "description", "pattern":
+			case "example", "deprecated", "description", "pattern", "spec":
 				tagList[stag] = []string{tag}
 			case "default":
 				defStr = tag
@@ -223,6 +224,7 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 	var example any
 	var deprecated *bool
 	var description string
+	var specTag string
 	properties := make(map[string]openapiSchema)
 	requiredProps := make([]string, 0)
 
@@ -272,18 +274,19 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 		if v, ok := ruleDefs.tags["pattern"]; ok && len(v) > 0 {
 			pattern = v[0]
 		}
+
+		if v, ok := ruleDefs.tags["spec"]; ok && len(v) > 0 {
+			specTag = v[0]
+		}
 	}
 
 	isCustom := false
-	for id, ctype := range s.opts.customSchema {
-		if v, ok := ctype.IsCustomType(typ); ok {
-			enum = optsMapper(optStr, nil)
-			typeStr = v.Type
-			format = v.Format
-			ruleDefs.format = utils.ObjectFormats(id)
-			isCustom = true
-			break
-		}
+	if v, ok := s.opts.customSpecs[specTag]; ok {
+		enum = optsMapper(optStr, nil)
+		typeStr = v.Type
+		format = v.Format
+		ruleDefs.format = utils.ObjectFormats(specTag)
+		isCustom = true
 	}
 
 	if !isCustom {
@@ -423,23 +426,26 @@ func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any 
 			}
 		}
 	}
+
 	tagVal := f.Tag.Get("default")
 	kind := f.Type.Kind()
 
-	val, err := utils.PrimitiveFromStr(kind, tagVal)
-	if err != nil {
-		if fieldVal != nil {
-			return fieldVal
-		} else {
-			return nil
+	switch true {
+	case utils.IsPrimitiveKind(kind):
+		val, err := utils.PrimitiveFromStr(kind, tagVal)
+		if err != nil {
+			if fieldVal != nil {
+				return fieldVal
+			} else {
+				return nil
+			}
 		}
-	}
-
-	if utils.NotPrimitive(val) {
+		return val
+	case kind == reflect.Slice && tagVal == "[]":
+		return reflect.MakeSlice(reflect.SliceOf(f.Type.Elem()), 0, 0).Interface()
+	default:
 		return nil
 	}
-
-	return val
 }
 
 func getFieldName(sf reflect.StructField) string {

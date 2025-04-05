@@ -66,9 +66,6 @@ func TestSend(t *testing.T) {
 	}
 
 	mux := NewServeMux()
-	mux.SetCustomSchemaTypes(map[string]CustomSchemaType{
-		"custom_struct": customStruct{},
-	})
 
 	handler := RouteOptions{
 		Schema: &testSchema{},
