@@ -1,6 +1,8 @@
 package gofi
 
 import (
+	"encoding"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -97,25 +99,54 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 
 	for key, val := range ruleProps {
 
-		hf := headers.FieldByName(val.name)
+		hf := headers.FieldByName(val.fieldName)
 		if !hf.IsValid() {
 			continue
 		}
 
 		hv := hf.Interface()
-
-		if spec, ok := c.serverOpts.customSpecs[string(val.format)]; ok && spec.Encoder != nil {
-			v, err := spec.Encoder(hv)
-			if err != nil {
-				return newErrReport(ResponseErr, schemaBody, key, "typeMismatch", err)
-			}
-
-			err = runValidation(ResponseErr, v, schemaHeaders, key, val.rules)
+		checkAndSet := func(val string, key string, rules []ruleOpts) error {
+			err := runValidation(ResponseErr, val, schemaHeaders, key, rules)
 			if err != nil {
 				return err
 			}
 
-			c.w.Header().Set(key, v)
+			c.w.Header().Set(key, val)
+			return nil
+		}
+
+		if spec, ok := c.serverOpts.customSpecs[string(val.format)]; ok {
+			if spec.Encoder != nil {
+				v, err := spec.Encoder(hv)
+				if err != nil {
+					return newErrReport(ResponseErr, schemaHeaders, key, "typeMismatch", err)
+				}
+
+				if err := checkAndSet(v, key, val.rules); err != nil {
+					return err
+				}
+			} else {
+				switch vm := hv.(type) {
+				case json.Marshaler:
+					v, err := vm.MarshalJSON()
+					if err != nil {
+						return newErrReport(ResponseErr, schemaHeaders, key, "json-marshal", err)
+					}
+
+					if err := checkAndSet(string(v), key, val.rules); err != nil {
+						return err
+					}
+				case encoding.TextMarshaler:
+					v, err := vm.MarshalText()
+					if err != nil {
+						return newErrReport(ResponseErr, schemaHeaders, key, "text-marshal", err)
+					}
+
+					if err := checkAndSet(string(v), key, val.rules); err != nil {
+						return err
+					}
+				}
+			}
 		} else {
 			switch true {
 			case utils.IsPrimitiveKind(val.kind):
@@ -134,7 +165,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				case reflect.Pointer:
 					tv, ok := hv.(*time.Time)
 					if !ok {
-						return newErrReport(ResponseErr, schemaCookies, key, "parser", errors.New("unable to parse header"))
+						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
 					err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
@@ -146,7 +177,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				case reflect.Struct:
 					tv, ok := hv.(time.Time)
 					if !ok {
-						return newErrReport(ResponseErr, schemaCookies, key, "parser", errors.New("unable to parse header"))
+						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
 					err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
@@ -187,7 +218,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 	}
 
 	for key, val := range ruleProps {
-		cf := cookies.FieldByName(val.name)
+		cf := cookies.FieldByName(val.fieldName)
 		if !cf.IsValid() {
 			continue
 		}

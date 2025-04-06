@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,7 +163,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 		for childKey, childDef := range opts.SchemaRules.properties {
 			var childStruct reflect.Value
 			if opts.ShouldEncode {
-				childStruct = getFieldStruct(opts.FieldStruct, childDef.name)
+				childStruct = getFieldStruct(opts.FieldStruct, childDef.fieldName)
 			}
 
 			childOpts := getFieldOptions(opts, &childStruct, childDef)
@@ -494,7 +495,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		first := true
 
 		for field, frules := range rules.properties {
-			fieldValue := val.FieldByName(frules.name)
+			fieldValue := val.FieldByName(frules.fieldName)
 			if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
 				continue
 			}
@@ -555,11 +556,21 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 				encodeString(buf, v)
 				return nil
 			} else {
-				if vm, ok := vany.(json.Marshaler); ok {
+				switch vm := vany.(type) {
+				case json.Marshaler:
 					v, err := vm.MarshalJSON()
 					if err != nil {
 						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "json-marshal", err)
 					}
+					encodeString(buf, string(v))
+					return nil
+
+				case encoding.TextMarshaler:
+					v, err := vm.MarshalText()
+					if err != nil {
+						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "text-marshal", err)
+					}
+
 					encodeString(buf, string(v))
 					return nil
 				}

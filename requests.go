@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"encoding"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -96,18 +97,25 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 					return newErrReport(RequestErr, field, def.field, "typeCast", err)
 				}
 			} else {
-				sf := reqStruct.FieldByName(string(field)).FieldByName(def.name)
+				sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
 				// Only support structs cause pointers will default to nil which is not possible to mutate
-				if sf.Kind() == reflect.Struct {
+				if sf.Kind() != reflect.Pointer {
 					sfp := reflect.New(sf.Type())
 					if sfp.Type().NumMethod() > 0 && sfp.CanInterface() {
-						if v, ok := (sfp.Interface()).(json.Unmarshaler); ok {
+						switch v := (sfp.Interface()).(type) {
+						case json.Unmarshaler:
 							if err := v.UnmarshalJSON([]byte(qv)); err != nil {
 								return newErrReport(RequestErr, field, def.field, "json-unmarshal", err)
 							}
 
-							va := reflect.ValueOf(v).Elem()
-							sf.Set(va.Convert(sf.Type()))
+							sf.Set(reflect.ValueOf(v).Elem().Convert(sf.Type()))
+							return nil
+						case encoding.TextUnmarshaler:
+							if err := v.UnmarshalText([]byte(qv)); err != nil {
+								return newErrReport(RequestErr, field, def.field, "text-unmarshal", err)
+							}
+
+							sf.Set(reflect.ValueOf(v).Elem().Convert(sf.Type()))
 							return nil
 						}
 					}
@@ -132,12 +140,12 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		errs := make([]error, 0, len(def.rules))
 		for _, l := range def.rules {
 			if err := l.dator(val); err != nil {
-				errs = append(errs, newErrReport(RequestErr, schemaQuery, def.field, l.rule, err))
+				errs = append(errs, newErrReport(RequestErr, field, def.field, l.rule, err))
 			}
 		}
 
 		if len(errs) == 0 && shouldBind {
-			sf := reqStruct.FieldByName(string(field)).FieldByName(def.name)
+			sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
 			sf.Set(reflect.ValueOf(val).Convert(sf.Type()))
 		}
 
@@ -216,7 +224,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			}
 
 			if shouldBind {
-				sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.name)
+				sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
 				if sf.Kind() == reflect.Pointer {
 					sf.Set(reflect.ValueOf(cv).Convert(sf.Type()))
 				} else if cv != nil {
@@ -249,7 +257,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			}
 
 			if shouldBind {
-				sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.name)
+				sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
 				if sf.Kind() == reflect.Pointer {
 					sf.Elem().Set(reflect.ValueOf(cvs).Convert(sf.Elem().Type()))
 				} else {

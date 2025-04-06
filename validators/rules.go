@@ -222,7 +222,7 @@ func IsFileURL(kind reflect.Kind) func(val any) error {
 }
 
 // Validates if a primitive value is one of the defined arguments
-func IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
+func _IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
 
 	if !isPrimitiveKind(kind) {
 		return func(val any) error {
@@ -237,6 +237,120 @@ func IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
 			}
 		}
 		return errors.New("given value '" + fmt.Sprintf("%v", val) + "' not supported")
+	}
+}
+
+func IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
+	valid := make([]reflect.Value, 0, len(args))
+	for _, arg := range args {
+		v := reflect.ValueOf(arg)
+		if v.Kind() != kind {
+			return func(any) error {
+				return fmt.Errorf("invalid option kind: expected %v, got %v", kind, v.Kind())
+			}
+		}
+		valid = append(valid, v)
+	}
+
+	switch kind {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		m := make(map[int64]struct{}, len(valid))
+		for _, v := range valid {
+			m[v.Int()] = struct{}{}
+		}
+		return func(val any) error {
+			v := reflect.ValueOf(val)
+			if v.Kind() != kind {
+				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
+			}
+			if _, ok := m[v.Int()]; ok {
+				return nil
+			}
+			return fmt.Errorf("value %v not in options", v.Interface())
+		}
+
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		m := make(map[uint64]struct{}, len(valid))
+		for _, v := range valid {
+			m[v.Uint()] = struct{}{}
+		}
+		return func(val any) error {
+			v := reflect.ValueOf(val)
+			if v.Kind() != kind {
+				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
+			}
+			if _, ok := m[v.Uint()]; ok {
+				return nil
+			}
+			return fmt.Errorf("value %v not in options", v.Interface())
+		}
+
+	case reflect.Float32, reflect.Float64:
+		m := make(map[float64]struct{}, len(valid))
+		for _, v := range valid {
+			m[v.Float()] = struct{}{}
+		}
+		return func(val any) error {
+			v := reflect.ValueOf(val)
+			if v.Kind() != kind {
+				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
+			}
+			if _, ok := m[v.Float()]; ok {
+				return nil
+			}
+			return fmt.Errorf("value %v not in options", v.Interface())
+		}
+
+	case reflect.String:
+		m := make(map[string]struct{}, len(valid))
+		for _, v := range valid {
+			m[v.String()] = struct{}{}
+		}
+		return func(val any) error {
+			v := reflect.ValueOf(val)
+			if v.Kind() != reflect.String {
+				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
+			}
+			if _, ok := m[v.String()]; ok {
+				return nil
+			}
+			return fmt.Errorf("value %q not in options", v.String())
+		}
+
+	case reflect.Bool:
+		var t, f bool
+		for _, v := range valid {
+			if v.Bool() {
+				t = true
+			} else {
+				f = true
+			}
+		}
+		return func(val any) error {
+			v := reflect.ValueOf(val)
+			if v.Kind() != reflect.Bool {
+				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
+			}
+			b := v.Bool()
+			if (b && t) || (!b && f) {
+				return nil
+			}
+			return fmt.Errorf("value %v not in options", b)
+		}
+
+	default:
+		return func(val any) error {
+			v := reflect.ValueOf(val)
+			if v.Kind() != kind {
+				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
+			}
+			for _, opt := range valid {
+				if reflect.DeepEqual(v.Interface(), opt.Interface()) {
+					return nil
+				}
+			}
+			return fmt.Errorf("value %v not in options", v.Interface())
+		}
 	}
 }
 

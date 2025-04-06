@@ -10,13 +10,14 @@ import (
 )
 
 type ruleOpts struct {
-	kind  reflect.Kind
-	rule  string
-	args  []string
-	dator validators.CompiledValidatorFn
+	typeName string
+	kind     reflect.Kind
+	rule     string
+	args     []string
+	dator    validators.CompiledValidatorFn
 }
 
-func newRuleOpts(kind reflect.Kind, rule string, args []string, muxOpts *muxOptions) ruleOpts {
+func newRuleOpts(typeName string, kind reflect.Kind, rule string, args []string, muxOpts *muxOptions) ruleOpts {
 	anyArgs := make([]any, 0, len(args))
 	for _, v := range args {
 		anyArgs = append(anyArgs, v)
@@ -28,20 +29,21 @@ func newRuleOpts(kind reflect.Kind, rule string, args []string, muxOpts *muxOpti
 	}
 
 	return ruleOpts{
-		kind:  kind,
-		rule:  rule,
-		args:  args,
-		dator: validators.BuildValidators(kind, rule, anyArgs, customValidators),
+		typeName: typeName,
+		kind:     kind,
+		rule:     rule,
+		args:     args,
+		dator:    validators.BuildValidators(kind, rule, anyArgs, customValidators),
 	}
 }
 
 type ruleDef struct {
-	kind    reflect.Kind
-	format  utils.ObjectFormats
-	pattern string
-	field   string
-	// struct field name
-	name                 string
+	typeName             string
+	kind                 reflect.Kind
+	format               utils.ObjectFormats
+	pattern              string
+	field                string
+	fieldName            string
 	defStr               string
 	defVal               any
 	rules                []ruleOpts
@@ -54,16 +56,17 @@ type ruleDef struct {
 	tags map[string][]string
 }
 
-func newRuleDef(kind reflect.Kind, field string, name string, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*ruleDef, items *ruleDef, addProps *ruleDef) *ruleDef {
+func newRuleDef(typeName string, kind reflect.Kind, field string, fleldName string, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*ruleDef, items *ruleDef, addProps *ruleDef) *ruleDef {
 	props := make(map[string]*ruleDef)
 	if properties != nil {
 		props = properties
 	}
 
 	return &ruleDef{
+		typeName:             typeName,
 		kind:                 kind,
 		field:                field,
-		name:                 name,
+		fieldName:            fleldName,
 		defStr:               defStr,
 		defVal:               defVal,
 		rules:                rules,
@@ -148,7 +151,7 @@ func (r *ruleDef) findRules(rules []string, fallback string) string {
 }
 
 func getItemRuleDef(typ reflect.Type) *ruleDef {
-	return newRuleDef(typ.Kind(), "", "", "", nil, nil, false, nil, nil, nil, nil)
+	return newRuleDef(typ.Name(), typ.Kind(), "", "", "", nil, nil, false, nil, nil, nil, nil)
 }
 
 type ruleDefMap map[string]ruleDef

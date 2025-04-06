@@ -3,7 +3,6 @@ package gofi
 import (
 	"fmt"
 	"net/http"
-	"reflect"
 	"testing"
 	"time"
 
@@ -11,22 +10,6 @@ import (
 )
 
 type customStruct struct {
-}
-
-func (c customStruct) IsCustomType(typ reflect.Type) (*CustomSchemaProps, bool) {
-	if reflect.TypeOf(customStruct{}) == typ {
-		return &CustomSchemaProps{Type: "string", Format: ""}, true
-	} else {
-		return nil, false
-	}
-}
-
-func (c customStruct) CustomEncode(val any) (string, error) {
-	return "custom-type", nil
-}
-
-func (c customStruct) CustomDecode(val any) (any, error) {
-	return customStruct{}, nil
 }
 
 func TestSend(t *testing.T) {
@@ -89,4 +72,36 @@ func TestSend(t *testing.T) {
 }
 
 func TestCheckStuff(t *testing.T) {
+}
+
+func TestTypeHints(t *testing.T) {
+
+	type TypeHint string
+
+	type testSchema struct {
+		Ok struct {
+			Body struct {
+				Hint TypeHint `json:"hint" validate:"required,oneof=good bad ugly"`
+			}
+		}
+	}
+
+	mux := NewServeMux()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			s, _ := ValidateAndBind[testSchema](c)
+			s.Ok.Body.Hint = "good"
+			return c.Send(200, s.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Nil(t, err)
+	fmt.Println(res)
 }
