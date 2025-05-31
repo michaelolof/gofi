@@ -15,137 +15,43 @@ import (
 
 var errValid error = errors.New("value is invalid")
 
-func IsRequired(kind reflect.Kind) func(val any) error {
-	errReq := errors.New("value is required")
+func IsRequired(c ValidatorContext) func(val any) error {
+	zeroVal := reflect.Zero(c.Type).Interface()
+	isPrimitive := isPrimitiveKind(c.Type.Kind())
 
-	switch kind {
-	case reflect.Invalid:
-		return func(val any) error {
-			kind = reflect.TypeOf(val).Kind()
-			if kind != reflect.Invalid {
-				return IsRequired(kind)(val)
-			} else {
-				return errValid
+	return func(val any) error {
+		if val == nil {
+			return fmt.Errorf("value is required")
+		}
+
+		// Fast path for direct primitive comparisons
+		if isPrimitive {
+			if reflect.TypeOf(val) == c.Type {
+				if val == zeroVal {
+					return fmt.Errorf("value is required (got zero primitive)")
+				}
+				return nil
 			}
 		}
-	case reflect.String:
-		return func(val any) error {
-			if v, ok := val.(string); ok {
-				if v == "" {
-					return errReq
-				}
-			} else {
-				return errValid
-			}
-			return nil
+
+		// General reflection-based check
+		v := reflect.ValueOf(val)
+		if !v.IsValid() {
+			return fmt.Errorf("value is required (invalid value)")
 		}
-	case reflect.Bool:
-		return func(val any) error {
-			if v, ok := val.(bool); ok {
-				if !v {
-					return errReq
-				}
-			} else {
-				return errValid
-			}
-			return nil
+
+		if !v.Type().ConvertibleTo(c.Type) {
+			return fmt.Errorf("value type %s is not compatible with %s",
+				v.Type(), c.Type)
 		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64,
-		reflect.Complex64, reflect.Complex128:
-		return func(val any) error {
-			switch v := val.(type) {
-			case int:
-				if v == 0 {
-					return errReq
-				}
-			case int8:
-				if v == 0 {
-					return errReq
-				}
-			case int16:
-				if v == 0 {
-					return errReq
-				}
-			case int32:
-				if v == 0 {
-					return errReq
-				}
-			case int64:
-				if v == 0 {
-					return errReq
-				}
-			case uint:
-				if v == 0 {
-					return errReq
-				}
-			case uint8:
-				if v == 0 {
-					return errReq
-				}
-			case uint16:
-				if v == 0 {
-					return errReq
-				}
-			case uint32:
-				if v == 0 {
-					return errReq
-				}
-			case uint64:
-				if v == 0 {
-					return errReq
-				}
-			case float32:
-				if v == 0 {
-					return errReq
-				}
-			case float64:
-				if v == 0 {
-					return errReq
-				}
-			case complex64:
-				if v == 0 {
-					return errReq
-				}
-			case complex128:
-				if v == 0 {
-					return errReq
-				}
-			default:
-				return errValid
-			}
-			return nil
+
+		converted := v.Convert(c.Type)
+		if converted.IsZero() {
+			return fmt.Errorf("value is required (zero value for type %s)",
+				c.Type.String())
 		}
-	case reflect.Slice, reflect.Array:
-		return func(val any) error {
-			if v := reflect.ValueOf(val); v.Kind() == kind {
-				if v.Len() == 0 {
-					return errReq
-				}
-			} else {
-				return errValid
-			}
-			return nil
-		}
-	case reflect.Map:
-		return func(val any) error {
-			if v := reflect.ValueOf(val); v.Kind() == kind {
-				if v.Len() == 0 {
-					return errReq
-				}
-			} else {
-				return errValid
-			}
-			return nil
-		}
-	default:
-		return func(val any) error {
-			if val == nil {
-				return errReq
-			}
-			return nil
-		}
+
+		return nil
 	}
 }
 
@@ -222,135 +128,81 @@ func IsFileURL(kind reflect.Kind) func(val any) error {
 }
 
 // Validates if a primitive value is one of the defined arguments
-func _IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
+func IsOneOf(c ValidatorContext) func(val any) error {
+	// Pre-check if target type is comparable
+	if !c.Type.Comparable() {
+		err := fmt.Errorf("type %s is not comparable", c.Type)
+		return func(any) error { return err }
+	}
 
-	if !isPrimitiveKind(kind) {
-		return func(val any) error {
-			return errors.New("cannot compare non primitive values with oneOf")
+	// Check if we can use direct comparison (primitives and their aliases)
+	useDirect := isPrimitiveKind(c.Type.Kind())
+
+	// Pre-convert options during initialization
+	var (
+		convertedOpts []interface{}
+		initErrors    []error
+	)
+
+	for i, opt := range c.Options {
+		optType := reflect.TypeOf(opt)
+
+		// Fast path for direct comparable types
+		if useDirect && optType == c.Type {
+			convertedOpts = append(convertedOpts, opt)
+			continue
+		}
+
+		// Slow path using reflection
+		optVal := reflect.ValueOf(opt)
+		if !optVal.IsValid() || !optVal.Type().ConvertibleTo(c.Type) {
+			initErrors = append(initErrors, fmt.Errorf(
+				"option %d: %v (type %s) is not convertible to %s",
+				i, opt, optType, c.Type,
+			))
+			continue
+		}
+
+		converted := optVal.Convert(c.Type).Interface()
+		convertedOpts = append(convertedOpts, converted)
+	}
+
+	if len(initErrors) > 0 {
+		return func(any) error {
+			return fmt.Errorf("invalid options:\n%w", errors.Join(initErrors...))
 		}
 	}
 
 	return func(val any) error {
-		for i := 0; i < len(args); i++ {
-			if args[i] == val {
-				return nil
-			}
-		}
-		return errors.New("given value '" + fmt.Sprintf("%v", val) + "' not supported")
-	}
-}
-
-func IsOneOf(kind reflect.Kind, args ...any) func(val any) error {
-	valid := make([]reflect.Value, 0, len(args))
-	for _, arg := range args {
-		v := reflect.ValueOf(arg)
-		if v.Kind() != kind {
-			return func(any) error {
-				return fmt.Errorf("invalid option kind: expected %v, got %v", kind, v.Kind())
-			}
-		}
-		valid = append(valid, v)
-	}
-
-	switch kind {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		m := make(map[int64]struct{}, len(valid))
-		for _, v := range valid {
-			m[v.Int()] = struct{}{}
-		}
-		return func(val any) error {
-			v := reflect.ValueOf(val)
-			if v.Kind() != kind {
-				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
-			}
-			if _, ok := m[v.Int()]; ok {
-				return nil
-			}
-			return fmt.Errorf("value %v not in options", v.Interface())
-		}
-
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		m := make(map[uint64]struct{}, len(valid))
-		for _, v := range valid {
-			m[v.Uint()] = struct{}{}
-		}
-		return func(val any) error {
-			v := reflect.ValueOf(val)
-			if v.Kind() != kind {
-				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
-			}
-			if _, ok := m[v.Uint()]; ok {
-				return nil
-			}
-			return fmt.Errorf("value %v not in options", v.Interface())
-		}
-
-	case reflect.Float32, reflect.Float64:
-		m := make(map[float64]struct{}, len(valid))
-		for _, v := range valid {
-			m[v.Float()] = struct{}{}
-		}
-		return func(val any) error {
-			v := reflect.ValueOf(val)
-			if v.Kind() != kind {
-				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
-			}
-			if _, ok := m[v.Float()]; ok {
-				return nil
-			}
-			return fmt.Errorf("value %v not in options", v.Interface())
-		}
-
-	case reflect.String:
-		m := make(map[string]struct{}, len(valid))
-		for _, v := range valid {
-			m[v.String()] = struct{}{}
-		}
-		return func(val any) error {
-			v := reflect.ValueOf(val)
-			if v.Kind() != reflect.String {
-				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
-			}
-			if _, ok := m[v.String()]; ok {
-				return nil
-			}
-			return fmt.Errorf("value %q not in options", v.String())
-		}
-
-	case reflect.Bool:
-		var t, f bool
-		for _, v := range valid {
-			if v.Bool() {
-				t = true
-			} else {
-				f = true
-			}
-		}
-		return func(val any) error {
-			v := reflect.ValueOf(val)
-			if v.Kind() != reflect.Bool {
-				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
-			}
-			b := v.Bool()
-			if (b && t) || (!b && f) {
-				return nil
-			}
-			return fmt.Errorf("value %v not in options", b)
-		}
-
-	default:
-		return func(val any) error {
-			v := reflect.ValueOf(val)
-			if v.Kind() != kind {
-				return fmt.Errorf("expected kind %v, got %v", kind, v.Kind())
-			}
-			for _, opt := range valid {
-				if reflect.DeepEqual(v.Interface(), opt.Interface()) {
-					return nil
+		// Fast path for direct comparable types
+		if useDirect {
+			if valType := reflect.TypeOf(val); valType == c.Type {
+				for _, opt := range convertedOpts {
+					if val == opt {
+						return nil
+					}
 				}
+				return fmt.Errorf("value %v not in allowed options", val)
 			}
-			return fmt.Errorf("value %v not in options", v.Interface())
 		}
+
+		// Slow path using reflection
+		v := reflect.ValueOf(val)
+		if !v.IsValid() || !v.Type().ConvertibleTo(c.Type) {
+			return fmt.Errorf(
+				"value %v (type %s) is not convertible to %s",
+				val, reflect.TypeOf(val), c.Type,
+			)
+		}
+
+		convertedVal := v.Convert(c.Type).Interface()
+		for _, opt := range convertedOpts {
+			if convertedVal == opt {
+				return nil
+			}
+		}
+
+		return fmt.Errorf("value %v not in allowed options", val)
 	}
 }
 

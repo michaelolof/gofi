@@ -10,6 +10,7 @@ import (
 
 type serveMux struct {
 	sm          *http.ServeMux
+	rOpts       *RouteOptions
 	opts        *muxOptions
 	paths       docsPaths
 	routeMeta   metaMap
@@ -59,6 +60,11 @@ func (s *serveMux) Trace(path string, opts RouteOptions) {
 
 func (s *serveMux) Connect(path string, opts RouteOptions) {
 	s.route(http.MethodConnect, path, opts)
+}
+
+func (s *serveMux) Group(o RouteOptions, r func(r Router)) {
+	s.rOpts = &o
+	r(s)
 }
 
 func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
@@ -235,5 +241,6 @@ func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore
 		globalStore: globalStore,
 		middlewares: m,
 		opts:        opts,
+		rOpts:       nil,
 	}
 }

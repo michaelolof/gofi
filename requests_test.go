@@ -343,3 +343,63 @@ func TestIgnoredJSONField(t *testing.T) {
 		Handler: &handler,
 	})
 }
+
+func TestEncode_AnyValue(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body any `validate:"required"`
+		}
+	}
+
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[testSchema](c)
+
+			assert.Nil(t, err, "validation error should be nil")
+			assert.NotNil(t, s, "schema pointer object should not be nil")
+			var vany any = 20
+			assert.Equal(t, s.Request.Body, vany)
+			return nil
+		},
+	}
+
+	m := NewServeMux()
+	m.Inject(InjectOptions{
+		Path:    "/test/one",
+		Method:  "POST",
+		Body:    utils.TryAsReader(20),
+		Handler: &handler,
+	})
+}
+
+func TestJSONEncode_AnyValue(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Field any `json:"field" validate:"required"`
+			}
+		}
+	}
+
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[testSchema](c)
+
+			assert.Nil(t, err, "validation error should be nil")
+			assert.NotNil(t, s, "schema pointer object should not be nil")
+			var vany any = "Starter"
+			assert.Equal(t, s.Request.Body.Field, vany)
+			return nil
+		},
+	}
+
+	m := NewServeMux()
+	m.Inject(InjectOptions{
+		Path:    "/test/one",
+		Method:  "POST",
+		Body:    utils.TryAsReader(map[string]any{"field": "Starter"}),
+		Handler: &handler,
+	})
+}

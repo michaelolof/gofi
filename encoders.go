@@ -141,7 +141,6 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
 	if err != nil {
 		return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
-
 	}
 
 	if val == nil && opts.SchemaRules.defVal != nil {
@@ -296,6 +295,25 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 
 			return &walkFinished, nil
 		}
+
+	case reflect.Interface:
+		v, err := pv.GetAnyValue(keys)
+		if err != nil {
+			return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
+		}
+
+		if err := runValidation(RequestErr, v, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+			return nil, err
+		}
+
+		if opts.ShouldEncode {
+			err = decodeFieldValue(opts.FieldStruct, v)
+			if err != nil {
+				newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
+			}
+		}
+
+		return &walkFinished, nil
 
 	default:
 		if err := runValidation(RequestErr, val, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
@@ -586,6 +604,8 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		if err != nil {
 			return err
 		}
+	case reflect.Interface:
+		return encodeFieldValue(c, buf, val.Elem(), rules, kp)
 	case reflect.Pointer:
 		if !val.IsValid() {
 			_, err := buf.WriteString("null")
@@ -610,6 +630,13 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 			return err
 		}
 		return nil
+	case reflect.Float32, reflect.Float64:
+		_, err := buf.WriteString(fmt.Sprintf("%v", val.Float()))
+		if err != nil {
+			return err
+		}
+		return nil
+
 	case reflect.Bool:
 		_, err := buf.WriteString(fmt.Sprintf("%t", val.Bool()))
 		if err != nil {

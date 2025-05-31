@@ -19,9 +19,14 @@ func newLatorMp(id string, lator ValidatorFn, options []string) RuleFn {
 	}
 }
 
-func BuildValidators(kind reflect.Kind, rule string, args []any, vals MappedValidators) CompiledValidatorFn {
-
-	if len(args) > 0 {
+func BuildValidators(typ reflect.Type, kind reflect.Kind, rule string, args []any, vals MappedValidators) CompiledValidatorFn {
+	if v, ok := Validators[rule]; ok {
+		return v(ValidatorContext{
+			Kind:    kind,
+			Options: args,
+			Type:    typ,
+		})
+	} else if len(args) > 0 {
 		if v, ok := OptionValidators[rule]; ok {
 			return v(kind, args...)
 		}

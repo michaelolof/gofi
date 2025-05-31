@@ -16,6 +16,7 @@ type Router interface {
 	Options(path string, opts RouteOptions)
 	Trace(path string, opts RouteOptions)
 	Connect(path string, opts RouteOptions)
+	Group(opts RouteOptions, r func(r Router))
 	Use(middlewares ...func(http.Handler) http.Handler)
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))

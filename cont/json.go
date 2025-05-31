@@ -1,8 +1,11 @@
 package cont
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 
 	"github.com/michaelolof/gofi/utils"
 
@@ -40,9 +43,10 @@ func PoolJsonParse(bs []byte) (*ParsedJson, error) {
 type JsonDefinition uint8
 
 const (
-	ArrayDefinition JsonDefinition = iota + 1
-	ObjectDefinition
-	MapDefinition
+	ArrayDefinition     JsonDefinition = 1
+	ObjectDefinition    JsonDefinition = 2
+	MapDefinition       JsonDefinition = 3
+	InterfaceDefinition JsonDefinition = 4
 )
 
 type eof struct{}
@@ -157,6 +161,8 @@ func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, ke
 		}
 	case reflect.Map:
 		return MapDefinition, nil
+	case reflect.Interface:
+		return InterfaceDefinition, nil
 	default:
 		panic(fmt.Sprintf("unsupported kind '%s' passed in GetByKind(...)", kind.String()))
 	}
@@ -206,6 +212,52 @@ func (p *ParsedJson) GetPrimitiveArrVals(kind reflect.Kind, format utils.ObjectF
 func (p *ParsedJson) GetRawObject(keys []string) (*fastjson.Object, error) {
 	obj := p.pv.Get(keys...)
 	return obj.Object()
+}
+
+func (p *ParsedJson) GetAnyValue(keys []string) (any, error) {
+	v := p.pv
+	if len(keys) > 0 {
+		v = p.pv.Get(keys...)
+	}
+
+	if v == nil {
+		return nil, errors.New("error getting any value")
+	}
+
+	switch v.Type() {
+	case fastjson.TypeString:
+		s := v.String()
+		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+			return strconv.Unquote(s)
+		}
+		return s, nil
+	case fastjson.TypeTrue:
+		return true, nil
+	case fastjson.TypeFalse:
+		return false, nil
+	case fastjson.TypeNull:
+		return nil, nil
+	case fastjson.TypeArray, fastjson.TypeObject:
+		var vany any
+		if err := json.Unmarshal(v.GetStringBytes(), &vany); err != nil {
+			return nil, err
+		}
+		return vany, nil
+	case fastjson.TypeNumber:
+		iv, err := v.Int()
+		if err == nil {
+			return iv, nil
+		}
+
+		fv, err := v.Float64()
+		if err != nil {
+			return nil, err
+		}
+
+		return fv, nil
+	}
+
+	return nil, errors.New("unknown value passed")
 }
 
 type arrayItem struct {

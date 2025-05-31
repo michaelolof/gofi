@@ -7,6 +7,20 @@ type ValidatorFn = func(kind reflect.Kind) func(val any) error
 type CompiledValidatorFn = func(val any) error
 type MappedValidators = map[string]ValidatorFnOptions
 
+type ValidatorContext struct {
+	Type    reflect.Type
+	Kind    reflect.Kind
+	Options []any
+}
+
+type ContextValidator = func(c ValidatorContext) func(val any) error
+type ContextValidators map[string]ContextValidator
+
+var Validators = ContextValidators{
+	"required": IsRequired,
+	"oneof":    IsOneOf,
+}
+
 var BaseValidators = map[string]ValidatorFn{
 	"cidr":             IsCIDR,
 	"cidrv4":           IsCIDRv4,
@@ -25,7 +39,6 @@ var BaseValidators = map[string]ValidatorFn{
 	"ipv6":             IsIPv6,
 	"mac":              IsMAC,
 	"not_empty":        IsNotEmpty,
-	"required":         IsRequired,
 	"tcp4_addr":        IsTCP4AddrResolvable,
 	"tcp6_addr":        IsTCP6AddrResolvable,
 	"tcp_addr":         IsTCPAddrResolvable,
@@ -41,6 +54,5 @@ var BaseValidators = map[string]ValidatorFn{
 }
 
 var OptionValidators = map[string]ValidatorFnOptions{
-	"max":   IsMax,
-	"oneof": IsOneOf,
+	"max": IsMax,
 }

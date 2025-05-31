@@ -74,7 +74,7 @@ func TestSend(t *testing.T) {
 func TestCheckStuff(t *testing.T) {
 }
 
-func TestTypeHints(t *testing.T) {
+func TestTypeAliasResponse(t *testing.T) {
 
 	type TypeHint string
 
@@ -102,6 +102,36 @@ func TestTypeHints(t *testing.T) {
 		Handler: &handler,
 	})
 
+	assert.Equal(t, res.Body.String(), `{"hint":"good"}`)
 	assert.Nil(t, err)
-	fmt.Println(res)
+}
+
+func TestAnyValueResponse(t *testing.T) {
+
+	type testSchema struct {
+		Ok struct {
+			Body struct {
+				Value any `json:"value" validate:"required"`
+			}
+		}
+	}
+
+	mux := NewServeMux()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			s, _ := ValidateAndBind[testSchema](c)
+			s.Ok.Body.Value = "foo"
+			return c.Send(200, s.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Equal(t, res.Body.String(), `{"value":"foo"}`)
+	assert.Nil(t, err)
 }

@@ -49,7 +49,6 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 			for _, rqf := range reflect.VisibleFields(sf.Type) {
 				rqn := schemaField(rqf.Name)
 				kind := rqf.Type.Kind()
-				typeName := rqf.Type.Name()
 
 				switch rqn {
 				case schemaHeaders, schemaCookies, schemaQuery, schemaPath:
@@ -57,7 +56,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						continue
 					}
 
-					pruleDefs := newRuleDef(typeName, kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
+					pruleDefs := newRuleDef(rqf.Type, kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
@@ -97,7 +96,6 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 			for _, rqf := range reflect.VisibleFields(sf.Type) {
 				rqn := schemaField(rqf.Name)
 				kind := rqf.Type.Kind()
-				typeName := rqf.Type.Name()
 				responseParameters := make(openapiParameters, 0, 10)
 
 				switch rqn {
@@ -107,7 +105,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					}
 
 					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
-					pruleDefs := newRuleDef(typeName, kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
+					pruleDefs := newRuleDef(rqf.Type, kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
@@ -208,13 +206,13 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 						}
 					}
 
-					rules = append(rules, newRuleOpts(sf.Type.Name(), sf.Type.Kind(), ruleName, options, s.opts))
+					rules = append(rules, newRuleOpts(sf.Type, sf.Type.Kind(), ruleName, options, s.opts))
 				}
 			}
 		}
 	}
 
-	rtn := newRuleDef(sf.Type.Name(), sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
+	rtn := newRuleDef(sf.Type, sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
 	rtn.tags = tagList
 	return rtn
 }
@@ -399,6 +397,7 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 		case reflect.Pointer:
 			ruleDefs.kind = typ.Elem().Kind()
 			return s.getTypeInfo(typ.Elem(), value, name, ruleDefs)
+
 		}
 	}
 

@@ -59,12 +59,12 @@ func builtinSerializer(ct cont.ContentType) (SchemaEncoder, bool) {
 
 type CustomSpecs map[string]CustomSchemaProps
 type CustomSchemaProps struct {
-	// Define the openapi3 type for your custom type E.g "string", "integer", "number", 'boolean", "array" etc
-	Type string
-	// Define the openapi3 type for your custom type E.g "date", "date-time", "int32", 'int64", "uuie" etc
-	Format string
 	// Add a custom decoder. Will defer to the json.Decoder if not passed. It is advised to use the json Unmarshal method. Prefer this if you don't have access to the custom type
-	Decoder func(val any) (any, error)
+	Decoder func(val any) (any, error) `json:"-"`
 	// Add a custom encoder. Will defer to the json.Encode if not passed. It is advised to use the json Marshal method. Prefer this if you don't have access to the custom type
-	Encoder func(val any) (string, error)
+	Encoder func(val any) (string, error) `json:"-"`
+	// Define the openapi3 type for your custom type E.g "string", "integer", "number", 'boolean", "array" etc
+	Type string `json:"type,omitempty"`
+	// Define the openapi3 type for your custom type E.g "date", "date-time", "int32", 'int64", "uuie" etc
+	Format string `json:"format,omitempty"`
 }
