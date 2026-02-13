@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+
+	"github.com/michaelolof/gofi/validators"
 )
 
 type serveMux struct {
@@ -112,6 +114,15 @@ func (s *serveMux) SetCustomSpecs(list map[string]CustomSchemaProps) {
 	}
 }
 
+type ValidatorContext = validators.ValidatorContext
+type ValidatorOption = validators.ValidatorArg
+
+func (s *serveMux) SetCustomValidator(list map[string]func(c ValidatorContext) func(arg ValidatorOption) error) {
+	if list != nil {
+		s.opts.customValidators = list
+	}
+}
+
 type InjectOptions struct {
 	Path    string
 	Method  string
@@ -154,18 +165,34 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 		return nil, fmt.Errorf("gofi controller not defined for the given method '%s' and path '%s'", opts.Method, opts.Path)
 	}
 
-	rules := s.compileSchema(def.Schema, def.Info)
-	rules.specs.normalize(opts.Method, opts.Path)
-
 	w := httptest.NewRecorder()
 	c := newContext(w, r)
+
+	setupInjectContext := func(path, method string, ropts *RouteOptions, meta metaMap) {
+		rules := s.compileSchema(ropts.Schema, ropts.Info)
+		rules.specs.normalize(method, path)
+		s.opts.schemaRules.SetRules(path, method, &rules.rules)
+		c.setContextSettings(newContextOptions(path, method), meta, s.globalStore, s.opts)
+	}
+
 	var routeMeta metaMap
 	if opts.Handler.Meta != nil {
 		v := map[string]any{strings.ToLower(opts.Method): opts.Handler.Meta}
 		s.routeMeta[opts.Path] = v
 		routeMeta = s.routeMeta
 	}
-	c.setContextSettings(&rules.rules, routeMeta, s.globalStore, s.opts)
+	setupInjectContext(opts.Path, opts.Method, opts.Handler, routeMeta)
+
+	// rules := s.compileSchema(def.Schema, def.Info)
+	// rules.specs.normalize(opts.Method, opts.Path)
+
+	// var routeMeta metaMap
+	// if opts.Handler.Meta != nil {
+	// 	v := map[string]any{strings.ToLower(opts.Method): opts.Handler.Meta}
+	// 	s.routeMeta[opts.Path] = v
+	// 	routeMeta = s.routeMeta
+	// }
+	// c.setContextSettings(&rules.rules, routeMeta, s.globalStore, s.opts)
 	handler := applyMiddleware(def.Handler, def.Middlewares)
 	err = handler(c)
 	if err != nil {
@@ -181,8 +208,6 @@ func ListenAndServe(addr string, handler http.Handler) error {
 }
 
 func (s *serveMux) route(method string, path string, opts RouteOptions) {
-
-	var rules *schemaRules
 
 	if opts.Schema != nil {
 		comps := s.compileSchema(opts.Schema, opts.Info)
@@ -202,7 +227,7 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 			}
 		}
 
-		rules = &comps.rules
+		s.opts.schemaRules.SetRules(path, method, &comps.rules)
 	}
 
 	if opts.Meta != nil {
@@ -212,7 +237,7 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 
 	s.sm.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
 		c := newContext(w, r)
-		c.setContextSettings(rules, s.routeMeta, s.globalStore, s.opts)
+		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
 		err := applyMiddleware(opts.Handler, opts.Middlewares)(c)
 		if err != nil {

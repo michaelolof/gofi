@@ -7,39 +7,29 @@ import (
 type RuleFn struct {
 	Kind      reflect.Kind
 	Rule      string
-	Lator     ValidatorFn
+	Lator     LegacyValidatorFn
 	Arguments []string
 }
 
-func newLatorMp(id string, lator ValidatorFn, options []string) RuleFn {
-	return RuleFn{
-		Rule:      id,
-		Lator:     lator,
-		Arguments: options,
-	}
-}
-
-func BuildValidators(typ reflect.Type, kind reflect.Kind, rule string, args []any, vals MappedValidators) CompiledValidatorFn {
+func NewContextValidatorFn(typ reflect.Type, kind reflect.Kind, rule string, args []any, vals ContextValidators) ValidatorFn {
 	if v, ok := Validators[rule]; ok {
 		return v(ValidatorContext{
 			Kind:    kind,
 			Options: args,
 			Type:    typ,
 		})
-	} else if len(args) > 0 {
-		if v, ok := OptionValidators[rule]; ok {
-			return v(kind, args...)
-		}
-	} else if v, ok := BaseValidators[rule]; ok {
-		return v(kind)
 	} else if v, ok := vals[rule]; ok {
-		return v(kind, args...)
+		return v(ValidatorContext{
+			Kind:    kind,
+			Options: args,
+			Type:    typ,
+		})
 	}
 
 	return defaultValidator
 
 }
 
-func defaultValidator(val any) error {
+func defaultValidator(arg ValidatorArg) error {
 	return nil
 }

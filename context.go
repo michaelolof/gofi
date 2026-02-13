@@ -24,12 +24,24 @@ type Context interface {
 	Meta() ContextMeta
 	// Sends a schema response object for the given status code
 	Send(code int, obj any) error
+
+	GetSchemaRules(pattern, method string) any
+}
+
+type contextOptions struct {
+	Pattern string
+	Method  string
+}
+
+func newContextOptions(patt, method string) contextOptions {
+	return contextOptions{Pattern: patt, Method: method}
 }
 
 type context struct {
-	w                 http.ResponseWriter
-	r                 *http.Request
-	rules             *schemaRules
+	w    http.ResponseWriter
+	r    *http.Request
+	opts contextOptions
+	// rules             *schemaRules
 	routeMeta         metaMap
 	globalStore       ReadOnlyStore
 	dataStore         GofiStore
@@ -69,11 +81,20 @@ func (c *context) Meta() ContextMeta {
 	return &contextMeta{c: c}
 }
 
-func (c *context) setContextSettings(rules *schemaRules, routeMeta metaMap, globalStore GofiStore, serverOpts *muxOptions) {
-	c.rules = rules
+func (c *context) GetSchemaRules(pattern, method string) any {
+	rulesMap := c.serverOpts.schemaRules
+	return rulesMap.GetRules(pattern, method)
+}
+
+func (c *context) setContextSettings(opts contextOptions, routeMeta metaMap, globalStore GofiStore, serverOpts *muxOptions) {
+	c.opts = opts
 	c.routeMeta = routeMeta
 	c.globalStore = globalStore
 	c.serverOpts = serverOpts
+}
+
+func (c *context) rules() *schemaRules {
+	return c.serverOpts.schemaRules.GetRules(c.opts.Pattern, c.opts.Method)
 }
 
 type walkFinishStatus struct{}

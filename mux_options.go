@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/validators"
@@ -9,22 +10,24 @@ import (
 
 type muxOptions struct {
 	errHandler         func(err error, c Context)
-	customValidators   map[string]validators.ValidatorFnOptions
+	customValidators   validators.ContextValidators
 	customSpecs        CustomSpecs
 	serializers        SerializerFn
 	builtinSerializers SerializerFn
 	logger             Logger
+	schemaRules        SchemaRulesMap
 }
 
 func defaultMuxOptions() *muxOptions {
 	return &muxOptions{
 		errHandler:       defaultErrorHandler,
-		customValidators: map[string]validators.ValidatorFnOptions{},
+		customValidators: make(validators.ContextValidators),
 		customSpecs:      map[string]CustomSchemaProps{},
 
 		serializers:        nil,
 		builtinSerializers: builtinSerializer,
 		logger:             &consoleLogger{},
+		schemaRules:        make(SchemaRulesMap),
 	}
 }
 
@@ -67,4 +70,31 @@ type CustomSchemaProps struct {
 	Type string `json:"type,omitempty"`
 	// Define the openapi3 type for your custom type E.g "date", "date-time", "int32", 'int64", "uuie" etc
 	Format string `json:"format,omitempty"`
+}
+
+type SchemaRulesMap map[string]map[string]*schemaRules
+
+func (s SchemaRulesMap) SetRules(pattern, method string, rules *schemaRules) {
+	if s == nil {
+		return
+	}
+
+	if s[pattern] == nil {
+		s[pattern] = map[string]*schemaRules{
+			strings.ToLower(method): rules,
+		}
+	} else {
+		s[pattern][strings.ToLower(method)] = rules
+	}
+}
+
+func (s SchemaRulesMap) GetRules(pattern, method string) *schemaRules {
+	if s != nil {
+		if x, ok := s[pattern]; ok {
+			if y, ok := x[strings.ToLower(method)]; ok {
+				return y
+			}
+		}
+	}
+	return nil
 }

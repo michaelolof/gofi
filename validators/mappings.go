@@ -1,11 +1,43 @@
 package validators
 
-import "reflect"
+import (
+	"net/http"
+	"reflect"
+)
+
+type validatorOptionType int
+
+const (
+	ReuestType   validatorOptionType = 1
+	ResponseType validatorOptionType = 2
+)
+
+func NewValidatorArg(val any, typ validatorOptionType, r *http.Request, w http.ResponseWriter) ValidatorArg {
+	return ValidatorArg{val: val, typ: typ, r: r, w: w}
+}
+
+type ValidatorArg struct {
+	val any
+	typ validatorOptionType
+	r   *http.Request
+	w   http.ResponseWriter
+}
+
+func (v *ValidatorArg) Value() any {
+	return v.val
+}
+
+func (v *ValidatorArg) Request() *http.Request {
+	return v.r
+}
+
+func (v *ValidatorArg) Response() http.ResponseWriter {
+	return v.w
+}
 
 type ValidatorFnOptions = func(kind reflect.Kind, args ...any) func(val any) error
-type ValidatorFn = func(kind reflect.Kind) func(val any) error
-type CompiledValidatorFn = func(val any) error
-type MappedValidators = map[string]ValidatorFnOptions
+type LegacyValidatorFn = func(kind reflect.Kind) func(val any) error
+type ValidatorFn = func(val ValidatorArg) error
 
 type ValidatorContext struct {
 	Type    reflect.Type
@@ -13,7 +45,7 @@ type ValidatorContext struct {
 	Options []any
 }
 
-type ContextValidator = func(c ValidatorContext) func(val any) error
+type ContextValidator = func(c ValidatorContext) ValidatorFn
 type ContextValidators map[string]ContextValidator
 
 var Validators = ContextValidators{
@@ -21,7 +53,7 @@ var Validators = ContextValidators{
 	"oneof":    IsOneOf,
 }
 
-var BaseValidators = map[string]ValidatorFn{
+var BaseValidators = map[string]LegacyValidatorFn{
 	"cidr":             IsCIDR,
 	"cidrv4":           IsCIDRv4,
 	"cidrv6":           IsCIDRv6,

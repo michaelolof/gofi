@@ -13,8 +13,7 @@ import (
 )
 
 func (c *context) Send(code int, obj any) error {
-
-	_, rules, err := c.rules.getRespRulesByCode(code)
+	_, rules, err := c.rules().getRespRulesByCode(code)
 	if err != nil {
 		return err
 	}
@@ -46,7 +45,7 @@ func (c *context) Send(code int, obj any) error {
 		return err
 	}
 
-	contentType := c.rules.reqContent()
+	contentType := c.rules().reqContent()
 	sz, err := c.serverOpts.getSerializer(contentType)
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
@@ -106,7 +105,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 
 		hv := hf.Interface()
 		checkAndSet := func(val string, key string, rules []ruleOpts) error {
-			err := runValidation(ResponseErr, val, schemaHeaders, key, rules)
+			err := runValidation(c, ResponseErr, val, schemaHeaders, key, rules)
 			if err != nil {
 				return err
 			}
@@ -153,7 +152,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				if utils.PrimitiveKindIsEmpty(val.kind, hv) && val.defVal != nil {
 					hv = val.defVal
 				}
-				err := runValidation(ResponseErr, hv, schemaHeaders, key, val.rules)
+				err := runValidation(c, ResponseErr, hv, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}
@@ -168,7 +167,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
-					err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
+					err := runValidation(c, ResponseErr, tv, schemaHeaders, key, val.rules)
 					if err != nil {
 						return err
 					}
@@ -180,7 +179,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
-					err := runValidation(ResponseErr, tv, schemaHeaders, key, val.rules)
+					err := runValidation(c, ResponseErr, tv, schemaHeaders, key, val.rules)
 					if err != nil {
 						return err
 					}
@@ -229,7 +228,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 			if utils.PrimitiveKindIsEmpty(val.kind, cv) && val.defVal != nil {
 				cv = val.defVal
 			}
-			err := runValidation(ResponseErr, cv, schemaHeaders, key, val.rules)
+			err := runValidation(c, ResponseErr, cv, schemaHeaders, key, val.rules)
 			if err != nil {
 				return err
 			}
@@ -248,7 +247,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					cookV = cook.Value
 				}
 
-				err := runValidation(ResponseErr, cookV, schemaHeaders, key, val.rules)
+				err := runValidation(c, ResponseErr, cookV, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}
@@ -260,7 +259,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return newErrReport(ResponseErr, schemaCookies, "", "parser", errors.New("unable to parse cookie"))
 				}
 
-				err := runValidation(ResponseErr, cook.Value, schemaHeaders, key, val.rules)
+				err := runValidation(c, ResponseErr, cook.Value, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}

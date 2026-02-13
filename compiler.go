@@ -176,6 +176,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 			case "default":
 				defStr = parseTagValue(tag, sf.Type)
 			case "validate":
+				// vtags := s.splitByUnescapedComma(tag)
 				vtags := strings.Split(tag, ",")
 				rules = make([]ruleOpts, 0, len(vtags))
 				for _, tag := range vtags {
@@ -215,6 +216,35 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 	rtn := newRuleDef(sf.Type, sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
 	rtn.tags = tagList
 	return rtn
+}
+
+func (s *serveMux) splitByUnescapedComma(str string) []string {
+	tokens := make([]string, 0, 10)
+	var token strings.Builder
+	escape := false
+
+	for _, c := range str {
+		if c == '\\' && !escape {
+			escape = true
+			continue
+		}
+
+		if c == ',' && !escape {
+			tokens = append(tokens, token.String())
+			token.Reset()
+		} else {
+			if escape {
+				token.WriteByte('\\')
+				escape = false
+			}
+			token.WriteRune(c)
+		}
+	}
+
+	if token.Len() > 0 {
+		tokens = append(tokens, token.String())
+	}
+	return tokens
 }
 
 func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *ruleDef) openapiSchema {

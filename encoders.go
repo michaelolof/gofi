@@ -69,7 +69,7 @@ func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOp
 
 	// Handle if JSON body value is a primitive
 	if utils.IsPrimitive(val) {
-		if err := runValidation(RequestErr, val, schemaBody, "", opts.SchemaRules.rules); err != nil {
+		if err := runValidation(opts.Context, RequestErr, val, schemaBody, "", opts.SchemaRules.rules); err != nil {
 			return err
 		}
 
@@ -233,7 +233,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
 			}
 
-			if err := runValidation(RequestErr, arr, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+			if err := runValidation(opts.Context, RequestErr, arr, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
@@ -285,7 +285,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				i++
 			}
 
-			if err := runValidation(RequestErr, nslice.Interface(), opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+			if err := runValidation(opts.Context, RequestErr, nslice.Interface(), opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
@@ -302,7 +302,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
 		}
 
-		if err := runValidation(RequestErr, v, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidation(opts.Context, RequestErr, v, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
@@ -316,7 +316,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 		return &walkFinished, nil
 
 	default:
-		if err := runValidation(RequestErr, val, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidation(opts.Context, RequestErr, val, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
@@ -551,7 +551,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 	}
 
 	if rules != nil {
-		if err := runValidation(ResponseErr, vany, schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
+		if err := runValidation(c, ResponseErr, vany, schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
 			return err
 		}
 	}
@@ -564,37 +564,39 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		return nil
 	}
 
-	if spec, ok := c.serverOpts.customSpecs[string(rules.format)]; ok {
-		if vIsValid {
-			if spec.Encoder != nil {
-				v, err := spec.Encoder(vany)
-				if err != nil {
-					return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+	if rules != nil {
+		if spec, ok := c.serverOpts.customSpecs[string(rules.format)]; ok {
+			if vIsValid {
+				if spec.Encoder != nil {
+					v, err := spec.Encoder(vany)
+					if err != nil {
+						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+					}
+					encodeString(buf, v)
+					return nil
+				} else {
+					switch vm := vany.(type) {
+					case json.Marshaler:
+						v, err := vm.MarshalJSON()
+						if err != nil {
+							return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "json-marshal", err)
+						}
+						encodeString(buf, string(v))
+						return nil
+
+					case encoding.TextMarshaler:
+						v, err := vm.MarshalText()
+						if err != nil {
+							return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "text-marshal", err)
+						}
+
+						encodeString(buf, string(v))
+						return nil
+					}
 				}
-				encodeString(buf, v)
-				return nil
 			} else {
-				switch vm := vany.(type) {
-				case json.Marshaler:
-					v, err := vm.MarshalJSON()
-					if err != nil {
-						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "json-marshal", err)
-					}
-					encodeString(buf, string(v))
-					return nil
-
-				case encoding.TextMarshaler:
-					v, err := vm.MarshalText()
-					if err != nil {
-						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "text-marshal", err)
-					}
-
-					encodeString(buf, string(v))
-					return nil
-				}
+				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
 			}
-		} else {
-			return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
 		}
 	}
 

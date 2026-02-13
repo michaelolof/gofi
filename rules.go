@@ -14,7 +14,8 @@ type ruleOpts struct {
 	kind  reflect.Kind
 	rule  string
 	args  []string
-	dator validators.CompiledValidatorFn
+	c     *context
+	dator validators.ValidatorFn
 }
 
 func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string, muxOpts *muxOptions) ruleOpts {
@@ -23,7 +24,7 @@ func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string
 		anyArgs = append(anyArgs, v)
 	}
 
-	var customValidators validators.MappedValidators
+	var customValidators validators.ContextValidators
 	if muxOpts != nil && muxOpts.customValidators != nil {
 		customValidators = muxOpts.customValidators
 	}
@@ -33,7 +34,7 @@ func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string
 		kind:  kind,
 		rule:  rule,
 		args:  args,
-		dator: validators.BuildValidators(typ, kind, rule, anyArgs, customValidators),
+		dator: validators.NewContextValidatorFn(typ, kind, rule, anyArgs, customValidators),
 	}
 }
 
@@ -252,4 +253,10 @@ func (s *schemaRules) getRespRulesByCode(code int) (string, ruleDefMap, error) {
 		return handleDefaults()
 	}
 	return handleDefaults()
+}
+
+type SchemaRuleDefinition struct {
+	Rule    string
+	Arg     any
+	Message string
 }

@@ -15,11 +15,12 @@ import (
 
 var errValid error = errors.New("value is invalid")
 
-func IsRequired(c ValidatorContext) func(val any) error {
+func IsRequired(c ValidatorContext) func(arg ValidatorArg) error {
 	zeroVal := reflect.Zero(c.Type).Interface()
 	isPrimitive := isPrimitiveKind(c.Type.Kind())
 
-	return func(val any) error {
+	return func(arg ValidatorArg) error {
+		val := arg.Value()
 		if val == nil {
 			return fmt.Errorf("value is required")
 		}
@@ -128,11 +129,11 @@ func IsFileURL(kind reflect.Kind) func(val any) error {
 }
 
 // Validates if a primitive value is one of the defined arguments
-func IsOneOf(c ValidatorContext) func(val any) error {
+func IsOneOf(c ValidatorContext) func(arg ValidatorArg) error {
 	// Pre-check if target type is comparable
 	if !c.Type.Comparable() {
 		err := fmt.Errorf("type %s is not comparable", c.Type)
-		return func(any) error { return err }
+		return func(ValidatorArg) error { return err }
 	}
 
 	// Check if we can use direct comparison (primitives and their aliases)
@@ -167,13 +168,19 @@ func IsOneOf(c ValidatorContext) func(val any) error {
 		convertedOpts = append(convertedOpts, converted)
 	}
 
-	if len(initErrors) > 0 {
-		return func(any) error {
+	isEmpty := IsRequired(c)
+
+	return func(arg ValidatorArg) error {
+		// Don't validate when empty. That will be handled by the required rule.
+		if err := isEmpty(arg); err != nil {
+			return nil
+		}
+
+		if len(initErrors) > 0 {
 			return fmt.Errorf("invalid options:\n%w", errors.Join(initErrors...))
 		}
-	}
 
-	return func(val any) error {
+		val := arg.Value()
 		// Fast path for direct comparable types
 		if useDirect {
 			if valType := reflect.TypeOf(val); valType == c.Type {

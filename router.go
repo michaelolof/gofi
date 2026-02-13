@@ -26,4 +26,5 @@ type Router interface {
 	SetErrorHandler(func(err error, c Context))
 	Inject(opts InjectOptions) (*httptest.ResponseRecorder, error)
 	SetCustomSpecs(list map[string]CustomSchemaProps)
+	SetCustomValidator(list map[string]func(c ValidatorContext) func(arg ValidatorOption) error)
 }

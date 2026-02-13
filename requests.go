@@ -64,7 +64,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		schemaPtr = new(T)
 	}
 
-	if c.rules == nil || len(c.rules.req) == 0 {
+	if c.rules() == nil || len(c.rules().req) == 0 {
 		return schemaPtr, nil
 	}
 
@@ -124,6 +124,9 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		} else {
 			val, err = utils.PrimitiveFromStr(def.kind, qv)
 			if err != nil || utils.NotPrimitive(val) {
+				if err == nil {
+					err = errors.New("unsupported header type passed")
+				}
 				// Handle special cases.
 				switch def.format {
 				case utils.TimeObjectFormat:
@@ -137,23 +140,21 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			}
 		}
 
-		errs := make([]error, 0, len(def.rules))
-		for _, l := range def.rules {
-			if err := l.dator(val); err != nil {
-				errs = append(errs, newErrReport(RequestErr, field, def.field, l.rule, err))
-			}
+		err = runValidation(c, RequestErr, val, field, def.field, def.rules)
+		if err != nil {
+			return err
 		}
 
-		if len(errs) == 0 && shouldBind {
+		if shouldBind {
 			sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
 			sf.Set(reflect.ValueOf(val).Convert(sf.Type()))
 		}
 
-		return errors.Join(errs...)
+		return nil
 	}
 
 	// Handle Headers
-	pdef := c.rules.getReqRules(schemaHeaders)
+	pdef := c.rules().getReqRules(schemaHeaders)
 	errs := make([]error, 0, len(pdef.properties))
 	for _, def := range pdef.properties {
 		hv := c.r.Header.Get(def.field)
@@ -167,7 +168,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	}
 
 	// Handle queries
-	pdef = c.rules.getReqRules(schemaQuery)
+	pdef = c.rules().getReqRules(schemaQuery)
 	errs = make([]error, 0, len(pdef.properties))
 	for _, def := range pdef.properties {
 		qv := c.r.URL.Query().Get(def.field)
@@ -181,7 +182,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	}
 
 	// Handle Paths
-	pdef = c.rules.getReqRules(schemaPath)
+	pdef = c.rules().getReqRules(schemaPath)
 	errs = make([]error, 0, len(pdef.properties))
 	for _, def := range pdef.properties {
 		pv := c.r.PathValue(def.field)
@@ -195,7 +196,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	}
 
 	// Handle Cookies
-	pdef = c.rules.getReqRules(schemaCookies)
+	pdef = c.rules().getReqRules(schemaCookies)
 	errs = make([]error, 0, len(pdef.properties))
 	for _, def := range pdef.properties {
 		cv, err := c.r.Cookie(def.field)
@@ -211,13 +212,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 		switch def.format {
 		case utils.CookieObjectFormat:
-			verrs := make([]error, 0, len(def.rules))
-			for _, l := range def.rules {
-				if err := l.dator(cv.Value); err != nil {
-					verrs = append(verrs, newErrReport(RequestErr, schemaCookies, def.field, l.rule, err))
-				}
-			}
-			err = errors.Join(verrs...)
+			err := runValidation(c, RequestErr, cv.Value, schemaCookies, def.field, def.rules)
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -244,13 +239,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 				continue
 			}
 
-			verrs := make([]error, 0, len(def.rules))
-			for _, l := range def.rules {
-				if err := l.dator(cvs); err != nil {
-					verrs = append(verrs, newErrReport(RequestErr, schemaCookies, def.field, l.rule, err))
-				}
-			}
-			err = errors.Join(verrs...)
+			err = runValidation(c, RequestErr, cvs, schemaCookies, def.field, def.rules)
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -271,7 +260,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	}
 
 	// Handle Body
-	pdef = c.rules.getReqRules(schemaBody)
+	pdef = c.rules().getReqRules(schemaBody)
 	if pdef == nil || pdef.kind == reflect.Invalid {
 		return schemaPtr, nil
 	}
@@ -283,7 +272,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		return schemaPtr, nil
 	}
 
-	contentType := c.rules.reqContent()
+	contentType := c.rules().reqContent()
 	sz, err := c.serverOpts.getSerializer(contentType)
 	if err != nil {
 		return schemaPtr, newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
