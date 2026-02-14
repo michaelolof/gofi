@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/michaelolof/gofi/cont"
-	"github.com/michaelolof/gofi/validators"
 )
 
 type openapiSchema struct {
@@ -269,12 +268,8 @@ func (s schemaField) String() string {
 func runValidation(c *context, typ errorType, val any, schema schemaField, keypath string, rules []ruleOpts) error {
 	errs := make([]error, 0, len(rules))
 
-	optionType := validators.ReuestType
-	if typ == ResponseErr {
-		optionType = validators.ResponseType
-	}
 	for _, rule := range rules {
-		err := rule.dator(validators.NewValidatorArg(val, optionType, c.r, c.w))
+		err := rule.dator(val)
 		if err != nil {
 			errs = append(errs, newErrReport(typ, schema, keypath, rule.rule, err))
 		}

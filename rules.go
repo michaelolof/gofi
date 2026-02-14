@@ -7,6 +7,7 @@ import (
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
 	"github.com/michaelolof/gofi/validators"
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
 type ruleOpts struct {
@@ -15,7 +16,7 @@ type ruleOpts struct {
 	rule  string
 	args  []string
 	c     *context
-	dator validators.ValidatorFn
+	dator rules.ValidatorFn
 }
 
 func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string, muxOpts *muxOptions) ruleOpts {
@@ -24,7 +25,7 @@ func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string
 		anyArgs = append(anyArgs, v)
 	}
 
-	var customValidators validators.ContextValidators
+	var customValidators rules.ContextValidators
 	if muxOpts != nil && muxOpts.customValidators != nil {
 		customValidators = muxOpts.customValidators
 	}

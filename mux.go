@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 
-	"github.com/michaelolof/gofi/validators"
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
 type serveMux struct {
@@ -145,10 +145,9 @@ func (s *serveMux) SetCustomSpecs(list map[string]CustomSchemaProps) {
 	}
 }
 
-type ValidatorContext = validators.ValidatorContext
-type ValidatorOption = validators.ValidatorArg
+type ValidatorContext = rules.ValidatorContext
 
-func (s *serveMux) SetCustomValidator(list map[string]func(c ValidatorContext) func(arg ValidatorOption) error) {
+func (s *serveMux) SetCustomValidator(list map[string]func(c ValidatorContext) func(arg any) error) {
 	if list != nil {
 		s.opts.customValidators = list
 	}

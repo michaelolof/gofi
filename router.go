@@ -45,5 +45,5 @@ type Router interface {
 	Meta() RouterMeta
 	SetErrorHandler(func(err error, c Context))
 	SetCustomSpecs(list map[string]CustomSchemaProps)
-	SetCustomValidator(list map[string]func(c ValidatorContext) func(arg ValidatorOption) error)
+	SetCustomValidator(list map[string]func(c ValidatorContext) func(arg any) error)
 }

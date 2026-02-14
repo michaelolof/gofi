@@ -5,12 +5,12 @@ import (
 	"strings"
 
 	"github.com/michaelolof/gofi/cont"
-	"github.com/michaelolof/gofi/validators"
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
 type muxOptions struct {
 	errHandler         func(err error, c Context)
-	customValidators   validators.ContextValidators
+	customValidators   rules.ContextValidators
 	customSpecs        CustomSpecs
 	serializers        SerializerFn
 	builtinSerializers SerializerFn
@@ -21,7 +21,7 @@ type muxOptions struct {
 func defaultMuxOptions() *muxOptions {
 	return &muxOptions{
 		errHandler:       defaultErrorHandler,
-		customValidators: make(validators.ContextValidators),
+		customValidators: make(rules.ContextValidators),
 		customSpecs:      map[string]CustomSchemaProps{},
 
 		serializers:        nil,
