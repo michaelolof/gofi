@@ -25,6 +25,10 @@ type Context interface {
 	// Sends a schema response object for the given status code
 	Send(code int, obj any) error
 
+	// SendString(code int, s string) error
+
+	// SendBytes(code int, b []byte) error
+
 	GetSchemaRules(pattern, method string) any
 }
 

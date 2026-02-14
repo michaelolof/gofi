@@ -17,7 +17,7 @@ func NewTestRouter(routes []TestRoute) TestRouter {
 	s := newServeMux()
 
 	for _, route := range routes {
-		s.route(route.Method, route.Path, *route.Options)
+		s.method(route.Method, route.Path, *route.Options)
 	}
 
 	return &testRouter{
@@ -34,7 +34,7 @@ func TryTestRouter(router Router, routes []TestRoute) TestRouter {
 	}
 
 	for _, route := range routes {
-		s.route(route.Method, route.Path, *route.Options)
+		s.method(route.Method, route.Path, *route.Options)
 	}
 
 	return &testRouter{

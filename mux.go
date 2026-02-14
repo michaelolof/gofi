@@ -11,66 +11,97 @@ import (
 )
 
 type serveMux struct {
-	sm          *http.ServeMux
-	rOpts       *RouteOptions
-	opts        *muxOptions
-	paths       docsPaths
-	routeMeta   metaMap
-	globalStore GofiStore
-	middlewares Middlewares
+	sm                *http.ServeMux
+	rOpts             *RouteOptions
+	opts              *muxOptions
+	paths             docsPaths
+	routeMeta         metaMap
+	globalStore       GofiStore
+	middlewares       Middlewares
+	inlineMiddlewares Middlewares
 }
 
 func NewServeMux() Router {
 	return newServeMux()
 }
 
-func (s *serveMux) Route(method string, path string, opts RouteOptions) {
-	s.route(method, path, opts)
+func (s *serveMux) Method(method string, path string, opts RouteOptions) {
+	s.method(method, path, opts)
 }
 
 func (s *serveMux) Get(path string, opts RouteOptions) {
-	s.route(http.MethodGet, path, opts)
+	s.method(http.MethodGet, path, opts)
 }
 
 func (s *serveMux) Post(path string, opts RouteOptions) {
-	s.route(http.MethodPost, path, opts)
+	s.method(http.MethodPost, path, opts)
 }
 
 func (s *serveMux) Put(path string, opts RouteOptions) {
-	s.route(http.MethodPut, path, opts)
+	s.method(http.MethodPut, path, opts)
 }
 
 func (s *serveMux) Delete(path string, opts RouteOptions) {
-	s.route(http.MethodDelete, path, opts)
+	s.method(http.MethodDelete, path, opts)
 }
 
 func (s *serveMux) Patch(path string, opts RouteOptions) {
-	s.route(http.MethodPatch, path, opts)
+	s.method(http.MethodPatch, path, opts)
 }
 
 func (s *serveMux) Head(path string, opts RouteOptions) {
-	s.route(http.MethodHead, path, opts)
+	s.method(http.MethodHead, path, opts)
 }
 
 func (s *serveMux) Options(path string, opts RouteOptions) {
-	s.route(http.MethodOptions, path, opts)
+	s.method(http.MethodOptions, path, opts)
 }
 
 func (s *serveMux) Trace(path string, opts RouteOptions) {
-	s.route(http.MethodTrace, path, opts)
+	s.method(http.MethodTrace, path, opts)
 }
 
 func (s *serveMux) Connect(path string, opts RouteOptions) {
-	s.route(http.MethodConnect, path, opts)
+	s.method(http.MethodConnect, path, opts)
 }
 
-func (s *serveMux) Group(o RouteOptions, r func(r Router)) {
-	s.rOpts = &o
-	r(s)
+// Group creates a new inline-Mux with a copy of middleware stack. It's useful
+// for a group of handlers along the same routing path that use an additional
+// set of middlewares.
+func (s *serveMux) Group(fn func(r Router)) Router {
+	im := s.With()
+	if fn != nil {
+		fn(im)
+	}
+	return im
 }
 
 func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
 	s.middlewares = append(s.middlewares, middlewares...)
+}
+
+func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
+	newMux := *s
+	newMux.inlineMiddlewares = make(Middlewares, len(s.inlineMiddlewares), len(s.inlineMiddlewares)+len(middlewares))
+	copy(newMux.inlineMiddlewares, s.inlineMiddlewares)
+	newMux.inlineMiddlewares = append(newMux.inlineMiddlewares, middlewares...)
+	return &newMux
+}
+
+func (s *serveMux) Mount(pattern string, handler http.Handler) {
+	if pattern == "" {
+		pattern = "/"
+	}
+
+	middlewares := s.inlineMiddlewares
+	if len(middlewares) > 0 {
+		handler = middlewares[len(middlewares)-1](handler)
+		for i := len(middlewares) - 2; i >= 0; i-- {
+			handler = middlewares[i](handler)
+		}
+	}
+
+	s.sm.Handle(pattern, handler)
 }
 
 func (s *serveMux) Handle(pattern string, handler http.Handler) {
@@ -207,7 +238,7 @@ func ListenAndServe(addr string, handler http.Handler) error {
 	return http.ListenAndServe(addr, handler)
 }
 
-func (s *serveMux) route(method string, path string, opts RouteOptions) {
+func (s *serveMux) method(method string, path string, opts RouteOptions) {
 
 	if opts.Schema != nil {
 		comps := s.compileSchema(opts.Schema, opts.Info)
@@ -235,7 +266,7 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 		s.routeMeta[path] = v
 	}
 
-	s.sm.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
+	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := newContext(w, r)
 		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
@@ -244,6 +275,16 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 			s.opts.errHandler(err, c)
 		}
 	})
+
+	middlewares := s.inlineMiddlewares
+	if len(middlewares) > 0 {
+		h = middlewares[len(middlewares)-1](h)
+		for i := len(middlewares) - 2; i >= 0; i-- {
+			h = middlewares[i](h)
+		}
+	}
+
+	s.sm.Handle(method+" "+path, h)
 }
 
 func newServeMux() *serveMux {
@@ -260,12 +301,13 @@ func newServeMux() *serveMux {
 
 func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
 	return &serveMux{
-		sm:          sm,
-		paths:       paths,
-		routeMeta:   rm,
-		globalStore: globalStore,
-		middlewares: m,
-		opts:        opts,
-		rOpts:       nil,
+		sm:                sm,
+		paths:             paths,
+		routeMeta:         rm,
+		globalStore:       globalStore,
+		middlewares:       m,
+		inlineMiddlewares: make(Middlewares, 0),
+		opts:              opts,
+		rOpts:             nil,
 	}
 }
