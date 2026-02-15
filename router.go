@@ -20,6 +20,10 @@ type Router interface {
 	Method(method string, pattern string, opts RouteOptions)
 	// With adds inline middlewares for an endpoint handler
 	With(middlewares ...func(http.Handler) http.Handler) Router
+
+	// Route mounts a sub-Router along a `pattern` string.
+	Route(pattern string, fn func(r Router)) Router
+
 	// Group adds a new inline router along the current routing path
 	// with a fresh middleware stack for the inline router
 	Group(fn func(r Router)) Router
@@ -27,7 +31,7 @@ type Router interface {
 	// Mount attaches another http.Handler or chi Router as a subrouter along a routing
 	// path. It's very useful to split up a large API as many independent routers and
 	// compose them as a single service using Mount
-	Mount(pattern string, handler http.Handler)
+	// Mount(pattern string, handler http.Handler)
 
 	// Use appends one or more middleware onto the router stack
 	Use(middlewares ...func(http.Handler) http.Handler)

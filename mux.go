@@ -19,6 +19,7 @@ type serveMux struct {
 	globalStore       GofiStore
 	middlewares       Middlewares
 	inlineMiddlewares Middlewares
+	prefix            string
 }
 
 func NewServeMux() Router {
@@ -65,6 +66,21 @@ func (s *serveMux) Connect(path string, opts RouteOptions) {
 	s.method(http.MethodConnect, path, opts)
 }
 
+func (s *serveMux) Route(pattern string, fn func(r Router)) Router {
+	im := s.With().(*serveMux)
+	if pattern != "" {
+		if im.prefix != "" && !strings.HasSuffix(im.prefix, "/") && !strings.HasPrefix(pattern, "/") {
+			im.prefix += "/"
+		}
+		im.prefix += pattern
+	}
+
+	if fn != nil {
+		fn(im)
+	}
+	return im
+}
+
 // Group creates a new inline-Mux with a copy of middleware stack. It's useful
 // for a group of handlers along the same routing path that use an additional
 // set of middlewares.
@@ -88,21 +104,44 @@ func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
 	return &newMux
 }
 
-func (s *serveMux) Mount(pattern string, handler http.Handler) {
-	if pattern == "" {
-		pattern = "/"
-	}
+// func (s *serveMux) Mount(pattern string, handler http.Handler) {
+// 	if pattern == "" {
+// 		pattern = "/"
+// 	}
 
-	middlewares := s.inlineMiddlewares
-	if len(middlewares) > 0 {
-		handler = middlewares[len(middlewares)-1](handler)
-		for i := len(middlewares) - 2; i >= 0; i-- {
-			handler = middlewares[i](handler)
-		}
-	}
+// 	// Ensure pattern starts with / if not empty
+// 	if pattern != "/" && !strings.HasPrefix(pattern, "/") {
+// 		pattern = "/" + pattern
+// 	}
 
-	s.sm.Handle(pattern, handler)
-}
+// 	// If there is a prefix (from Route method), prepend it
+// 	if s.prefix != "" {
+// 		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(pattern, "/") {
+// 			pattern = "/" + pattern
+// 		}
+// 		pattern = s.prefix + pattern
+// 	}
+
+// 	// Mount logic: Mount usually implies a subtree, so we ensure trailing slash
+// 	// for the registration pattern on the underlying ServeMux.
+// 	mountPath := pattern
+// 	if !strings.HasSuffix(mountPath, "/") {
+// 		mountPath += "/"
+// 	}
+
+// 	// Apply middlewares
+// 	middlewares := s.inlineMiddlewares
+// 	if len(middlewares) > 0 {
+// 		handler = middlewares[len(middlewares)-1](handler)
+// 		for i := len(middlewares) - 2; i >= 0; i-- {
+// 			handler = middlewares[i](handler)
+// 		}
+// 	}
+
+// 	// Register with StripPrefix to ensure the sub-handler sees relative paths
+// 	stripPath := strings.TrimSuffix(mountPath, "/")
+// 	s.sm.Handle(mountPath, http.StripPrefix(stripPath, handler))
+// }
 
 func (s *serveMux) Handle(pattern string, handler http.Handler) {
 	s.sm.Handle(pattern, handler)
@@ -247,6 +286,12 @@ func ListenAndServe(addr string, handler http.Handler) error {
 }
 
 func (s *serveMux) method(method string, path string, opts RouteOptions) {
+	if s.prefix != "" {
+		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		path = s.prefix + path
+	}
 
 	if opts.Schema != nil {
 		comps := s.compileSchema(opts.Schema, opts.Info)

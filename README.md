@@ -166,15 +166,26 @@ r.Group(func(r gofi.Router) {
 })
 ```
 
-### Mounting Sub-Routers
+### Route Grouping & Versioning
 
-Mount another `http.Handler` or router under a specific path using `Mount()`:
+The `Route` method allows you to create sub-routers for grouping related endpoints or handling API versioning. This is similar to mounting, but more integrated.
 
 ```go
-apiV1 := gofi.NewServeMux()
-// ... define v1 routes ...
-r.Mount("/v1", apiV1)
+r.Route("/api", func(r gofi.Router) {
+    // API v1
+    r.Route("/v1", func(r gofi.Router) {
+        r.GET("/users", UserListHandler)
+        r.GET("/posts", PostListHandler)
+    })
+
+    // API v2
+    r.Route("/v2", func(r gofi.Router) {
+        r.GET("/users", UserListHandlerV2)
+    })
+})
 ```
+
+This structure keeps your routing logic clean and hierarchical. Middleware applied within a `Route` block will only affect routes within that block.
 
 ## Defining Route Options
 
