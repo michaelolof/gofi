@@ -44,7 +44,7 @@ func TestMiddleware(t *testing.T) {
 		}
 
 		r.Get("/test-1", RouteOptions{
-			Middlewares: []MiddlewareFunc{
+			PreHandlers: []PreHandler{
 				func(next HandlerFunc) HandlerFunc {
 					return func(c Context) error {
 						c.Writer().Header().Set("x-test-1", "1")

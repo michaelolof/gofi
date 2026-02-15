@@ -271,7 +271,7 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	// 	routeMeta = s.routeMeta
 	// }
 	// c.setContextSettings(&rules.rules, routeMeta, s.globalStore, s.opts)
-	handler := applyMiddleware(def.Handler, def.Middlewares)
+	handler := applyMiddleware(def.Handler, def.PreHandlers)
 	err = handler(c)
 	if err != nil {
 		s.opts.errHandler(err, c)
@@ -323,7 +323,7 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 		c := newContext(w, r)
 		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
-		err := applyMiddleware(opts.Handler, opts.Middlewares)(c)
+		err := applyMiddleware(opts.Handler, opts.PreHandlers)(c)
 		if err != nil {
 			s.opts.errHandler(err, c)
 		}

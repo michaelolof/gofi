@@ -78,7 +78,7 @@ func (t *testRouter) Invoke(opts InvokeOptions) (*httptest.ResponseRecorder, err
 		}
 
 		if ropts.Method == opts.Method && v {
-			handler := applyMiddleware(ropts.Options.Handler, ropts.Options.Middlewares)
+			handler := applyMiddleware(ropts.Options.Handler, ropts.Options.PreHandlers)
 
 			if len(opts.Query) > 0 {
 				qParams := r.URL.Query()
