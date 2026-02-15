@@ -149,7 +149,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	}
 }
 
-func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *ruleDef {
+func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *RuleDef {
 	supportedTags := []string{
 		"json",
 		"validate",
@@ -218,36 +218,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 	return rtn
 }
 
-func (s *serveMux) splitByUnescapedComma(str string) []string {
-	tokens := make([]string, 0, 10)
-	var token strings.Builder
-	escape := false
-
-	for _, c := range str {
-		if c == '\\' && !escape {
-			escape = true
-			continue
-		}
-
-		if c == ',' && !escape {
-			tokens = append(tokens, token.String())
-			token.Reset()
-		} else {
-			if escape {
-				token.WriteByte('\\')
-				escape = false
-			}
-			token.WriteRune(c)
-		}
-	}
-
-	if token.Len() > 0 {
-		tokens = append(tokens, token.String())
-	}
-	return tokens
-}
-
-func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *ruleDef) openapiSchema {
+func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *RuleDef) openapiSchema {
 
 	kind := typ.Kind()
 
@@ -320,10 +291,10 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 	}
 
 	isCustom := false
-	if v, ok := s.opts.customSpecs[specTag]; ok {
+	if v, ok := s.opts.customSpecs.Find(specTag); ok {
 		enum = optsMapper(optStr, nil)
-		typeStr = v.Type
-		format = v.Format
+		typeStr = v.Type()
+		format = v.Format()
 		ruleDefs.format = utils.ObjectFormats(specTag)
 		isCustom = true
 	}

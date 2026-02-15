@@ -15,7 +15,6 @@ type ruleOpts struct {
 	kind  reflect.Kind
 	rule  string
 	args  []string
-	c     *context
 	dator rules.ValidatorFn
 }
 
@@ -39,7 +38,7 @@ func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string
 	}
 }
 
-type ruleDef struct {
+type RuleDef struct {
 	typ                  reflect.Type
 	kind                 reflect.Kind
 	format               utils.ObjectFormats
@@ -49,22 +48,22 @@ type ruleDef struct {
 	defStr               string
 	defVal               any
 	rules                []ruleOpts
-	item                 *ruleDef
-	additionalProperties *ruleDef
-	properties           map[string]*ruleDef
+	item                 *RuleDef
+	additionalProperties *RuleDef
+	properties           map[string]*RuleDef
 	max                  *float64
 	required             bool
 
 	tags map[string][]string
 }
 
-func newRuleDef(typ reflect.Type, kind reflect.Kind, field string, fleldName string, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*ruleDef, items *ruleDef, addProps *ruleDef) *ruleDef {
-	props := make(map[string]*ruleDef)
+func newRuleDef(typ reflect.Type, kind reflect.Kind, field string, fleldName string, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {
+	props := make(map[string]*RuleDef)
 	if properties != nil {
 		props = properties
 	}
 
-	return &ruleDef{
+	return &RuleDef{
 		typ:                  typ,
 		kind:                 kind,
 		field:                field,
@@ -80,7 +79,7 @@ func newRuleDef(typ reflect.Type, kind reflect.Kind, field string, fleldName str
 	}
 }
 
-func (r *ruleDef) hasRule(rule string) bool {
+func (r *RuleDef) hasRule(rule string) bool {
 	if r == nil {
 		return false
 	}
@@ -93,7 +92,7 @@ func (r *ruleDef) hasRule(rule string) bool {
 	return false
 }
 
-func (r *ruleDef) attach(name string, item *ruleDef) {
+func (r *RuleDef) attach(name string, item *RuleDef) {
 	if r == nil && item == nil {
 		return
 	}
@@ -103,19 +102,19 @@ func (r *ruleDef) attach(name string, item *ruleDef) {
 	}
 }
 
-func (r *ruleDef) append(item *ruleDef) {
+func (r *RuleDef) append(item *RuleDef) {
 	if r == nil && item == nil {
 		return
 	}
 
 	if r == nil && item != nil {
-		r = &ruleDef{}
+		r = &RuleDef{}
 	} else {
 		r.item = item
 	}
 }
 
-func (r *ruleDef) addProps(props *ruleDef) {
+func (r *RuleDef) addProps(props *RuleDef) {
 	if r == nil && props == nil {
 		return
 	}
@@ -125,7 +124,7 @@ func (r *ruleDef) addProps(props *ruleDef) {
 	}
 }
 
-func (r *ruleDef) ruleOptions(rule string) []string {
+func (r *RuleDef) ruleOptions(rule string) []string {
 	if r == nil {
 		return nil
 	}
@@ -138,7 +137,7 @@ func (r *ruleDef) ruleOptions(rule string) []string {
 	return nil
 }
 
-func (r *ruleDef) findRules(rules []string, fallback string) string {
+func (r *RuleDef) findRules(rules []string, fallback string) string {
 	if r == nil {
 		return fallback
 	}
@@ -152,32 +151,32 @@ func (r *ruleDef) findRules(rules []string, fallback string) string {
 	return fallback
 }
 
-func getItemRuleDef(typ reflect.Type) *ruleDef {
+func getItemRuleDef(typ reflect.Type) *RuleDef {
 	return newRuleDef(typ, typ.Kind(), "", "", "", nil, nil, false, nil, nil, nil, nil)
 }
 
-type ruleDefMap map[string]ruleDef
+type ruleDefMap map[string]RuleDef
 
 type schemaRules struct {
-	req       map[string]ruleDef
-	responses map[string]map[string]ruleDef
+	req       map[string]RuleDef
+	responses map[string]map[string]RuleDef
 }
 
 func newSchemaRules() schemaRules {
 	return schemaRules{
-		req:       make(map[string]ruleDef),
-		responses: make(map[string]map[string]ruleDef),
+		req:       make(map[string]RuleDef),
+		responses: make(map[string]map[string]RuleDef),
 	}
 }
 
-func (s *schemaRules) setReq(key string, rules *ruleDef) {
+func (s *schemaRules) setReq(key string, rules *RuleDef) {
 	if rules == nil {
 		return
 	}
 	s.req[key+"."+rules.field] = *rules
 }
 
-func (s *schemaRules) setResps(key string, rules *ruleDef) {
+func (s *schemaRules) setResps(key string, rules *RuleDef) {
 	if rules == nil {
 		return
 	}
@@ -185,13 +184,13 @@ func (s *schemaRules) setResps(key string, rules *ruleDef) {
 	if _, ok := s.responses[key]; ok {
 		s.responses[key][rules.field] = *rules
 	} else {
-		s.responses[key] = map[string]ruleDef{
+		s.responses[key] = map[string]RuleDef{
 			rules.field: *rules,
 		}
 	}
 }
 
-func (s *schemaRules) getReqRules(key schemaField) *ruleDef {
+func (s *schemaRules) getReqRules(key schemaField) *RuleDef {
 	if s == nil {
 		return nil
 	}

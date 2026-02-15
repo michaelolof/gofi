@@ -2,6 +2,7 @@ package rules
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 )
 
@@ -16,7 +17,8 @@ func validateRegex(c ValidatorContext, regexName string, regexMatcher interface{
 			kind = reflect.TypeOf(val).Kind()
 		}
 
-		if kind == reflect.String {
+		switch kind {
+		case reflect.String:
 			v, ok := val.(string)
 			if !ok {
 				return invalidStr
@@ -25,8 +27,19 @@ func validateRegex(c ValidatorContext, regexName string, regexMatcher interface{
 				return nil
 			}
 			return invalid
+		default:
+			if stringer, ok := val.(fmt.Stringer); ok {
+				if regexMatcher.MatchString(stringer.String()) {
+					return nil
+				}
+				return invalid
+			} else {
+				if regexMatcher.MatchString(val.(string)) {
+					return nil
+				}
+				return invalid
+			}
 		}
-		return invalidStr
 	}
 }
 

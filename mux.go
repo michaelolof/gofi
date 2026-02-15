@@ -139,9 +139,15 @@ func (s *serveMux) SetErrorHandler(handler func(err error, c Context)) {
 	}
 }
 
-func (s *serveMux) SetCustomSpecs(list map[string]CustomSchemaProps) {
+func (s *serveMux) RegisterSpecs(list ...CustomSpec) {
 	if list != nil {
-		s.opts.customSpecs = list
+		s.opts.customSpecs = append(s.opts.customSpecs, list...)
+	}
+}
+
+func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
+	if len(list) > 0 {
+		s.opts.bodyParsers = append(s.opts.bodyParsers, list...)
 	}
 }
 
@@ -199,9 +205,12 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	c := newContext(w, r)
 
 	setupInjectContext := func(path, method string, ropts *RouteOptions, meta metaMap) {
-		rules := s.compileSchema(ropts.Schema, ropts.Info)
-		rules.specs.normalize(method, path)
-		s.opts.schemaRules.SetRules(path, method, &rules.rules)
+		if ropts.Schema != nil {
+			rules := s.compileSchema(ropts.Schema, ropts.Info)
+			rules.specs.normalize(method, path)
+			s.opts.schemaRules.SetRules(path, method, &rules.rules)
+		}
+
 		c.setContextSettings(newContextOptions(path, method), meta, s.globalStore, s.opts)
 	}
 

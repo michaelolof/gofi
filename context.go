@@ -25,7 +25,7 @@ type Context interface {
 	// Sends a schema response object for the given status code
 	Send(code int, obj any) error
 
-	// SendString(code int, s string) error
+	SendString(code int, s string) error
 
 	// SendBytes(code int, b []byte) error
 
@@ -88,6 +88,13 @@ func (c *context) Meta() ContextMeta {
 func (c *context) GetSchemaRules(pattern, method string) any {
 	rulesMap := c.serverOpts.schemaRules
 	return rulesMap.GetRules(pattern, method)
+}
+
+func (c *context) SendString(code int, s string) error {
+	c.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	c.w.WriteHeader(code)
+	_, err := c.w.Write([]byte(s))
+	return err
 }
 
 func (c *context) setContextSettings(opts contextOptions, routeMeta metaMap, globalStore GofiStore, serverOpts *muxOptions) {

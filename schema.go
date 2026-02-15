@@ -265,7 +265,7 @@ func (s schemaField) String() string {
 	return string(s)
 }
 
-func runValidation(c *context, typ errorType, val any, schema schemaField, keypath string, rules []ruleOpts) error {
+func runValidation(val any, typ errorType, schema schemaField, keypath string, rules []ruleOpts) error {
 	errs := make([]error, 0, len(rules))
 
 	for _, rule := range rules {

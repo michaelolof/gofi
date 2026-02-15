@@ -1,8 +1,6 @@
 package gofi
 
 import (
-	"encoding"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +11,10 @@ import (
 )
 
 func (c *context) Send(code int, obj any) error {
+	if c.rules() == nil {
+		return newErrReport(ResponseErr, schemaBody, "", "required", errors.New("schema not properly registered to route handler"))
+	}
+
 	_, rules, err := c.rules().getRespRulesByCode(code)
 	if err != nil {
 		return err
@@ -51,13 +53,13 @@ func (c *context) Send(code int, obj any) error {
 		return newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
 	}
 
-	var bdef ruleDef
+	var bdef RuleDef
 	if v, ok := rules[string(schemaBody)]; ok {
 		bdef = v
 	}
 
-	bs, err := sz.ValidateAndEncode(obj, ResponseOptions{
-		Context:     c,
+	bs, err := sz.ValidateAndEncodeResponse(obj, ResponseOptions{
+		Context:     &parserContext{c: c},
 		SchemaRules: &bdef,
 		Body:        rv.FieldByName(string(schemaBody)),
 	})
@@ -79,7 +81,7 @@ type headerSetter interface {
 }
 
 func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Value) error {
-	var ruleProps map[string]*ruleDef
+	var ruleProps map[string]*RuleDef
 	if v, ok := rules[string(schemaHeaders)]; ok {
 		ruleProps = v.properties
 	}
@@ -105,7 +107,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 
 		hv := hf.Interface()
 		checkAndSet := func(val string, key string, rules []ruleOpts) error {
-			err := runValidation(c, ResponseErr, val, schemaHeaders, key, rules)
+			err := runValidation(val, ResponseErr, schemaHeaders, key, rules)
 			if err != nil {
 				return err
 			}
@@ -114,37 +116,14 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 			return nil
 		}
 
-		if spec, ok := c.serverOpts.customSpecs[string(val.format)]; ok {
-			if spec.Encoder != nil {
-				v, err := spec.Encoder(hv)
-				if err != nil {
-					return newErrReport(ResponseErr, schemaHeaders, key, "typeMismatch", err)
-				}
+		if spec, ok := c.serverOpts.customSpecs.Find(string(val.format)); ok {
+			v, err := spec.Encode(hv)
+			if err != nil {
+				return newErrReport(ResponseErr, schemaHeaders, key, "typeMismatch", err)
+			}
 
-				if err := checkAndSet(v, key, val.rules); err != nil {
-					return err
-				}
-			} else {
-				switch vm := hv.(type) {
-				case json.Marshaler:
-					v, err := vm.MarshalJSON()
-					if err != nil {
-						return newErrReport(ResponseErr, schemaHeaders, key, "json-marshal", err)
-					}
-
-					if err := checkAndSet(string(v), key, val.rules); err != nil {
-						return err
-					}
-				case encoding.TextMarshaler:
-					v, err := vm.MarshalText()
-					if err != nil {
-						return newErrReport(ResponseErr, schemaHeaders, key, "text-marshal", err)
-					}
-
-					if err := checkAndSet(string(v), key, val.rules); err != nil {
-						return err
-					}
-				}
+			if err := checkAndSet(v, key, val.rules); err != nil {
+				return err
 			}
 		} else {
 			switch true {
@@ -152,7 +131,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				if utils.PrimitiveKindIsEmpty(val.kind, hv) && val.defVal != nil {
 					hv = val.defVal
 				}
-				err := runValidation(c, ResponseErr, hv, schemaHeaders, key, val.rules)
+				err := runValidation(hv, ResponseErr, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}
@@ -167,7 +146,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
-					err := runValidation(c, ResponseErr, tv, schemaHeaders, key, val.rules)
+					err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules)
 					if err != nil {
 						return err
 					}
@@ -179,7 +158,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
-					err := runValidation(c, ResponseErr, tv, schemaHeaders, key, val.rules)
+					err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules)
 					if err != nil {
 						return err
 					}
@@ -199,7 +178,7 @@ type cookieSetter interface {
 
 func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Value) error {
 	// For cookies only primitives and cookie object is supported
-	var ruleProps map[string]*ruleDef
+	var ruleProps map[string]*RuleDef
 	if v, ok := rules[string(schemaCookies)]; ok {
 		ruleProps = v.properties
 	}
@@ -228,7 +207,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 			if utils.PrimitiveKindIsEmpty(val.kind, cv) && val.defVal != nil {
 				cv = val.defVal
 			}
-			err := runValidation(c, ResponseErr, cv, schemaHeaders, key, val.rules)
+			err := runValidation(cv, ResponseErr, schemaHeaders, key, val.rules)
 			if err != nil {
 				return err
 			}
@@ -247,7 +226,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					cookV = cook.Value
 				}
 
-				err := runValidation(c, ResponseErr, cookV, schemaHeaders, key, val.rules)
+				err := runValidation(cookV, ResponseErr, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}
@@ -259,7 +238,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return newErrReport(ResponseErr, schemaCookies, "", "parser", errors.New("unable to parse cookie"))
 				}
 
-				err := runValidation(c, ResponseErr, cook.Value, schemaHeaders, key, val.rules)
+				err := runValidation(cook.Value, ResponseErr, schemaHeaders, key, val.rules)
 				if err != nil {
 					return err
 				}

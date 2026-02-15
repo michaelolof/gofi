@@ -1,8 +1,6 @@
 package gofi
 
 import (
-	"encoding"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
@@ -64,7 +62,11 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		schemaPtr = new(T)
 	}
 
-	if c.rules() == nil || len(c.rules().req) == 0 {
+	if c.rules() == nil {
+		return nil, newErrReport(RequestErr, schemaReq, "", "required", errors.New("schema not properly registered to route handler"))
+	}
+
+	if len(c.rules().req) == 0 {
 		return schemaPtr, nil
 	}
 
@@ -79,7 +81,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		reqStruct = reflect.ValueOf(schemaPtr).Elem().FieldByName(string(schemaReq))
 	}
 
-	validateStrAndBind := func(field schemaField, qv string, def *ruleDef) error {
+	validateStrAndBind := func(field schemaField, qv string, def *RuleDef) error {
 		if qv == "" && def.defStr != "" {
 			qv = def.defStr
 		}
@@ -90,36 +92,10 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 		var val any
 		var err error
-		if spec, ok := c.serverOpts.customSpecs[string(def.format)]; ok {
-			if spec.Decoder != nil {
-				val, err = spec.Decoder(qv)
-				if err != nil {
-					return newErrReport(RequestErr, field, def.field, "typeCast", err)
-				}
-			} else {
-				sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
-				// Only support structs cause pointers will default to nil which is not possible to mutate
-				if sf.Kind() != reflect.Pointer {
-					sfp := reflect.New(sf.Type())
-					if sfp.Type().NumMethod() > 0 && sfp.CanInterface() {
-						switch v := (sfp.Interface()).(type) {
-						case json.Unmarshaler:
-							if err := v.UnmarshalJSON([]byte(qv)); err != nil {
-								return newErrReport(RequestErr, field, def.field, "json-unmarshal", err)
-							}
-
-							sf.Set(reflect.ValueOf(v).Elem().Convert(sf.Type()))
-							return nil
-						case encoding.TextUnmarshaler:
-							if err := v.UnmarshalText([]byte(qv)); err != nil {
-								return newErrReport(RequestErr, field, def.field, "text-unmarshal", err)
-							}
-
-							sf.Set(reflect.ValueOf(v).Elem().Convert(sf.Type()))
-							return nil
-						}
-					}
-				}
+		if spec, ok := c.serverOpts.customSpecs.Find(string(def.format)); ok {
+			val, err = spec.Decode(qv)
+			if err != nil {
+				return newErrReport(RequestErr, field, def.field, "typeCast", err)
 			}
 		} else {
 			val, err = utils.PrimitiveFromStr(def.kind, qv)
@@ -140,7 +116,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 			}
 		}
 
-		err = runValidation(c, RequestErr, val, field, def.field, def.rules)
+		err = runValidation(val, RequestErr, field, def.field, def.rules)
 		if err != nil {
 			return err
 		}
@@ -212,7 +188,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 		switch def.format {
 		case utils.CookieObjectFormat:
-			err := runValidation(c, RequestErr, cv.Value, schemaCookies, def.field, def.rules)
+			err := runValidation(cv.Value, RequestErr, schemaCookies, def.field, def.rules)
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -239,7 +215,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 				continue
 			}
 
-			err = runValidation(c, RequestErr, cvs, schemaCookies, def.field, def.rules)
+			err = runValidation(cvs, RequestErr, schemaCookies, def.field, def.rules)
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -278,13 +254,12 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		return schemaPtr, newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
 	}
 
-	err = sz.ValidateAndDecode(body, RequestOptions{
-		ShouldEncode:      shouldBind,
-		Context:           c,
-		SchemaPtrInstance: schemaPtr,
-		SchemaRules:       pdef,
-		FieldStruct:       &reqStruct,
-		SchemaField:       schemaBody,
+	err = sz.ValidateAndDecodeRequest(body, RequestOptions{
+		ShouldBind:  shouldBind,
+		Context:     &parserContext{c: c},
+		SchemaPtr:   schemaPtr,
+		Body:        &reqStruct,
+		SchemaRules: pdef,
 	})
 	if err != nil {
 		return schemaPtr, err

@@ -24,9 +24,7 @@ func TestOpenAPISpecsMethod(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSpecs(map[string]CustomSchemaProps{
-		"custom": {Type: "string", Format: "string", Decoder: vendorDecoder, Encoder: vendorEncoder},
-	})
+	r.RegisterSpecs(&vendorSpec{})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
@@ -49,9 +47,7 @@ func TestCompilerHooksOpenAPISpecs(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSpecs(map[string]CustomSchemaProps{
-		"custom": {Type: "string", Format: "string", Decoder: vendorDecoder, Encoder: vendorEncoder},
-	})
+	r.RegisterSpecs(&vendorSpec{})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
@@ -86,9 +82,7 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSpecs(map[string]CustomSchemaProps{
-		"custom": {Type: "string", Format: "string"},
-	})
+	r.RegisterSpecs(&vendorSpec{})
 	r.Inject(InjectOptions{
 		Path:   "/test/:primitive/:custom",
 		Method: "GET",
@@ -127,9 +121,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSpecs(map[string]CustomSchemaProps{
-		"custom": {Type: "string", Format: "string"},
-	})
+	r.RegisterSpecs(&vendorSpec{})
 	resp, err := r.Inject(InjectOptions{
 		Path:    "/test/:primitive/:custom",
 		Method:  "GET",
@@ -161,9 +153,7 @@ func TestDynamicStructTags(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.SetCustomSpecs(map[string]CustomSchemaProps{
-		"dynamic": {Type: "string", Format: "string"},
-	})
+	r.RegisterSpecs(&vendorSpec{id: "dynamic"})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Enum, []any{"june", "july", "august"})
@@ -194,7 +184,24 @@ func (s *vendorType) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func vendorDecoder(val any) (any, error) {
+type vendorSpec struct{ id string }
+
+func (v *vendorSpec) SpecID() string {
+	if v.id != "" {
+		return v.id
+	}
+	return "custom"
+}
+
+func (v *vendorSpec) Type() string {
+	return "string"
+}
+
+func (v *vendorSpec) Format() string {
+	return "string"
+}
+
+func (v *vendorSpec) Decode(val any) (any, error) {
 	if v, ok := val.(string); ok {
 		return vendorType{val: v}, nil
 	} else {
@@ -202,7 +209,7 @@ func vendorDecoder(val any) (any, error) {
 	}
 }
 
-func vendorEncoder(val any) (string, error) {
+func (v *vendorSpec) Encode(val any) (string, error) {
 	if v, ok := val.(vendorType); ok {
 		return v.val, nil
 	} else {

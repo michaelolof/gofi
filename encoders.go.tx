@@ -19,24 +19,24 @@ import (
 	"github.com/valyala/fastjson"
 )
 
-type RequestOptions struct {
-	ShouldEncode      bool
+type RequestOptionsx struct {
+	ShouldBind        bool
 	Context           *context
 	SchemaField       schemaField
 	SchemaPtrInstance any
 	SchemaRules       *ruleDef
-	FieldStruct       *reflect.Value
+	Body              *reflect.Value
 }
 
-type ResponseOptions struct {
+type ResponseOptionsx struct {
 	Context     *context
 	SchemaRules *ruleDef
 	Body        reflect.Value
 }
 
 type SchemaEncoder interface {
-	ValidateAndEncode(obj any, opts ResponseOptions) ([]byte, error)
-	ValidateAndDecode(reader io.ReadCloser, opts RequestOptions) (err error)
+	ValidateAndEncode(obj any, opts ResponseOptionsx) ([]byte, error)
+	ValidateAndDecode(reader io.ReadCloser, opts RequestOptionsx) (err error)
 }
 
 const defaultReqSize int64 = 1048576
@@ -45,7 +45,7 @@ type JSONSchemaEncoder struct {
 	MaxRequestSize int64
 }
 
-func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOptions) error {
+func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOptionsx) error {
 	bsMax := j.MaxRequestSize
 	if bsMax == 0 {
 		bsMax = defaultReqSize
@@ -73,8 +73,8 @@ func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOp
 			return err
 		}
 
-		if opts.ShouldEncode {
-			sf := opts.FieldStruct.FieldByName(string(schemaBody))
+		if opts.ShouldBind {
+			sf := opts.Body.FieldByName(string(schemaBody))
 			switch sf.Kind() {
 			case reflect.Pointer:
 				sfp := reflect.New(sf.Type().Elem())
@@ -95,8 +95,8 @@ func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOp
 	}
 
 	var bodyStruct reflect.Value
-	if opts.ShouldEncode {
-		bodyStruct = getFieldStruct(opts.FieldStruct, schemaBody.String())
+	if opts.ShouldBind {
+		bodyStruct = getFieldStruct(opts.Body, schemaBody.String())
 	}
 
 	strctOpts := getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
@@ -113,7 +113,7 @@ func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOp
 	}
 }
 
-func (j *JSONSchemaEncoder) ValidateAndEncode(obj any, opts ResponseOptions) ([]byte, error) {
+func (j *JSONSchemaEncoder) ValidateAndEncode(obj any, opts ResponseOptionsx) ([]byte, error) {
 	body := opts.Body
 	if body.Kind() == reflect.Pointer {
 		body = body.Elem()
@@ -136,7 +136,7 @@ func (j *JSONSchemaEncoder) ValidateAndEncode(obj any, opts ResponseOptions) ([]
 	return buff.Bytes(), nil
 }
 
-func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
+func walkStruct(pv *cont.ParsedJson, opts RequestOptionsx, keys []string) (*walkFinishStatus, error) {
 	kp := strings.Join(keys, ".")
 	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
 	if err != nil {
@@ -153,16 +153,16 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 		return nil, nil
 	}
 
-	if opts.ShouldEncode && opts.FieldStruct.Kind() == reflect.Pointer {
-		opts.FieldStruct.Set(reflect.New(opts.FieldStruct.Type().Elem()))
+	if opts.ShouldBind && opts.Body.Kind() == reflect.Pointer {
+		opts.Body.Set(reflect.New(opts.Body.Type().Elem()))
 	}
 
 	switch opts.SchemaRules.kind {
 	case reflect.Struct:
 		for childKey, childDef := range opts.SchemaRules.properties {
 			var childStruct reflect.Value
-			if opts.ShouldEncode {
-				childStruct = getFieldStruct(opts.FieldStruct, childDef.fieldName)
+			if opts.ShouldBind {
+				childStruct = getFieldStruct(opts.Body, childDef.fieldName)
 			}
 
 			childOpts := getFieldOptions(opts, &childStruct, childDef)
@@ -184,15 +184,15 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
 		}
 
-		if opts.ShouldEncode {
-			opts.FieldStruct.Set(reflect.MakeMap(opts.FieldStruct.Type()))
+		if opts.ShouldBind {
+			opts.Body.Set(reflect.MakeMap(opts.Body.Type()))
 		}
 
 		var mapErr error
 		obj.Visit(func(key []byte, v *fastjson.Value) {
 			var cstrct reflect.Value
-			if opts.ShouldEncode {
-				cstrct = reflect.New(opts.FieldStruct.Type().Elem()).Elem()
+			if opts.ShouldBind {
+				cstrct = reflect.New(opts.Body.Type().Elem()).Elem()
 			}
 
 			ckey := string(key)
@@ -203,8 +203,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				return
 			}
 
-			if opts.ShouldEncode {
-				opts.FieldStruct.SetMapIndex(reflect.ValueOf(ckey), cstrct)
+			if opts.ShouldBind {
+				opts.Body.SetMapIndex(reflect.ValueOf(ckey), cstrct)
 			}
 
 		})
@@ -237,8 +237,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				return nil, err
 			}
 
-			if opts.ShouldEncode {
-				err = decodeFieldValue(opts.FieldStruct, arr)
+			if opts.ShouldBind {
+				err = decodeFieldValue(opts.Body, arr)
 				if err != nil {
 					newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
 				}
@@ -250,8 +250,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			// Handle array of Non primitives
 			i := 0
 			var nslice reflect.Value
-			if opts.ShouldEncode {
-				nslice = reflect.MakeSlice(opts.FieldStruct.Type(), 0, size)
+			if opts.ShouldBind {
+				nslice = reflect.MakeSlice(opts.Body.Type(), 0, size)
 			}
 
 			for {
@@ -268,8 +268,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				}
 
 				var istrct reflect.Value
-				if opts.ShouldEncode {
-					istrct = reflect.New(opts.FieldStruct.Type().Elem()).Elem()
+				if opts.ShouldBind {
+					istrct = reflect.New(opts.Body.Type().Elem()).Elem()
 				}
 
 				fopts := getFieldOptions(opts, &istrct, rules.item)
@@ -278,7 +278,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 					return nil, err
 				}
 
-				if opts.ShouldEncode {
+				if opts.ShouldBind {
 					nslice = reflect.Append(nslice, istrct)
 				}
 
@@ -289,8 +289,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				return nil, err
 			}
 
-			if opts.ShouldEncode {
-				opts.FieldStruct.Set(nslice)
+			if opts.ShouldBind {
+				opts.Body.Set(nslice)
 			}
 
 			return &walkFinished, nil
@@ -306,8 +306,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			return nil, err
 		}
 
-		if opts.ShouldEncode {
-			err = decodeFieldValue(opts.FieldStruct, v)
+		if opts.ShouldBind {
+			err = decodeFieldValue(opts.Body, v)
 			if err != nil {
 				newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
 			}
@@ -320,8 +320,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			return nil, err
 		}
 
-		if opts.ShouldEncode {
-			err = decodeFieldValue(opts.FieldStruct, val)
+		if opts.ShouldBind {
+			err = decodeFieldValue(opts.Body, val)
 			if err != nil {
 				newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
 			}
@@ -407,9 +407,9 @@ func getFieldStruct(strct *reflect.Value, fieldname string) reflect.Value {
 	}
 }
 
-func getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *ruleDef) RequestOptions {
+func getFieldOptions(opts RequestOptionsx, fieldStruct *reflect.Value, fieldRule *ruleDef) RequestOptionsx {
 	rtn := opts
-	rtn.FieldStruct = fieldStruct
+	rtn.Body = fieldStruct
 	rtn.SchemaRules = fieldRule
 	return rtn
 }
