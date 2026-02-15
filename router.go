@@ -43,9 +43,10 @@ type Router interface {
 
 	GlobalStore() GofiStore
 	Meta() RouterMeta
-	SetErrorHandler(func(err error, c Context))
-	SetCustomValidator(list map[string]func(c ValidatorContext) func(arg any) error)
 
-	RegisterSpecs(l ...CustomSpec)
+	UseErrorHandler(func(err error, c Context))
+
+	RegisterValidator(list ...Validator)
+	RegisterSpec(l ...CustomSpec)
 	RegisterBodyParser(l ...BodyParser)
 }

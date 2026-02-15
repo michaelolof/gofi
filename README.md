@@ -105,16 +105,40 @@ r := gofi.NewServeMux()
 
 ### Global Error Handler
 
-You can define a custom error handler for all routes using `SetErrorHandler`:
+You can define a custom error handler for all routes using `UseErrorHandler`:
 
 ```go
-r.SetErrorHandler(func(err error, c gofi.Context) {
+r.UseErrorHandler(func(err error, c gofi.Context) {
     // Custom error handling logic
     log.Printf("Error occurred: %v", err)
     c.Send(http.StatusInternalServerError, map[string]string{
         "error": "Internal Server Error",
         "details": err.Error(),
     })
+})
+```
+
+### Plugins
+
+You can attach shared state or plugins to the router using the `GlobalStore`, which is accessible in all route handlers.
+
+```go
+// 1. Initialize plugin
+myDB := NewDatabase()
+
+// 2. Register in GlobalStore
+r.GlobalStore().Set("db", myDB)
+
+// 3. Access in Handler
+gofi.DefineHandler(gofi.RouteOptions{
+    Handler: func(c gofi.Context) error {
+        // Retrieve from GlobalStore (read-only access)
+        if db, found := c.GlobalStore().Get("db"); found {
+            // Use the plugin
+            db.(*Database).Query("...")
+        }
+        return nil
+    },
 })
 ```
 
@@ -200,7 +224,7 @@ type UserSchema struct {
         }
     }
 
-    // Response definitions mapped by name (Ok, Created, Error, etc.)
+    // Response definitions mapped by name (Ok, Created, Err, etc.)
     Ok struct { // 200 OK
         Body UserResponse `json:"body"`
     }
@@ -335,7 +359,7 @@ var customIDSpec = gofi.DefineCustomSpec(gofi.SpecDefinition{
 })
 
 // Register
-r.RegisterSpecs(customIDSpec)
+r.RegisterSpec(customIDSpec)
 
 // Use in schema
 type Schema struct {
@@ -349,20 +373,27 @@ type Schema struct {
 
 ### Custom Validators
 
-Add your own validation logic for specific tags.
+Add your own validation logic for specific tags by implementing the `Validator` interface.
 
 ```go
-r.SetCustomValidator(map[string]func(c gofi.ValidatorContext) func(arg any) error{
-    "is-cool": func(c gofi.ValidatorContext) func(arg any) error {
-        return func(arg any) error {
-            s, ok := arg.(string)
-            if !ok || s != "cool" {
-                return errors.New("must be cool")
-            }
-            return nil
+type CoolValidator struct{}
+
+func (v *CoolValidator) Name() string {
+    return "is-cool"
+}
+
+func (v *CoolValidator) Rule(c gofi.ValidatorContext) func(arg any) error {
+    return func(arg any) error {
+        s, ok := arg.(string)
+        if !ok || s != "cool" {
+            return errors.New("must be cool")
         }
-    },
-})
+        return nil
+    }
+}
+
+// Register
+r.RegisterValidator(&CoolValidator{})
 
 // Use in schema: `validate:"is-cool"`
 ```

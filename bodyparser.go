@@ -56,17 +56,11 @@ func (p *parserContext) CustomSpecs() CustomSpecs {
 	return p.c.serverOpts.customSpecs
 }
 
-func JSONBodyParser(maxRequestSize int64) BodyParser {
-	return &jsonBodyParser{
-		MaxRequestSize: maxRequestSize,
-	}
-}
-
-type jsonBodyParser struct {
+type JSONBodyParser struct {
 	MaxRequestSize int64
 }
 
-func (j *jsonBodyParser) Match(contentType string) bool {
+func (j *JSONBodyParser) Match(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return false
@@ -75,7 +69,7 @@ func (j *jsonBodyParser) Match(contentType string) bool {
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
-func (j *jsonBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts RequestOptions) error {
+func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts RequestOptions) error {
 	bsMax := j.MaxRequestSize
 	if bsMax == 0 {
 		bsMax = 1048576 // defaultReqSize
@@ -148,7 +142,7 @@ func (j *jsonBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 	}
 }
 
-func (j *jsonBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions) ([]byte, error) {
+func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions) ([]byte, error) {
 	body := opts.Body
 	if body.Kind() == reflect.Pointer {
 		body = body.Elem()
@@ -171,7 +165,7 @@ func (j *jsonBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 	return buff.Bytes(), nil
 }
 
-func (j *jsonBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
+func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
 	kp := strings.Join(keys, ".")
 	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
 	if err != nil {
@@ -375,7 +369,7 @@ func (j *jsonBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 	return &walkFinished, nil
 }
 
-func (j *jsonBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
+func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 	if val == nil {
 		return nil
 	}
@@ -437,7 +431,7 @@ func (j *jsonBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 	}
 }
 
-func (j *jsonBodyParser) getFieldStruct(strct *reflect.Value, fieldname string) reflect.Value {
+func (j *JSONBodyParser) getFieldStruct(strct *reflect.Value, fieldname string) reflect.Value {
 	switch strct.Kind() {
 	case reflect.Pointer:
 		return strct.Elem().FieldByName(fieldname)
@@ -446,14 +440,14 @@ func (j *jsonBodyParser) getFieldStruct(strct *reflect.Value, fieldname string) 
 	}
 }
 
-func (j *jsonBodyParser) getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *RuleDef) RequestOptions {
+func (j *JSONBodyParser) getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *RuleDef) RequestOptions {
 	rtn := opts
 	rtn.Body = fieldStruct
 	rtn.SchemaRules = fieldRule
 	return rtn
 }
 
-func (j *jsonBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
+func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
 	isEmptyValue := func(v reflect.Value) bool {
 		switch v.Kind() {
 		case reflect.String:

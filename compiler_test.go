@@ -24,7 +24,7 @@ func TestOpenAPISpecsMethod(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.RegisterSpecs(&vendorSpec{})
+	r.RegisterSpec(&vendorSpec{})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
@@ -47,7 +47,7 @@ func TestCompilerHooksOpenAPISpecs(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.RegisterSpecs(&vendorSpec{})
+	r.RegisterSpec(&vendorSpec{})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Type, "string", "primitive type is correctly set")
@@ -82,7 +82,7 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.RegisterSpecs(&vendorSpec{})
+	r.RegisterSpec(&vendorSpec{})
 	r.Inject(InjectOptions{
 		Path:   "/test/:primitive/:custom",
 		Method: "GET",
@@ -121,7 +121,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.RegisterSpecs(&vendorSpec{})
+	r.RegisterSpec(&vendorSpec{})
 	resp, err := r.Inject(InjectOptions{
 		Path:    "/test/:primitive/:custom",
 		Method:  "GET",
@@ -153,7 +153,7 @@ func TestDynamicStructTags(t *testing.T) {
 	}
 
 	r := newServeMux()
-	r.RegisterSpecs(&vendorSpec{id: "dynamic"})
+	r.RegisterSpec(&vendorSpec{id: "dynamic"})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["primitive"].Enum, []any{"june", "july", "august"})

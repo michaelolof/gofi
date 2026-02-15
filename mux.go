@@ -133,15 +133,15 @@ func (s *serveMux) Meta() RouterMeta {
 	return s.routeMeta
 }
 
-func (s *serveMux) SetErrorHandler(handler func(err error, c Context)) {
+func (s *serveMux) UseErrorHandler(handler func(err error, c Context)) {
 	if handler != nil {
 		s.opts.errHandler = handler
 	}
 }
 
-func (s *serveMux) RegisterSpecs(list ...CustomSpec) {
-	if list != nil {
-		s.opts.customSpecs = append(s.opts.customSpecs, list...)
+func (s *serveMux) RegisterSpec(list ...CustomSpec) {
+	for _, v := range list {
+		s.opts.customSpecs[v.SpecID()] = v
 	}
 }
 
@@ -153,9 +153,9 @@ func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
 
 type ValidatorContext = rules.ValidatorContext
 
-func (s *serveMux) SetCustomValidator(list map[string]func(c ValidatorContext) func(arg any) error) {
-	if list != nil {
-		s.opts.customValidators = list
+func (s *serveMux) RegisterValidator(list ...Validator) {
+	for _, v := range list {
+		s.opts.customValidators[v.Name()] = v.Rule
 	}
 }
 

@@ -18,11 +18,14 @@ type muxOptions struct {
 }
 
 func defaultMuxOptions() *muxOptions {
+	bp := make([]BodyParser, 0, 10)
+	bp = append(bp, &JSONBodyParser{})
+
 	return &muxOptions{
 		errHandler:       defaultErrorHandler,
 		customValidators: make(rules.ContextValidators),
-		customSpecs:      make(CustomSpecs, 0, 20),
-		bodyParsers:      []BodyParser{JSONBodyParser(0)},
+		customSpecs:      make(CustomSpecs),
+		bodyParsers:      bp,
 		logger:           &consoleLogger{},
 		schemaRules:      make(SchemaRulesMap),
 	}
@@ -40,15 +43,11 @@ func (m *muxOptions) getSerializer(contentType cont.ContentType) (BodyParser, er
 // type SerializerFn map[cont.ContentType]SchemaEncoder
 type SerializerFn func(cont.ContentType) (BodyParser, bool)
 
-type CustomSpecs []CustomSpec
+type CustomSpecs map[string]CustomSpec
 
 func (c CustomSpecs) Find(specID string) (CustomSpec, bool) {
-	for _, spec := range c {
-		if spec.SpecID() == specID {
-			return spec, true
-		}
-	}
-	return nil, false
+	v, ok := c[specID]
+	return v, ok
 }
 
 type CustomSpec interface {
@@ -84,6 +83,11 @@ func (s SchemaRulesMap) GetRules(pattern, method string) *schemaRules {
 		}
 	}
 	return nil
+}
+
+type Validator interface {
+	Name() string
+	Rule(c ValidatorContext) func(val any) error
 }
 
 func DefineCustomSpec(spec SpecDefinition) CustomSpec {
