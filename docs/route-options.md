@@ -37,7 +37,7 @@ func(c gofi.Context) error {
     // 1. Validate and Bind
     // This reads the Body, Query, Headers, Path, and Cookies,
     // validates them against the struct tags, and returns a populated struct.
-    data, err := gofi.ValidateAndBind[UserSchema](c)
+    s, err := gofi.ValidateAndBind[UserSchema](c)
     if err != nil {
         // If validation fails, Gofi returns a structured error.
         // You can return it directly to let the global error handler manage it.
@@ -46,8 +46,8 @@ func(c gofi.Context) error {
 
     // 2. Access Data
     // Data is now type-safe and validated.
-    userID := data.Request.Path.UserID
-    limit := data.Request.Query.Limit
+    userID := s.Request.Path.UserID
+    limit := s.Request.Query.Limit
 
     // ... business logic ...
 }
@@ -55,29 +55,29 @@ func(c gofi.Context) error {
 
 ### 2. Sending Outgoing Responses
 
-To send a response, use the `c.Send(code, data)` method. The `data` argument should correspond to the specific response struct defined in your schema for that status code.
+To send a response, use the `c.Send(code, obj)` method. The `obj` argument should correspond to the specific response struct defined in your schema for that status code.
 
 You often reuse the same schema struct instance returned by `ValidateAndBind` to populate the response, but you can also create a new instance.
 
 ```go
 func(c gofi.Context) error {
-    data, err := gofi.ValidateAndBind[UserSchema](c)
+    s, err := gofi.ValidateAndBind[UserSchema](c)
     if err != nil {
         return err
     }
 
     // ... logic to find user ...
-    user := findUser(data.Request.Path.UserID)
+    user := findUser(s.Request.Path.UserID)
 
     // 1. Populate the response struct
     // 'Ok' corresponds to the 200 OK field in UserSchema
-    data.Ok.Body = user
-    data.Ok.Header.LastModified = time.Now().String()
+    s.Ok.Body = user
+    s.Ok.Header.LastModified = time.Now().String()
 
     // 2. Send the response
     // Pass the status code and the specific schema field for that code.
-    // Gofi validates the response data against the schema before sending.
-    return c.Send(200, data.Ok)
+    // Gofi validates the Ok response object against the schema before sending.
+    return c.Send(200, s.Ok)
 }
 ```
 
@@ -136,7 +136,7 @@ var AdminRoute = gofi.DefineHandler(gofi.RouteOptions{
 ```
 
 ### 4. PreHandlers (`PreHandlers`)
-`PreHandlers` are middlewares specific to this route. They run *before* the main handler.
+`PreHandlers` are middlewares specific to the route. They run *before* the main handler.
 
 ```go
 var ProtectedRoute = gofi.DefineHandler(gofi.RouteOptions{
@@ -215,3 +215,6 @@ func AuthPreHandler(next gofi.HandlerFunc) gofi.HandlerFunc {
     }
 }
 ```
+Anything that can be done in a Handler can be done in a PreHandler. If you ValidateAndBind in the PreHandler, 
+the binded object will be cached in your route context and available in your handler. If you subsequently call ValidateAndBind in your handler, 
+it will not re-validate the request, but instead return the cached object. This is useful for performance reasons, as it avoids re-validating the request.

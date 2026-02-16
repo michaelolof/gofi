@@ -53,6 +53,7 @@ Request struct {
     // Cookies
     Cookie struct {
         SessionID string `json:"session_id" validate:"required"`
+        SessionKey http.Cookie `json:"session_key" validate:"required"`
     }
 
     // Request Body
@@ -66,6 +67,30 @@ Request struct {
 ## Response Schema
 
 Responses are defined by fields that match supported HTTP status codes. Each field represents a possible response and can contain `Body`, `Header`, and `Cookie` sub-fields.
+
+### Example
+
+```go
+Ok struct {
+    // Headers
+    Header struct {
+        ContentTypw string `json:"content-type" default:"application/json"`
+    }
+
+    // Cookies
+    Cookie struct {
+        SessionID string `json:"session_id" validate:"required"`
+        SessionKey http.Cookie `json:"session_key" validate:"required"`
+    }
+
+    // Request Body
+    Body struct {
+        Username string `json:"username" validate:"required"`
+        Email    string `json:"email" validate:"required,email"`
+        CreatedAt time.Time `json:"created_at" validate:"required"`
+    }
+}
+```
 
 ### Sub-fields
 

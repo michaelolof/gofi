@@ -228,7 +228,6 @@ r.Group(func(r gofi.Router) {
     r.GET("/profile", ProfileHandler)
 })
 ```
-
 ### Route Grouping & Versioning
 
 The `Route` method allows you to create sub-routers for grouping related endpoints or handling API versioning. This is similar to mounting, but more integrated.
@@ -271,34 +270,33 @@ type RouteOptions struct {
 }
 ```
 
-### Validation Tags
+## Schema Validations
 
-Gofi uses an internal validator for structs that is mostly compatible with the [go-playground/validator](https://github.com/go-playground/validator) library.
+Gofi validates requests based on struct tags in your schema.
 
-Supported validators include:
-- `required`
-- `min`, `max`, `len`
-- `email`, `uuid`
-- `oneof`
-- And many more standard validations.
+```go
+type UserSchema struct {
+    Request struct {
+        Body struct {
+            Email string `json:"email" validate:"required,email"`
+            Age   int    `json:"age" validate:"gte=18"`
+        }
+    }
+}
+```
 
-Example: `validate:"required,min=5,max=20"`
-
-## Validating and Binding Requests
-
-Inside your handler, use `ValidateAndBind` to validate the request against your schema and bind the data to a typed struct.
+Use `gofi.ValidateAndBind` in your handler to perform validation:
 
 ```go
 s, err := gofi.ValidateAndBind[UserSchema](c)
 if err != nil {
-    // Automatically handles validation errors
-    return err
+    return err // Returns structured validation error
 }
-
-// Access validated data
-userID := s.Request.Params.ID
-page := s.Request.Query.Page
 ```
+
+Gofi supports a wide range of validators (`required`, `min`, `max`, `uuid`, `ip`, etc.) and allows you to define custom validators.
+
+For a complete list of supported validators and a guide on creating custom ones, refer to the [Schema Validations Guide](docs/validations.md).
 
 ## Serving OpenAPI Documentation
 
@@ -366,10 +364,11 @@ gofi.ServeDocs(r, gofi.DocsOptions{
 })
 ```
 
-## Advanced Usage
+## Custom Types/Specs
+Gofi schema supports the basic GoLang types for encoding and decoding (e.g struct, array, int, string etc.) as well as `time.Time` and `http.Cookie`
+To support aditional types in your Gofi Schema (e.g google's `uuid.UUID`), you can define them as custom `specs` and register them like below
 
 ### Custom Specs (Vendor Types)
-
 You can define custom encoding/decoding behavior for specific types, useful for vendor types or custom scalars.
 
 1. Implement `CustomSpec` or use `DefineCustomSpec`.
@@ -404,36 +403,14 @@ type Schema struct {
 }
 ```
 
-### Custom Validators
 
-Add your own validation logic for specific tags by implementing the `Validator` interface.
 
-```go
-type CoolValidator struct{}
+## Decoding Requests and Encoding Responses
+Incoming requests are decoded when you call the `gofi.ValidateAndBind[T](c gofi.Context) error` method and Outgoing responses are encoded when you call the `c.Send(code int, obj any) error` method.
 
-func (v *CoolValidator) Name() string {
-    return "is-cool"
-}
+These methods rely on the ContentType defined in the Header of the Schema to determine which BodyParser to use. The Gofi library comes already with a built-in JSON BodyParser
 
-func (v *CoolValidator) Rule(c gofi.ValidatorContext) func(arg any) error {
-    return func(arg any) error {
-        s, ok := arg.(string)
-        if !ok || s != "cool" {
-            return errors.New("must be cool")
-        }
-        return nil
-    }
-}
-
-// Register
-r.RegisterValidator(&CoolValidator{})
-
-// Use in schema: `validate:"is-cool"`
-```
-
-### Custom Body Parsers
-
-Implement the `BodyParser` interface to handle different content types (e.g., XML, YAML, MsgPack).
+You can implement the `BodyParser` interface to handle different content types (e.g., XML, YAML, MsgPack) and register it.
 
 ```go
 type MyXMLParser struct {}
