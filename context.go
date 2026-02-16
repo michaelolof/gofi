@@ -27,7 +27,7 @@ type Context interface {
 
 	SendString(code int, s string) error
 
-	// SendBytes(code int, b []byte) error
+	SendBytes(code int, b []byte) error
 
 	GetSchemaRules(pattern, method string) any
 }
@@ -94,6 +94,12 @@ func (c *context) SendString(code int, s string) error {
 	c.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.w.WriteHeader(code)
 	_, err := c.w.Write([]byte(s))
+	return err
+}
+
+func (c *context) SendBytes(code int, b []byte) error {
+	c.w.WriteHeader(code)
+	_, err := c.w.Write(b)
 	return err
 }
 

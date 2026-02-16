@@ -103,6 +103,69 @@ Create a new router instance using `NewServeMux()`:
 r := gofi.NewServeMux()
 ```
 
+### Defining a Route Schema
+
+Schemas are defined as nested structs representing the HTTP request and response structure.
+
+```go
+type UserSchema struct {
+    // Request definition
+    Request struct {
+        // Path parameters (e.g., /users/:id)
+        Path struct {
+            ID string `json:"id" validate:"required,uuid"`
+        }
+        // Query parameters (e.g., ?page=1)
+        Query struct {
+            Page int `json:"page" default:"1"`
+        }
+        // Headers
+        Header struct {
+            Authorization string `json:"Authorization" validate:"required"`
+        }
+        // Request Body (JSON)
+        Body struct {
+            Name  string `json:"name" validate:"required"`
+            Email string `json:"email" validate:"required,email"`
+        }
+    }
+
+    // Response definitions mapped by name (Ok, Created, Err, etc.)
+    Ok struct { // 200 OK
+        Body UserResponse `json:"body"`
+    }
+    NotFound struct { // 404 Not Found
+        Body ErrorResponse `json:"body"`
+    }
+    // Generic error response for 400-599 status codes not implicitly matched
+    Err struct {
+         Body ErrorResponse `json:"body"`
+    }
+}
+```
+
+For a detailed guide on defining schemas, supported fields, response types and validation, please refer to the [Schema Guide](docs/schema-info.md).
+
+### Defining a Route Handler
+
+The `RouteOptions` struct is used to configure your route, including metadata, schema, middlewares, and the handler function itself.
+
+```go
+var UsersHandler = gofi.DefineHandler(gofi.RouteOptions{
+    Info: gofi.Info{ Description: "Returns a list Users" },
+    Schema: UserListSchema{},
+    Handler: func(c gofi.Context) error {
+        // ... implementation ...
+        return c.Send(200, response)
+    },
+})
+
+r.Get("/users", UsersHandler)
+```
+
+For a comprehensive guide on Route Handlers, Context methods, and RouteOptions configuration, please refer to the [Route Options Guide](docs/route-options.md).
+
+
 ### Global Error Handler
 
 You can define a custom error handler for all routes using `UseErrorHandler`:
@@ -205,47 +268,6 @@ type RouteOptions struct {
     Middlewares []gofi.MiddlewareFunc
     // The handler function
     Handler func(c gofi.Context) error
-}
-```
-
-### Defining Schema
-
-Schemas are defined as nested structs representing the HTTP request and response structure.
-
-```go
-type UserSchema struct {
-    // Request definition
-    Request struct {
-        // Path parameters (e.g., /users/:id)
-        Params struct {
-            ID string `json:"id" validate:"required,uuid"`
-        }
-        // Query parameters (e.g., ?page=1)
-        Query struct {
-            Page int `json:"page" default:"1"`
-        }
-        // Headers
-        Headers struct {
-            Authorization string `json:"Authorization" validate:"required"`
-        }
-        // Request Body (JSON)
-        Body struct {
-            Name  string `json:"name" validate:"required"`
-            Email string `json:"email" validate:"required,email"`
-        }
-    }
-
-    // Response definitions mapped by name (Ok, Created, Err, etc.)
-    Ok struct { // 200 OK
-        Body UserResponse `json:"body"`
-    }
-    NotFound struct { // 404 Not Found
-        Body ErrorResponse `json:"body"`
-    }
-    // Generic error response for 400-599 status codes not implicitly matched
-    Err struct {
-         Body ErrorResponse `json:"body"`
-    }
 }
 ```
 
