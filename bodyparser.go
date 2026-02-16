@@ -2,11 +2,10 @@ package gofi
 
 import (
 	"bytes"
-	"encoding"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"reflect"
 	"slices"
@@ -20,48 +19,79 @@ import (
 )
 
 type RequestOptions struct {
-	ShouldEncode      bool
-	Context           *context
-	SchemaField       schemaField
-	SchemaPtrInstance any
-	SchemaRules       *ruleDef
-	FieldStruct       *reflect.Value
+	// SchemaField schemaField // Needed for error reporting
+	SchemaRules *RuleDef // Needed for recursion
+	ShouldBind  bool
+	Context     ParserContext
+	SchemaPtr   any
+	Body        *reflect.Value
 }
 
 type ResponseOptions struct {
-	Context     *context
-	SchemaRules *ruleDef
+	Context     ParserContext
+	SchemaRules *RuleDef // Needed for validation
 	Body        reflect.Value
 }
 
-type SchemaEncoder interface {
-	ValidateAndEncode(obj any, opts ResponseOptions) ([]byte, error)
-	ValidateAndDecode(reader io.ReadCloser, opts RequestOptions) (err error)
+type BodyParser interface {
+	Match(contentType string) bool
+	ValidateAndDecodeRequest(r io.ReadCloser, opts RequestOptions) error
+	ValidateAndEncodeResponse(s any, opts ResponseOptions) ([]byte, error)
 }
 
-const defaultReqSize int64 = 1048576
+type ParserContext interface {
+	Writer() http.ResponseWriter
+	CustomSpecs() CustomSpecs
+}
 
-type JSONSchemaEncoder struct {
+type parserContext struct {
+	c *context
+}
+
+func (p *parserContext) Writer() http.ResponseWriter {
+	return p.c.Writer()
+}
+
+func (p *parserContext) CustomSpecs() CustomSpecs {
+	return p.c.serverOpts.customSpecs
+}
+
+type JSONBodyParser struct {
 	MaxRequestSize int64
 }
 
-func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOptions) error {
-	bsMax := j.MaxRequestSize
-	if bsMax == 0 {
-		bsMax = defaultReqSize
+func (j *JSONBodyParser) Match(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
 	}
 
-	body = http.MaxBytesReader(opts.Context.Writer(), body, 1048576)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts RequestOptions) error {
+	bsMax := j.MaxRequestSize
+	if bsMax == 0 {
+		bsMax = 1048576 // defaultReqSize
+	}
+
+	body = http.MaxBytesReader(opts.Context.Writer(), body, bsMax)
 	bs, err := io.ReadAll(body)
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "reader", err)
-	} else if len(bs) == 0 && opts.SchemaRules.required {
+	} else if len(bs) == 0 && opts.SchemaRules != nil && opts.SchemaRules.required {
 		return newErrReport(RequestErr, schemaBody, "", "required", errors.New("request body is required"))
 	} else if len(bs) == 0 {
 		return nil
 	}
 
-	// Determine whether json body value is a primirive or not
+	// Use empty rules if nil (shouldn't happen if properly initialized)
+	if opts.SchemaRules == nil {
+		// fallback or error? Assuming initialized.
+		return errors.New("SchemaRules is nil")
+	}
+
+	// Determine whether json body value is a primitive or not
 	val, err := utils.PrimitiveFromStr(opts.SchemaRules.kind, string(bs))
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "encoder", err)
@@ -69,12 +99,12 @@ func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOp
 
 	// Handle if JSON body value is a primitive
 	if utils.IsPrimitive(val) {
-		if err := runValidation(opts.Context, RequestErr, val, schemaBody, "", opts.SchemaRules.rules); err != nil {
+		if err := runValidation(val, RequestErr, schemaBody, "", opts.SchemaRules.rules); err != nil {
 			return err
 		}
 
-		if opts.ShouldEncode {
-			sf := opts.FieldStruct.FieldByName(string(schemaBody))
+		if opts.ShouldBind && opts.Body != nil {
+			sf := opts.Body.FieldByName(string(schemaBody))
 			switch sf.Kind() {
 			case reflect.Pointer:
 				sfp := reflect.New(sf.Type().Elem())
@@ -95,52 +125,51 @@ func (j *JSONSchemaEncoder) ValidateAndDecode(body io.ReadCloser, opts RequestOp
 	}
 
 	var bodyStruct reflect.Value
-	if opts.ShouldEncode {
-		bodyStruct = getFieldStruct(opts.FieldStruct, schemaBody.String())
+	if opts.ShouldBind && opts.Body != nil {
+		bodyStruct = j.getFieldStruct(opts.Body, schemaBody.String())
 	}
 
-	strctOpts := getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
-	status, err := walkStruct(pv, strctOpts, nil)
+	strctOpts := j.getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
+	status, err := j.walkStruct(pv, schemaBody, strctOpts, nil)
 	if err != nil {
 		return err
 	}
 
-	switch *status {
-	case walkFinished:
+	if status != nil && *status == walkFinished {
 		return nil
-	default:
+	} else {
 		return newErrReport(RequestErr, schemaBody, "", "parser", errors.New("couldn't parse request body"))
 	}
 }
 
-func (j *JSONSchemaEncoder) ValidateAndEncode(obj any, opts ResponseOptions) ([]byte, error) {
+func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions) ([]byte, error) {
 	body := opts.Body
 	if body.Kind() == reflect.Pointer {
 		body = body.Elem()
 	}
 
-	if opts.SchemaRules.required && !body.IsValid() {
+	if opts.SchemaRules != nil && opts.SchemaRules.required && !body.IsValid() {
 		return nil, newErrReport(ResponseErr, schemaBody, "", "required", errors.New("value is required for body"))
 	}
 
-	if opts.SchemaRules.kind != body.Kind() {
+	if opts.SchemaRules != nil && opts.SchemaRules.kind != body.Kind() {
 		return nil, newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
 	}
 
 	var buff bytes.Buffer
 	buff.Reset()
-	if err := encodeFieldValue(opts.Context, &buff, opts.Body, opts.SchemaRules, nil); err != nil {
+	if err := j.encodeFieldValue(opts.Context, &buff, opts.Body, opts.SchemaRules, nil); err != nil {
 		return nil, newErrReport(ResponseErr, schemaBody, "", "encoder", err)
 	}
 
 	return buff.Bytes(), nil
 }
 
-func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
+func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
 	kp := strings.Join(keys, ".")
 	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
 	if err != nil {
-		return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
+		return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
 	}
 
 	if val == nil && opts.SchemaRules.defVal != nil {
@@ -153,20 +182,20 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 		return nil, nil
 	}
 
-	if opts.ShouldEncode && opts.FieldStruct.Kind() == reflect.Pointer {
-		opts.FieldStruct.Set(reflect.New(opts.FieldStruct.Type().Elem()))
+	if opts.ShouldBind && opts.Body != nil && opts.Body.Kind() == reflect.Pointer {
+		opts.Body.Set(reflect.New(opts.Body.Type().Elem()))
 	}
 
 	switch opts.SchemaRules.kind {
 	case reflect.Struct:
 		for childKey, childDef := range opts.SchemaRules.properties {
 			var childStruct reflect.Value
-			if opts.ShouldEncode {
-				childStruct = getFieldStruct(opts.FieldStruct, childDef.fieldName)
+			if opts.ShouldBind && opts.Body != nil {
+				childStruct = j.getFieldStruct(opts.Body, childDef.fieldName)
 			}
 
-			childOpts := getFieldOptions(opts, &childStruct, childDef)
-			_, err := walkStruct(pv, childOpts, append(keys, childKey))
+			childOpts := j.getFieldOptions(opts, &childStruct, childDef)
+			_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childKey))
 			if err != nil {
 				return nil, err
 			}
@@ -181,30 +210,30 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 
 		obj, err := pv.GetRawObject(keys)
 		if err != nil {
-			return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
+			return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
 		}
 
-		if opts.ShouldEncode {
-			opts.FieldStruct.Set(reflect.MakeMap(opts.FieldStruct.Type()))
+		if opts.ShouldBind && opts.Body != nil {
+			opts.Body.Set(reflect.MakeMap(opts.Body.Type()))
 		}
 
 		var mapErr error
 		obj.Visit(func(key []byte, v *fastjson.Value) {
 			var cstrct reflect.Value
-			if opts.ShouldEncode {
-				cstrct = reflect.New(opts.FieldStruct.Type().Elem()).Elem()
+			if opts.ShouldBind && opts.Body != nil {
+				cstrct = reflect.New(opts.Body.Type().Elem()).Elem()
 			}
 
 			ckey := string(key)
-			copts := getFieldOptions(opts, &cstrct, opts.SchemaRules.additionalProperties)
-			_, err := walkStruct(pv, copts, append(keys, ckey))
+			copts := j.getFieldOptions(opts, &cstrct, opts.SchemaRules.additionalProperties)
+			_, err := j.walkStruct(pv, schemaBody, copts, append(keys, ckey))
 			if err != nil {
 				mapErr = err
 				return
 			}
 
-			if opts.ShouldEncode {
-				opts.FieldStruct.SetMapIndex(reflect.ValueOf(ckey), cstrct)
+			if opts.ShouldBind && opts.Body != nil {
+				opts.Body.SetMapIndex(reflect.ValueOf(ckey), cstrct)
 			}
 
 		})
@@ -216,7 +245,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 		return &walkFinished, nil
 
 	case reflect.Slice, reflect.Array:
-		var size = DEFAULT_ARRAY_SIZE
+		var size = 50 // DEFAULT_ARRAY_SIZE
 		if opts.SchemaRules.max != nil {
 			size = int(*opts.SchemaRules.max)
 		}
@@ -228,19 +257,19 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			// Handle array of primitive values
 			arr, err := pv.GetPrimitiveArrVals(rules.item.kind, rules.format, keys, size)
 			if rules.max != nil && len(arr) > int(*rules.max) {
-				return nil, newErrReport(RequestErr, opts.SchemaField, kp, "max", errors.New("array size too large"))
+				return nil, newErrReport(RequestErr, schemaField, kp, "max", errors.New("array size too large"))
 			} else if err != nil {
-				return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
+				return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
 			}
 
-			if err := runValidation(opts.Context, RequestErr, arr, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+			if err := runValidation(arr, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
-			if opts.ShouldEncode {
-				err = decodeFieldValue(opts.FieldStruct, arr)
+			if opts.ShouldBind && opts.Body != nil {
+				err = j.decodeFieldValue(opts.Body, arr)
 				if err != nil {
-					newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
+					newErrReport(RequestErr, schemaField, kp, "encoder", err)
 				}
 			}
 
@@ -250,8 +279,8 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 			// Handle array of Non primitives
 			i := 0
 			var nslice reflect.Value
-			if opts.ShouldEncode {
-				nslice = reflect.MakeSlice(opts.FieldStruct.Type(), 0, size)
+			if opts.ShouldBind && opts.Body != nil {
+				nslice = reflect.MakeSlice(opts.Body.Type(), 0, size)
 			}
 
 			for {
@@ -259,38 +288,45 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 				_kp := strings.Join(_keys, ".")
 				if !pv.Exist(_keys...) {
 					if rules.required && i == 0 {
-						return nil, newErrReport(RequestErr, opts.SchemaField, _kp, "required", errors.New("value must not be empty"))
+						return nil, newErrReport(RequestErr, schemaField, _kp, "required", errors.New("value must not be empty"))
 					} else {
 						break
 					}
 				} else if rules.max != nil && i > int(*rules.max) {
-					return nil, newErrReport(RequestErr, opts.SchemaField, _kp, "max", fmt.Errorf("array length must not be greater than %f", *rules.max))
+					return nil, newErrReport(RequestErr, schemaField, _kp, "max", fmt.Errorf("array length must not be greater than %f", *rules.max))
 				}
 
 				var istrct reflect.Value
-				if opts.ShouldEncode {
-					istrct = reflect.New(opts.FieldStruct.Type().Elem()).Elem()
+				if opts.ShouldBind && opts.Body != nil {
+					istrct = reflect.New(opts.Body.Type().Elem()).Elem()
 				}
 
-				fopts := getFieldOptions(opts, &istrct, rules.item)
-				_, err := walkStruct(pv, fopts, append(keys, fmt.Sprintf("%d", i)))
+				fopts := j.getFieldOptions(opts, &istrct, rules.item)
+				_, err := j.walkStruct(pv, schemaBody, fopts, append(keys, fmt.Sprintf("%d", i)))
 				if err != nil {
 					return nil, err
 				}
 
-				if opts.ShouldEncode {
+				if opts.ShouldBind && opts.Body != nil {
 					nslice = reflect.Append(nslice, istrct)
 				}
 
 				i++
 			}
 
-			if err := runValidation(opts.Context, RequestErr, nslice.Interface(), opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+			// Slice Validation
+			var sliceVal any
+			if opts.ShouldBind && opts.Body != nil {
+				sliceVal = nslice.Interface()
+			}
+			// Note: validation of slice itself (e.g. min items) is tricky if logic above handles items individually.
+			// But original code validates slice here:
+			if err := runValidation(sliceVal, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
-			if opts.ShouldEncode {
-				opts.FieldStruct.Set(nslice)
+			if opts.ShouldBind && opts.Body != nil {
+				opts.Body.Set(nslice)
 			}
 
 			return &walkFinished, nil
@@ -299,31 +335,31 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 	case reflect.Interface:
 		v, err := pv.GetAnyValue(keys)
 		if err != nil {
-			return nil, newErrReport(RequestErr, opts.SchemaField, kp, "parser", err)
+			return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
 		}
 
-		if err := runValidation(opts.Context, RequestErr, v, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidation(v, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldEncode {
-			err = decodeFieldValue(opts.FieldStruct, v)
+		if opts.ShouldBind && opts.Body != nil {
+			err = j.decodeFieldValue(opts.Body, v)
 			if err != nil {
-				newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
+				newErrReport(RequestErr, schemaField, kp, "encoder", err)
 			}
 		}
 
 		return &walkFinished, nil
 
 	default:
-		if err := runValidation(opts.Context, RequestErr, val, opts.SchemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidation(val, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldEncode {
-			err = decodeFieldValue(opts.FieldStruct, val)
+		if opts.ShouldBind && opts.Body != nil {
+			err = j.decodeFieldValue(opts.Body, val)
 			if err != nil {
-				newErrReport(RequestErr, opts.SchemaField, kp, "encoder", err)
+				newErrReport(RequestErr, schemaField, kp, "encoder", err)
 			}
 		}
 
@@ -333,10 +369,7 @@ func walkStruct(pv *cont.ParsedJson, opts RequestOptions, keys []string) (*walkF
 	return &walkFinished, nil
 }
 
-func decodeFieldValue(field *reflect.Value, val any) error {
-	// val can either be any primitive value or an array of primitive values
-	// E.g 1, "string", []int{1, 2, 3, 4}, *[]int{1, 2, 3, 4}, []*int{1, 2, 3, 4}
-
+func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 	if val == nil {
 		return nil
 	}
@@ -398,7 +431,7 @@ func decodeFieldValue(field *reflect.Value, val any) error {
 	}
 }
 
-func getFieldStruct(strct *reflect.Value, fieldname string) reflect.Value {
+func (j *JSONBodyParser) getFieldStruct(strct *reflect.Value, fieldname string) reflect.Value {
 	switch strct.Kind() {
 	case reflect.Pointer:
 		return strct.Elem().FieldByName(fieldname)
@@ -407,15 +440,14 @@ func getFieldStruct(strct *reflect.Value, fieldname string) reflect.Value {
 	}
 }
 
-func getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *ruleDef) RequestOptions {
+func (j *JSONBodyParser) getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *RuleDef) RequestOptions {
 	rtn := opts
-	rtn.FieldStruct = fieldStruct
+	rtn.Body = fieldStruct
 	rtn.SchemaRules = fieldRule
 	return rtn
 }
 
-func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp []string) error {
-
+func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
 	isEmptyValue := func(v reflect.Value) bool {
 		switch v.Kind() {
 		case reflect.String:
@@ -454,10 +486,18 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		b.WriteRune('"')
 	}
 
-	encodeArr := func(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp []string) error {
+	// We need to define encodeArr and encodeMap recursing with method call j.encodeFieldValue
+	// BUT closures capturing method receiver? Yes.
+
+	// Issue: encodeArr in encoders.go called `encodeFieldValue(c, ...)` which was a function.
+	// Here `j.encodeFieldValue` is a method.
+	// I'll define local helpers that call the method.
+
+	var encodeArr func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
+	encodeArr = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
 		buf.WriteString("[")
 
-		var arules *ruleDef
+		var arules *RuleDef
 		if rules != nil {
 			arules = rules.item
 		}
@@ -466,7 +506,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			if err := encodeFieldValue(c, buf, val.Index(i), arules, append(kp, strconv.Itoa(i))); err != nil {
+			if err := j.encodeFieldValue(c, buf, val.Index(i), arules, append(kp, strconv.Itoa(i))); err != nil {
 				return err
 			}
 		}
@@ -475,10 +515,11 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		return nil
 	}
 
-	encodeMap := func(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp []string) error {
+	var encodeMap func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
+	encodeMap = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
 		buf.WriteString("{")
 
-		var mrules *ruleDef
+		var mrules *RuleDef
 		if rules != nil {
 			mrules = rules.additionalProperties
 		}
@@ -495,11 +536,11 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("map key must be of type string"))
 			}
 
-			if err := encodeFieldValue(c, buf, key, mrules, append(kp, keyStr)); err != nil {
+			if err := j.encodeFieldValue(c, buf, key, mrules, append(kp, keyStr)); err != nil {
 				return err
 			}
 			buf.WriteString(":")
-			if err := encodeFieldValue(c, buf, mr.Value(), mrules, append(kp, keyStr)); err != nil {
+			if err := j.encodeFieldValue(c, buf, mr.Value(), mrules, append(kp, keyStr)); err != nil {
 				return err
 			}
 		}
@@ -508,7 +549,8 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 		return nil
 	}
 
-	encodeStruct := func(buf *bytes.Buffer, val reflect.Value, rules *ruleDef, kp []string) error {
+	var encodeStruct func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
+	encodeStruct = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
 		buf.WriteString("{")
 		first := true
 
@@ -524,7 +566,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 			first = false
 
 			buf.WriteString(fmt.Sprintf(`"%s":`, field))
-			if err := encodeFieldValue(c, buf, fieldValue, frules, append(kp, field)); err != nil {
+			if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, field)); err != nil {
 				return err
 			}
 		}
@@ -551,7 +593,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 	}
 
 	if rules != nil {
-		if err := runValidation(c, ResponseErr, vany, schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
+		if err := runValidation(vany, ResponseErr, schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
 			return err
 		}
 	}
@@ -565,35 +607,15 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 	}
 
 	if rules != nil {
-		if spec, ok := c.serverOpts.customSpecs[string(rules.format)]; ok {
+		if spec, ok := c.CustomSpecs().Find(string(rules.format)); ok {
 			if vIsValid {
-				if spec.Encoder != nil {
-					v, err := spec.Encoder(vany)
-					if err != nil {
-						return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
-					}
-					encodeString(buf, v)
-					return nil
-				} else {
-					switch vm := vany.(type) {
-					case json.Marshaler:
-						v, err := vm.MarshalJSON()
-						if err != nil {
-							return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "json-marshal", err)
-						}
-						encodeString(buf, string(v))
-						return nil
-
-					case encoding.TextMarshaler:
-						v, err := vm.MarshalText()
-						if err != nil {
-							return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "text-marshal", err)
-						}
-
-						encodeString(buf, string(v))
-						return nil
-					}
+				v, err := spec.Encode(vany)
+				if err != nil {
+					return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
 				}
+				encodeString(buf, v)
+				return nil
+
 			} else {
 				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
 			}
@@ -607,7 +629,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 			return err
 		}
 	case reflect.Interface:
-		return encodeFieldValue(c, buf, val.Elem(), rules, kp)
+		return j.encodeFieldValue(c, buf, val.Elem(), rules, kp)
 	case reflect.Pointer:
 		if !val.IsValid() {
 			_, err := buf.WriteString("null")
@@ -616,7 +638,7 @@ func encodeFieldValue(c *context, buf *bytes.Buffer, val reflect.Value, rules *r
 			}
 			return nil
 		}
-		return encodeFieldValue(c, buf, val.Elem(), rules, kp)
+		return j.encodeFieldValue(c, buf, val.Elem(), rules, kp)
 	case reflect.String:
 		encodeString(buf, val.String())
 		return nil

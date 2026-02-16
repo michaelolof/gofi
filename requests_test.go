@@ -135,7 +135,14 @@ func TestJSONEncoder_PrimitiveRequestBody(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
+			if s == nil {
+				return nil
+			}
 			assert.Equal(t, s.Request.Body, int8(30))
 			return nil
 		},
@@ -169,7 +176,14 @@ func TestJSONEncoder_SimpleStructRequestBody(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
+			if s == nil {
+				return nil
+			}
 			assert.Equal(t, s.Request.Body.Fullname, "John Doe")
 			assert.Equal(t, s.Request.Body.Age, 25)
 			assert.Equal(t, *s.Request.Body.Amount, float32(34.20))
@@ -206,7 +220,14 @@ func TestJSONEncode_PrimitiveArrayRequestBody(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
+			if s == nil {
+				return nil
+			}
 			assert.Equal(t, s.Request.Body, list)
 			return nil
 		},
@@ -242,7 +263,14 @@ func TestJSONEncode_PrimitiveArrayTypesBody(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
+			if s == nil {
+				return nil
+			}
 			assert.Equal(t, s.Request.Body.One, listOne)
 			assert.Equal(t, *s.Request.Body.Two, listTwo)
 			assert.Equal(t, *s.Request.Body.Three[0], listThree[0])
@@ -291,7 +319,14 @@ func TestJSONEncode_StructArrayBody(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
+			if s == nil {
+				return nil
+			}
 			assert.Equal(t, s.Request.Body[0], list[0])
 			assert.Equal(t, s.Request.Body[1], list[1])
 			return nil
@@ -357,6 +392,10 @@ func TestEncode_AnyValue(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
 			var vany any = 20
 			assert.Equal(t, s.Request.Body, vany)
@@ -388,7 +427,14 @@ func TestJSONEncode_AnyValue(t *testing.T) {
 			s, err := ValidateAndBind[testSchema](c)
 
 			assert.Nil(t, err, "validation error should be nil")
+			if err != nil {
+				fmt.Printf("Validation Error: %v\n", err)
+				return err
+			}
 			assert.NotNil(t, s, "schema pointer object should not be nil")
+			if s == nil {
+				return nil
+			}
 			var vany any = "Starter"
 			assert.Equal(t, s.Request.Body.Field, vany)
 			return nil

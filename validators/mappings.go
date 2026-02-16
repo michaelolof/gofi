@@ -1,90 +1,148 @@
 package validators
 
 import (
-	"net/http"
-	"reflect"
+	"github.com/michaelolof/gofi/validators/rules"
 )
-
-type validatorOptionType int
 
 const (
-	ReuestType   validatorOptionType = 1
-	ResponseType validatorOptionType = 2
+	ReuestType   rules.ValidatorOptionType = 1
+	ResponseType rules.ValidatorOptionType = 2
 )
 
-func NewValidatorArg(val any, typ validatorOptionType, r *http.Request, w http.ResponseWriter) ValidatorArg {
-	return ValidatorArg{val: val, typ: typ, r: r, w: w}
-}
+var Validators = rules.ContextValidators{
+	"required":         rules.IsRequired,
+	"oneof":            rules.IsOneOf,
+	"max":              rules.IsMax,
+	"min":              rules.IsMin,
+	"cidr":             rules.IsCIDR,
+	"cidrv4":           rules.IsCIDRv4,
+	"cidrv6":           rules.IsCIDRv6,
+	"datauri":          rules.IsDataURI,
+	"fileUrl":          rules.IsFileURL,
+	"fqdn":             rules.IsFQDN,
+	"hostname":         rules.IsHostnameRFC952,
+	"hostname_port":    rules.IsHostnamePort,
+	"hostname_rfc1123": rules.IsHostnameRFC1123,
+	"ip":               rules.IsIP,
+	"ip4_addr":         rules.IsIP4AddrResolvable,
+	"ip6_addr":         rules.IsIP6AddrResolvable,
+	"ip_addr":          rules.IsIPAddrResolvable,
+	"ipv4":             rules.IsIPv4,
+	"ipv6":             rules.IsIPv6,
+	"mac":              rules.IsMAC,
+	"not_empty":        rules.IsNotEmpty,
+	"tcp4_addr":        rules.IsTCP4AddrResolvable,
+	"tcp6_addr":        rules.IsTCP6AddrResolvable,
+	"tcp_addr":         rules.IsTCPAddrResolvable,
+	"udp4_addr":        rules.IsUDP4AddrResolvable,
+	"udp6_addr":        rules.IsUDP6AddrResolvable,
+	"udp_addr":         rules.IsUDPAddrResolvable,
+	"unix_addr":        rules.IsUnixAddrResolvable,
+	"uri":              rules.IsURI,
+	"url":              rules.IsURL,
+	"http_url":         rules.IsHttpURL,
+	"url_encoded":      rules.IsURLEncoded,
+	"urn_rfc2141":      rules.IsUrnRFC2141,
 
-type ValidatorArg struct {
-	val any
-	typ validatorOptionType
-	r   *http.Request
-	w   http.ResponseWriter
-}
+	// Regex Rules
+	"alpha":              rules.IsAlpha,
+	"alphanum":           rules.IsAlphaNumeric,
+	"alphaunicode":       rules.IsAlphaUnicode,
+	"alphaunicodenum":    rules.IsAlphaUnicodeNumeric,
+	"ascii":              rules.IsASCII,
+	"printascii":         rules.IsPrintableASCII,
+	"multibyte":          rules.IsMultibyte,
+	"numeric":            rules.IsNumeric,
+	"number":             rules.IsNumber,
+	"hexadecimal":        rules.IsHexadecimal,
+	"hexcolor":           rules.IsHexColor,
+	"rgb":                rules.IsRGB,
+	"rgba":               rules.IsRGBA,
+	"hsl":                rules.IsHSL,
+	"hsla":               rules.IsHSLA,
+	"email":              rules.IsEmail,
+	"e164":               rules.IsE164,
+	"isbn10":             rules.IsISBN10,
+	"isbn13":             rules.IsISBN13,
+	"issn":               rules.IsISSN,
+	"uuid":               rules.IsUUID,
+	"uuid3":              rules.IsUUID3,
+	"uuid4":              rules.IsUUID4,
+	"uuid5":              rules.IsUUID5,
+	"uuid_rfc4122":       rules.IsUUIDRFC4122,
+	"uuid3_rfc4122":      rules.IsUUID3RFC4122,
+	"uuid4_rfc4122":      rules.IsUUID4RFC4122,
+	"uuid5_rfc4122":      rules.IsUUID5RFC4122,
+	"ulid":               rules.IsULID,
+	"ssn":                rules.IsSSN,
+	"bic":                rules.IsBIC,
+	"semver":             rules.IsSemver,
+	"cve":                rules.IsCVE,
+	"base32":             rules.IsBase32,
+	"base64":             rules.IsBase64,
+	"base64url":          rules.IsBase64URL,
+	"base64rawurl":       rules.IsBase64RawURL,
+	"md4":                rules.IsMD4,
+	"md5":                rules.IsMD5,
+	"sha256":             rules.IsSHA256,
+	"sha384":             rules.IsSHA384,
+	"sha512":             rules.IsSHA512,
+	"ripemd128":          rules.IsRIPEMD128,
+	"ripemd160":          rules.IsRIPEMD160,
+	"tiger128":           rules.IsTiger128,
+	"tiger160":           rules.IsTiger160,
+	"tiger192":           rules.IsTiger192,
+	"html_encoded":       rules.IsHTMLEncoded,
+	"html":               rules.IsHTML,
+	"jwt":                rules.IsJWT,
+	"cron":               rules.IsCron,
+	"spicedb_id":         rules.IsSpiceDBID,
+	"spicedb_permission": rules.IsSpiceDBPermission,
+	"spicedb_type":       rules.IsSpiceDBType,
+	"latitude":           rules.IsLatitude,
+	"longitude":          rules.IsLongitude,
+	"btc_addr":           rules.IsBTCAddress,
+	"btc_addr_bech32":    rules.IsBTCAddressBech32,
+	"eth_addr":           rules.IsETHAddress,
+	"mongodb":            rules.IsMongoDB,
 
-func (v *ValidatorArg) Value() any {
-	return v.val
-}
+	// String Rules
+	"contains":     rules.Contains,
+	"containsany":  rules.ContainsAny,
+	"containsrune": rules.ContainsRune,
+	"excludes":     rules.Excludes,
+	"excludesall":  rules.ExcludesAll,
+	"excludesrune": rules.ExcludesRune,
+	"startswith":   rules.StartsWith,
+	"endswith":     rules.EndsWith,
+	"lowercase":    rules.IsLowercase,
+	"uppercase":    rules.IsUppercase,
 
-func (v *ValidatorArg) Request() *http.Request {
-	return v.r
-}
+	// Comparison Rules
+	"len": rules.IsLen,
+	"eq":  rules.IsEq,
+	"ne":  rules.IsNe,
+	"lt":  rules.IsLt,
+	"gt":  rules.IsGt,
+	"lte": rules.IsLte,
+	"gte": rules.IsGte,
 
-func (v *ValidatorArg) Response() http.ResponseWriter {
-	return v.w
-}
+	// Time Rules
+	"datetime": rules.IsDatetime,
+	"timezone": rules.IsTimezone,
 
-type ValidatorFnOptions = func(kind reflect.Kind, args ...any) func(val any) error
-type LegacyValidatorFn = func(kind reflect.Kind) func(val any) error
-type ValidatorFn = func(val ValidatorArg) error
+	// File Rules
+	"file":     rules.IsFile,
+	"dir":      rules.IsDir,
+	"filepath": rules.IsFilePath,
 
-type ValidatorContext struct {
-	Type    reflect.Type
-	Kind    reflect.Kind
-	Options []any
-}
+	// Misc Rules
+	"boolean": rules.IsBoolean,
+	"json":    rules.IsJSON,
+	"default": rules.IsDefault,
 
-type ContextValidator = func(c ValidatorContext) ValidatorFn
-type ContextValidators map[string]ContextValidator
-
-var Validators = ContextValidators{
-	"required": IsRequired,
-	"oneof":    IsOneOf,
-}
-
-var BaseValidators = map[string]LegacyValidatorFn{
-	"cidr":             IsCIDR,
-	"cidrv4":           IsCIDRv4,
-	"cidrv6":           IsCIDRv6,
-	"datauri":          IsDataURI,
-	"fileUrl":          IsFileURL,
-	"fqdn":             IsFQDN,
-	"hostname":         IsHostnameRFC952,
-	"hostname_port":    IsHostnamePort,
-	"hostname_rfc1123": IsHostnameRFC1123,
-	"ip":               IsIP,
-	"ip4_addr":         IsIP4AddrResolvable,
-	"ip6_addr":         IsIP6AddrResolvable,
-	"ip_addr":          IsIPAddrResolvable,
-	"ipv4":             IsIPv4,
-	"ipv6":             IsIPv6,
-	"mac":              IsMAC,
-	"not_empty":        IsNotEmpty,
-	"tcp4_addr":        IsTCP4AddrResolvable,
-	"tcp6_addr":        IsTCP6AddrResolvable,
-	"tcp_addr":         IsTCPAddrResolvable,
-	"udp4_addr":        IsUDP4AddrResolvable,
-	"udp6_addr":        IsUDP6AddrResolvable,
-	"udp_addr":         IsUDPAddrResolvable,
-	"unix_addr":        IsUnixAddrResolvable,
-	"uri":              IsURI,
-	"url":              IsURL,
-	"http_url":         IsHttpURL,
-	"url_encoded":      IsURLEncoded,
-	"urn_rfc2141":      IsUrnRFC2141,
-}
-
-var OptionValidators = map[string]ValidatorFnOptions{
-	"max": IsMax,
+	// Payment Rules
+	"credit_card":   rules.IsCreditCard,
+	"ein":           rules.IsEIN,
+	"luhn_checksum": rules.HasLuhnChecksum,
 }

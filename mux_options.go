@@ -1,75 +1,61 @@
 package gofi
 
 import (
-	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/michaelolof/gofi/cont"
-	"github.com/michaelolof/gofi/validators"
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
 type muxOptions struct {
-	errHandler         func(err error, c Context)
-	customValidators   validators.ContextValidators
-	customSpecs        CustomSpecs
-	serializers        SerializerFn
-	builtinSerializers SerializerFn
-	logger             Logger
-	schemaRules        SchemaRulesMap
+	errHandler       func(err error, c Context)
+	customValidators rules.ContextValidators
+	customSpecs      CustomSpecs
+	bodyParsers      []BodyParser
+	logger           Logger
+	schemaRules      SchemaRulesMap
 }
 
 func defaultMuxOptions() *muxOptions {
+	bp := make([]BodyParser, 0, 10)
+	bp = append(bp, &JSONBodyParser{})
+
 	return &muxOptions{
 		errHandler:       defaultErrorHandler,
-		customValidators: make(validators.ContextValidators),
-		customSpecs:      map[string]CustomSchemaProps{},
-
-		serializers:        nil,
-		builtinSerializers: builtinSerializer,
-		logger:             &consoleLogger{},
-		schemaRules:        make(SchemaRulesMap),
+		customValidators: make(rules.ContextValidators),
+		customSpecs:      make(CustomSpecs),
+		bodyParsers:      bp,
+		logger:           &consoleLogger{},
+		schemaRules:      make(SchemaRulesMap),
 	}
 }
 
-func (m *muxOptions) getSerializer(contentType cont.ContentType) (SchemaEncoder, error) {
-	var sz SchemaEncoder
-	var found bool
-
-	if m.serializers != nil {
-		sz, found = m.serializers(contentType)
-	}
-	if !found {
-		sz, found = m.builtinSerializers(contentType)
-		if !found {
-			return nil, errors.New("schema serializer not defined")
+func (m *muxOptions) getSerializer(contentType cont.ContentType) (BodyParser, error) {
+	for _, bp := range m.bodyParsers {
+		if bp.Match(string(contentType)) {
+			return bp, nil
 		}
 	}
-
-	return sz, nil
+	return nil, fmt.Errorf("body parser not defined for content type '%s'", contentType)
 }
 
 // type SerializerFn map[cont.ContentType]SchemaEncoder
-type SerializerFn func(cont.ContentType) (SchemaEncoder, bool)
+type SerializerFn func(cont.ContentType) (BodyParser, bool)
 
-func builtinSerializer(ct cont.ContentType) (SchemaEncoder, bool) {
-	switch ct {
-	case cont.ApplicationJson:
-		return &JSONSchemaEncoder{}, true
-	default:
-		return nil, false
-	}
+type CustomSpecs map[string]CustomSpec
+
+func (c CustomSpecs) Find(specID string) (CustomSpec, bool) {
+	v, ok := c[specID]
+	return v, ok
 }
 
-type CustomSpecs map[string]CustomSchemaProps
-type CustomSchemaProps struct {
-	// Add a custom decoder. Will defer to the json.Decoder if not passed. It is advised to use the json Unmarshal method. Prefer this if you don't have access to the custom type
-	Decoder func(val any) (any, error) `json:"-"`
-	// Add a custom encoder. Will defer to the json.Encode if not passed. It is advised to use the json Marshal method. Prefer this if you don't have access to the custom type
-	Encoder func(val any) (string, error) `json:"-"`
-	// Define the openapi3 type for your custom type E.g "string", "integer", "number", 'boolean", "array" etc
-	Type string `json:"type,omitempty"`
-	// Define the openapi3 type for your custom type E.g "date", "date-time", "int32", 'int64", "uuie" etc
-	Format string `json:"format,omitempty"`
+type CustomSpec interface {
+	SpecID() string
+	Encode(val any) (string, error)
+	Decode(val any) (any, error)
+	Type() string
+	Format() string
 }
 
 type SchemaRulesMap map[string]map[string]*schemaRules
@@ -97,4 +83,67 @@ func (s SchemaRulesMap) GetRules(pattern, method string) *schemaRules {
 		}
 	}
 	return nil
+}
+
+type Validator interface {
+	Name() string
+	Rule(c ValidatorContext) func(val any) error
+}
+
+func DefineCustomSpec(spec SpecDefinition) CustomSpec {
+	return &specDefinition{
+		specID: spec.SpecID,
+		typ:    spec.Type,
+		format: spec.Format,
+		encode: spec.Encode,
+		decode: spec.Decode,
+	}
+}
+
+type SpecDefinition struct {
+	SpecID string
+	Type   string
+	Format string
+	Encode func(val any) (string, error)
+	Decode func(val any) (any, error)
+}
+
+type specDefinition struct {
+	specID string
+	typ    string
+	format string
+	encode func(val any) (string, error)
+	decode func(val any) (any, error)
+}
+
+func (s *specDefinition) SpecID() string {
+	return s.specID
+}
+
+func (s *specDefinition) Type() string {
+	if s.typ == "" {
+		return "string"
+	}
+	return s.typ
+}
+
+func (s *specDefinition) Format() string {
+	if s.format == "" {
+		return "string"
+	}
+	return s.format
+}
+
+func (s *specDefinition) Encode(val any) (string, error) {
+	if s.encode == nil {
+		return "", fmt.Errorf("encode function not defined for spec '%s'", s.specID)
+	}
+	return s.encode(val)
+}
+
+func (s *specDefinition) Decode(val any) (any, error) {
+	if s.decode == nil {
+		return nil, fmt.Errorf("decode function not defined for spec '%s'", s.specID)
+	}
+	return s.decode(val)
 }

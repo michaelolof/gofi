@@ -59,10 +59,6 @@ func PrimitiveFromStr(kind reflect.Kind, val string) (any, error) {
 	}
 }
 
-type primitives interface {
-	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64 | string | bool
-}
-
 // func PrimitiveFromAny[T primitives](kind reflect.Kind, val any) (T, error) {
 // 	switch kind {
 // 	case reflect.Int:

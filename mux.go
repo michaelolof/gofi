@@ -7,71 +7,141 @@ import (
 	"net/http/httptest"
 	"strings"
 
-	"github.com/michaelolof/gofi/validators"
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
 type serveMux struct {
-	sm          *http.ServeMux
-	rOpts       *RouteOptions
-	opts        *muxOptions
-	paths       docsPaths
-	routeMeta   metaMap
-	globalStore GofiStore
-	middlewares Middlewares
+	sm                *http.ServeMux
+	rOpts             *RouteOptions
+	opts              *muxOptions
+	paths             docsPaths
+	routeMeta         metaMap
+	globalStore       GofiStore
+	middlewares       Middlewares
+	inlineMiddlewares Middlewares
+	prefix            string
 }
 
 func NewServeMux() Router {
 	return newServeMux()
 }
 
-func (s *serveMux) Route(method string, path string, opts RouteOptions) {
-	s.route(method, path, opts)
+func (s *serveMux) Method(method string, path string, opts RouteOptions) {
+	s.method(method, path, opts)
 }
 
 func (s *serveMux) Get(path string, opts RouteOptions) {
-	s.route(http.MethodGet, path, opts)
+	s.method(http.MethodGet, path, opts)
 }
 
 func (s *serveMux) Post(path string, opts RouteOptions) {
-	s.route(http.MethodPost, path, opts)
+	s.method(http.MethodPost, path, opts)
 }
 
 func (s *serveMux) Put(path string, opts RouteOptions) {
-	s.route(http.MethodPut, path, opts)
+	s.method(http.MethodPut, path, opts)
 }
 
 func (s *serveMux) Delete(path string, opts RouteOptions) {
-	s.route(http.MethodDelete, path, opts)
+	s.method(http.MethodDelete, path, opts)
 }
 
 func (s *serveMux) Patch(path string, opts RouteOptions) {
-	s.route(http.MethodPatch, path, opts)
+	s.method(http.MethodPatch, path, opts)
 }
 
 func (s *serveMux) Head(path string, opts RouteOptions) {
-	s.route(http.MethodHead, path, opts)
+	s.method(http.MethodHead, path, opts)
 }
 
 func (s *serveMux) Options(path string, opts RouteOptions) {
-	s.route(http.MethodOptions, path, opts)
+	s.method(http.MethodOptions, path, opts)
 }
 
 func (s *serveMux) Trace(path string, opts RouteOptions) {
-	s.route(http.MethodTrace, path, opts)
+	s.method(http.MethodTrace, path, opts)
 }
 
 func (s *serveMux) Connect(path string, opts RouteOptions) {
-	s.route(http.MethodConnect, path, opts)
+	s.method(http.MethodConnect, path, opts)
 }
 
-func (s *serveMux) Group(o RouteOptions, r func(r Router)) {
-	s.rOpts = &o
-	r(s)
+func (s *serveMux) Route(pattern string, fn func(r Router)) Router {
+	im := s.With().(*serveMux)
+	if pattern != "" {
+		if im.prefix != "" && !strings.HasSuffix(im.prefix, "/") && !strings.HasPrefix(pattern, "/") {
+			im.prefix += "/"
+		}
+		im.prefix += pattern
+	}
+
+	if fn != nil {
+		fn(im)
+	}
+	return im
+}
+
+// Group creates a new inline-Mux with a copy of middleware stack. It's useful
+// for a group of handlers along the same routing path that use an additional
+// set of middlewares.
+func (s *serveMux) Group(fn func(r Router)) Router {
+	im := s.With()
+	if fn != nil {
+		fn(im)
+	}
+	return im
 }
 
 func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
 	s.middlewares = append(s.middlewares, middlewares...)
 }
+
+func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
+	newMux := *s
+	newMux.inlineMiddlewares = make(Middlewares, len(s.inlineMiddlewares), len(s.inlineMiddlewares)+len(middlewares))
+	copy(newMux.inlineMiddlewares, s.inlineMiddlewares)
+	newMux.inlineMiddlewares = append(newMux.inlineMiddlewares, middlewares...)
+	return &newMux
+}
+
+// func (s *serveMux) Mount(pattern string, handler http.Handler) {
+// 	if pattern == "" {
+// 		pattern = "/"
+// 	}
+
+// 	// Ensure pattern starts with / if not empty
+// 	if pattern != "/" && !strings.HasPrefix(pattern, "/") {
+// 		pattern = "/" + pattern
+// 	}
+
+// 	// If there is a prefix (from Route method), prepend it
+// 	if s.prefix != "" {
+// 		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(pattern, "/") {
+// 			pattern = "/" + pattern
+// 		}
+// 		pattern = s.prefix + pattern
+// 	}
+
+// 	// Mount logic: Mount usually implies a subtree, so we ensure trailing slash
+// 	// for the registration pattern on the underlying ServeMux.
+// 	mountPath := pattern
+// 	if !strings.HasSuffix(mountPath, "/") {
+// 		mountPath += "/"
+// 	}
+
+// 	// Apply middlewares
+// 	middlewares := s.inlineMiddlewares
+// 	if len(middlewares) > 0 {
+// 		handler = middlewares[len(middlewares)-1](handler)
+// 		for i := len(middlewares) - 2; i >= 0; i-- {
+// 			handler = middlewares[i](handler)
+// 		}
+// 	}
+
+// 	// Register with StripPrefix to ensure the sub-handler sees relative paths
+// 	stripPath := strings.TrimSuffix(mountPath, "/")
+// 	s.sm.Handle(mountPath, http.StripPrefix(stripPath, handler))
+// }
 
 func (s *serveMux) Handle(pattern string, handler http.Handler) {
 	s.sm.Handle(pattern, handler)
@@ -102,24 +172,29 @@ func (s *serveMux) Meta() RouterMeta {
 	return s.routeMeta
 }
 
-func (s *serveMux) SetErrorHandler(handler func(err error, c Context)) {
+func (s *serveMux) UseErrorHandler(handler func(err error, c Context)) {
 	if handler != nil {
 		s.opts.errHandler = handler
 	}
 }
 
-func (s *serveMux) SetCustomSpecs(list map[string]CustomSchemaProps) {
-	if list != nil {
-		s.opts.customSpecs = list
+func (s *serveMux) RegisterSpec(list ...CustomSpec) {
+	for _, v := range list {
+		s.opts.customSpecs[v.SpecID()] = v
 	}
 }
 
-type ValidatorContext = validators.ValidatorContext
-type ValidatorOption = validators.ValidatorArg
+func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
+	if len(list) > 0 {
+		s.opts.bodyParsers = append(s.opts.bodyParsers, list...)
+	}
+}
 
-func (s *serveMux) SetCustomValidator(list map[string]func(c ValidatorContext) func(arg ValidatorOption) error) {
-	if list != nil {
-		s.opts.customValidators = list
+type ValidatorContext = rules.ValidatorContext
+
+func (s *serveMux) RegisterValidator(list ...Validator) {
+	for _, v := range list {
+		s.opts.customValidators[v.Name()] = v.Rule
 	}
 }
 
@@ -169,9 +244,12 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	c := newContext(w, r)
 
 	setupInjectContext := func(path, method string, ropts *RouteOptions, meta metaMap) {
-		rules := s.compileSchema(ropts.Schema, ropts.Info)
-		rules.specs.normalize(method, path)
-		s.opts.schemaRules.SetRules(path, method, &rules.rules)
+		if ropts.Schema != nil {
+			rules := s.compileSchema(ropts.Schema, ropts.Info)
+			rules.specs.normalize(method, path)
+			s.opts.schemaRules.SetRules(path, method, &rules.rules)
+		}
+
 		c.setContextSettings(newContextOptions(path, method), meta, s.globalStore, s.opts)
 	}
 
@@ -193,7 +271,7 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	// 	routeMeta = s.routeMeta
 	// }
 	// c.setContextSettings(&rules.rules, routeMeta, s.globalStore, s.opts)
-	handler := applyMiddleware(def.Handler, def.Middlewares)
+	handler := applyMiddleware(def.Handler, def.PreHandlers)
 	err = handler(c)
 	if err != nil {
 		s.opts.errHandler(err, c)
@@ -207,7 +285,13 @@ func ListenAndServe(addr string, handler http.Handler) error {
 	return http.ListenAndServe(addr, handler)
 }
 
-func (s *serveMux) route(method string, path string, opts RouteOptions) {
+func (s *serveMux) method(method string, path string, opts RouteOptions) {
+	if s.prefix != "" {
+		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		path = s.prefix + path
+	}
 
 	if opts.Schema != nil {
 		comps := s.compileSchema(opts.Schema, opts.Info)
@@ -235,15 +319,25 @@ func (s *serveMux) route(method string, path string, opts RouteOptions) {
 		s.routeMeta[path] = v
 	}
 
-	s.sm.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
+	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := newContext(w, r)
 		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
-		err := applyMiddleware(opts.Handler, opts.Middlewares)(c)
+		err := applyMiddleware(opts.Handler, opts.PreHandlers)(c)
 		if err != nil {
 			s.opts.errHandler(err, c)
 		}
 	})
+
+	middlewares := s.inlineMiddlewares
+	if len(middlewares) > 0 {
+		h = middlewares[len(middlewares)-1](h)
+		for i := len(middlewares) - 2; i >= 0; i-- {
+			h = middlewares[i](h)
+		}
+	}
+
+	s.sm.Handle(method+" "+path, h)
 }
 
 func newServeMux() *serveMux {
@@ -260,12 +354,13 @@ func newServeMux() *serveMux {
 
 func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
 	return &serveMux{
-		sm:          sm,
-		paths:       paths,
-		routeMeta:   rm,
-		globalStore: globalStore,
-		middlewares: m,
-		opts:        opts,
-		rOpts:       nil,
+		sm:                sm,
+		paths:             paths,
+		routeMeta:         rm,
+		globalStore:       globalStore,
+		middlewares:       m,
+		inlineMiddlewares: make(Middlewares, 0),
+		opts:              opts,
+		rOpts:             nil,
 	}
 }
