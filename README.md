@@ -364,6 +364,71 @@ gofi.ServeDocs(r, gofi.DocsOptions{
 })
 ```
 
+## Unit Testing
+
+Gofi provides a convenient way to unit test your handlers without starting a full HTTP server using the `Inject` method.
+
+### The `Inject` Method
+
+The `Inject` method allows you to simulate an HTTP request against your router and returns a standard `httptest.ResponseRecorder`.
+
+It is designed to test handlers in isolation. You pass the `RouteOptions` directly to `Inject`, so you don't even need to register the route on the mux to test it.
+
+```go
+func TestMyHandler(t *testing.T) {
+    // Initialize a router to provide the environment (stores, validation engine)
+    r := gofi.NewServeMux()
+
+    // 1. Define your handler options
+    myHandlerOpts := gofi.DefineHandler(gofi.RouteOptions{
+        Schema: &MySchema{},
+        Handler: func(c gofi.Context) error {
+            return c.SendString(200, "success")
+        },
+    })
+
+    // 2. Use Inject to test
+    // Returns *httptest.ResponseRecorder
+    w, err := r.Inject(gofi.InjectOptions{
+        Method: "GET",
+        Path:   "/test-path",
+        Handler: myHandlerOpts, // Pass the RouteOptions directly (no need to register)
+        
+        // Optional inputs:
+        Query:   map[string]string{"foo": "bar"},
+        Headers: map[string]string{"Authorization": "Bearer token"},
+        Body:    strings.NewReader(`{"name": "test"}`),
+    })
+
+    if err != nil {
+        t.Fatalf("Inject failed: %v", err)
+    }
+
+    // 3. Assert results
+    if w.Code != 200 {
+        t.Errorf("Expected 200, got %d", w.Code)
+    }
+    if w.Body.String() != "\"success\"" {
+        t.Errorf("Unexpected body: %s", w.Body.String())
+    }
+}
+```
+
+### InjectOptions
+
+```go
+type InjectOptions struct {
+    Path    string              // Request Path
+    Method  string              // HTTP Method
+    Query   map[string]string   // Query Params
+    Paths   map[string]string   // Path Params (e.g. {"id": "123"})
+    Headers map[string]string   // Headers
+    Cookies []http.Cookie       // Cookies
+    Body    io.Reader           // Request Body
+    Handler *RouteOptions       // The Handler definition to test
+}
+```
+
 ## Custom Types/Specs
 Gofi schema supports the basic GoLang types for encoding and decoding (e.g struct, array, int, string etc.) as well as `time.Time` and `http.Cookie`
 To support aditional types in your Gofi Schema (e.g google's `uuid.UUID`), you can define them as custom `specs` and register them like below

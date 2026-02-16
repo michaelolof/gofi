@@ -93,7 +93,7 @@ var GetUser = gofi.DefineHandler(gofi.RouteOptions{
         Summary: "Get User",
         Description: "Returns a user by ID",
     },
-    Schema: UserSchema{},
+    Schema: &UserSchema{},
     Handler: func(c gofi.Context) error {
         return c.Send(200, UserResponse{})
     },
