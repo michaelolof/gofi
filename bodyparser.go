@@ -58,6 +58,7 @@ func (p *parserContext) CustomSpecs() CustomSpecs {
 
 type JSONBodyParser struct {
 	MaxRequestSize int64
+	MaxDepth       int
 }
 
 func (j *JSONBodyParser) Match(contentType string) bool {
@@ -166,6 +167,13 @@ func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 }
 
 func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
+	if j.MaxDepth == 0 {
+		j.MaxDepth = 100
+	}
+	if len(keys) > j.MaxDepth {
+		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "depth", errors.New("max recursion depth exceeded"))
+	}
+
 	kp := strings.Join(keys, ".")
 	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
 	if err != nil {
@@ -384,7 +392,9 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct).Elem()
-					bindValOnElem(&ssf, item)
+					if err := bindValOnElem(&ssf, item); err != nil {
+						return err
+					}
 					slice = reflect.Append(slice, ssf)
 				}
 				nslice.Elem().Set(slice)
@@ -395,7 +405,11 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 			}
 		default:
 			ptype := reflect.New(field.Type().Elem())
-			ptype.Elem().Set(reflect.ValueOf(val).Convert(ptype.Elem().Type()))
+			v, err := utils.SafeConvert(reflect.ValueOf(val), ptype.Elem().Type())
+			if err != nil {
+				return err
+			}
+			ptype.Elem().Set(v)
 			field.Set(ptype)
 			return nil
 		}
@@ -407,7 +421,9 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct.Elem()).Elem()
-					bindValOnElem(&ssf, item)
+					if err := bindValOnElem(&ssf, item); err != nil {
+						return err
+					}
 					slice = reflect.Append(slice, ssf.Addr())
 				}
 				field.Set(slice)
@@ -416,7 +432,9 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct).Elem()
-					bindValOnElem(&ssf, item)
+					if err := bindValOnElem(&ssf, item); err != nil {
+						return err
+					}
 					slice = reflect.Append(slice, ssf)
 				}
 				field.Set(slice)
@@ -426,7 +444,11 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 			return fmt.Errorf("type mismatch. expected array value got %T", val)
 		}
 	default:
-		field.Set(reflect.ValueOf(val).Convert(field.Type()))
+		v, err := utils.SafeConvert(reflect.ValueOf(val), field.Type())
+		if err != nil {
+			return err
+		}
+		field.Set(v)
 		return nil
 	}
 }

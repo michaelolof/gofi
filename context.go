@@ -3,6 +3,8 @@ package gofi
 import (
 	"net/http"
 	"reflect"
+
+	"github.com/michaelolof/gofi/utils"
 )
 
 type bindedResult struct {
@@ -120,9 +122,9 @@ var walkFinished = walkFinishStatus{}
 
 const DEFAULT_ARRAY_SIZE = 50
 
-func bindValOnElem(strct *reflect.Value, val any) {
+func bindValOnElem(strct *reflect.Value, val any) error {
 	if val == nil {
-		return
+		return nil
 	}
 
 	switch strct.Kind() {
@@ -133,11 +135,14 @@ func bindValOnElem(strct *reflect.Value, val any) {
 			slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 			for _, item := range v {
 				ssf := reflect.New(istrct).Elem()
-				bindValOnElem(&ssf, item)
+				if err := bindValOnElem(&ssf, item); err != nil {
+					return err
+				}
 				slice = reflect.Append(slice, ssf)
 			}
 			nslice.Elem().Set(slice)
 			strct.Set(nslice)
+			return nil
 		}
 
 	case reflect.Slice, reflect.Array:
@@ -148,23 +153,36 @@ func bindValOnElem(strct *reflect.Value, val any) {
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct.Elem()).Elem()
-					bindValOnElem(&ssf, item)
+					if err := bindValOnElem(&ssf, item); err != nil {
+						return err
+					}
 					slice = reflect.Append(slice, ssf.Addr())
 				}
 				strct.Set(slice)
+				return nil
 
 			default:
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct).Elem()
-					bindValOnElem(&ssf, item)
+					if err := bindValOnElem(&ssf, item); err != nil {
+						return err
+					}
 					slice = reflect.Append(slice, ssf)
 				}
 				strct.Set(slice)
+				return nil
 			}
 		}
 
 	default:
-		strct.Set(reflect.ValueOf(val).Convert(strct.Type()))
+		v, err := utils.SafeConvert(reflect.ValueOf(val), strct.Type())
+		if err != nil {
+			return err
+		}
+		strct.Set(v)
+		return nil
 	}
+
+	return nil
 }

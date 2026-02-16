@@ -186,7 +186,7 @@ func (s *serveMux) RegisterSpec(list ...CustomSpec) {
 
 func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
 	if len(list) > 0 {
-		s.opts.bodyParsers = append(s.opts.bodyParsers, list...)
+		s.opts.bodyParsers = append(list, s.opts.bodyParsers...)
 	}
 }
 
@@ -209,7 +209,17 @@ type InjectOptions struct {
 	Handler *RouteOptions
 }
 
-func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error) {
+func (s *serveMux) Inject(opts InjectOptions) (rec *httptest.ResponseRecorder, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic recovered in Inject: %v", r)
+			if rec == nil {
+				rec = httptest.NewRecorder()
+			}
+			rec.WriteHeader(http.StatusInternalServerError)
+		}
+	}()
+
 	r, err := http.NewRequest(opts.Method, opts.Path, opts.Body)
 	if err != nil {
 		return nil, err
@@ -261,16 +271,6 @@ func (s *serveMux) Inject(opts InjectOptions) (*httptest.ResponseRecorder, error
 	}
 	setupInjectContext(opts.Path, opts.Method, opts.Handler, routeMeta)
 
-	// rules := s.compileSchema(def.Schema, def.Info)
-	// rules.specs.normalize(opts.Method, opts.Path)
-
-	// var routeMeta metaMap
-	// if opts.Handler.Meta != nil {
-	// 	v := map[string]any{strings.ToLower(opts.Method): opts.Handler.Meta}
-	// 	s.routeMeta[opts.Path] = v
-	// 	routeMeta = s.routeMeta
-	// }
-	// c.setContextSettings(&rules.rules, routeMeta, s.globalStore, s.opts)
 	handler := applyMiddleware(def.Handler, def.PreHandlers)
 	err = handler(c)
 	if err != nil {

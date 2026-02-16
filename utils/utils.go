@@ -144,3 +144,47 @@ func TryAsReader(m any) io.Reader {
 	}
 	return bytes.NewReader(bs)
 }
+
+func SafeConvert(v reflect.Value, t reflect.Type) (reflect.Value, error) {
+	if !v.IsValid() {
+		return reflect.Value{}, fmt.Errorf("cannot convert invalid value to %v", t)
+	}
+
+	if v.Type().ConvertibleTo(t) {
+		return v.Convert(t), nil
+	}
+
+	// Try soft conversions for common types
+	if KindIsNumber(v.Kind()) && KindIsNumber(t.Kind()) {
+		// Number to Number
+		f, _ := AnyValueToFloat(v.Interface())
+		switch t.Kind() {
+		case reflect.Int:
+			return reflect.ValueOf(int(f)).Convert(t), nil
+		case reflect.Int8:
+			return reflect.ValueOf(int8(f)).Convert(t), nil
+		case reflect.Int16:
+			return reflect.ValueOf(int16(f)).Convert(t), nil
+		case reflect.Int32:
+			return reflect.ValueOf(int32(f)).Convert(t), nil
+		case reflect.Int64:
+			return reflect.ValueOf(int64(f)).Convert(t), nil
+		case reflect.Uint:
+			return reflect.ValueOf(uint(f)).Convert(t), nil
+		case reflect.Uint8:
+			return reflect.ValueOf(uint8(f)).Convert(t), nil
+		case reflect.Uint16:
+			return reflect.ValueOf(uint16(f)).Convert(t), nil
+		case reflect.Uint32:
+			return reflect.ValueOf(uint32(f)).Convert(t), nil
+		case reflect.Uint64:
+			return reflect.ValueOf(uint64(f)).Convert(t), nil
+		case reflect.Float32:
+			return reflect.ValueOf(float32(f)).Convert(t), nil
+		case reflect.Float64:
+			return reflect.ValueOf(float64(f)).Convert(t), nil
+		}
+	}
+
+	return reflect.Value{}, fmt.Errorf("cannot convert %v to %v", v.Type(), t)
+}
