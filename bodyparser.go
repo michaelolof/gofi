@@ -41,6 +41,7 @@ type BodyParser interface {
 
 type ParserContext interface {
 	Writer() http.ResponseWriter
+	Request() *http.Request
 	CustomSpecs() CustomSpecs
 }
 
@@ -50,6 +51,10 @@ type parserContext struct {
 
 func (p *parserContext) Writer() http.ResponseWriter {
 	return p.c.Writer()
+}
+
+func (p *parserContext) Request() *http.Request {
+	return p.c.Request()
 }
 
 func (p *parserContext) CustomSpecs() CustomSpecs {

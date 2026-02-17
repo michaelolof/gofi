@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"log"
+	"mime/multipart"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/michaelolof/gofi/utils"
 )
+
+var fileHeaderType = reflect.TypeOf(multipart.FileHeader{})
 
 type compiledSchema struct {
 	specs openapiOperationObject
@@ -397,6 +400,10 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 				typeStr = "string"
 				format = string(utils.CookieObjectFormat)
 				ruleDefs.format = utils.CookieObjectFormat
+
+			case fileHeaderType:
+				typeStr = "string"
+				format = "binary"
 
 			default:
 				typeStr = "object"

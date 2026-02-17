@@ -55,4 +55,5 @@ type Router interface {
 	RegisterValidator(list ...Validator)
 	RegisterSpec(l ...CustomSpec)
 	RegisterBodyParser(l ...BodyParser)
+	Static(prefix, root string)
 }

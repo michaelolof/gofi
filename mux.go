@@ -173,6 +173,23 @@ func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
 	}
 }
 
+func (s *serveMux) Static(prefix, root string) {
+	if s.prefix != "" {
+		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(prefix, "/") {
+			prefix = "/" + prefix
+		}
+		prefix = s.prefix + prefix
+	}
+
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	fs := http.FileServer(http.Dir(root))
+	handler := http.StripPrefix(prefix, fs)
+	s.Handle(prefix, handler)
+}
+
 type ValidatorContext = rules.ValidatorContext
 
 func (s *serveMux) RegisterValidator(list ...Validator) {

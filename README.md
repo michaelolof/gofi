@@ -387,6 +387,49 @@ gofi.ServeDocs(r, gofi.DocsOptions{
 })
 ```
 
+## Handling Form Data and File Uploads
+
+Gofi supports `application/x-www-form-urlencoded` and `multipart/form-data` requests out of the box.
+
+### Form Data
+Define your schema using standard struct tags. Gofi will automatically parse the form data into your struct.
+
+```go
+type LoginSchema struct {
+    Request struct {
+        Body struct {
+            Username string `json:"username" validate:"required"`
+            Password string `json:"password" validate:"required"`
+        }
+    }
+}
+```
+
+### File Uploads
+For multipart file uploads, use `*multipart.FileHeader` (or `[]*multipart.FileHeader` for multiple files) in your schema.
+
+```go
+type UploadSchema struct {
+    Request struct {
+        Body struct {
+            Title string                `json:"title"`
+            File  *multipart.FileHeader `json:"file" validate:"required"`
+            Docs  []*multipart.FileHeader `json:"docs"`
+        }
+    }
+}
+```
+
+## Serving Static Files
+
+You can serve static files from a directory using the `Static` method:
+
+```go
+// Serves files from "./public" directory at "/assets" route
+// e.g. GET /assets/style.css -> ./public/style.css
+r.Static("/assets", "./public")
+```
+
 ## Unit Testing
 
 Gofi provides a convenient way to unit test your handlers without starting a full HTTP server using the `Inject` method.
