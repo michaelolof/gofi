@@ -35,6 +35,10 @@ type Router interface {
 
 	// Use appends one or more middleware onto the router stack
 	Use(middlewares ...func(http.Handler) http.Handler)
+	// UseErrorHandler sets the general error handler for the router
+	UseErrorHandler(func(err error, c Context))
+	// UsePreHandler appends one or more pre-handler onto the router stack
+	UsePreHandler(h ...func(h HandlerFunc) HandlerFunc)
 
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
@@ -47,8 +51,6 @@ type Router interface {
 
 	GlobalStore() GofiStore
 	Meta() RouterMeta
-
-	UseErrorHandler(func(err error, c Context))
 
 	RegisterValidator(list ...Validator)
 	RegisterSpec(l ...CustomSpec)

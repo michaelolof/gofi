@@ -218,6 +218,25 @@ r.Use(func(next http.Handler) http.Handler {
 })
 ```
 
+### PreHandlers (Context-Aware Middleware)
+
+Add global Gofi middleware using `UsePreHandler()` for logic that needs access to `gofi.Context`:
+
+```go
+r.UsePreHandler(func(next gofi.HandlerFunc) gofi.HandlerFunc {
+    return func(c gofi.Context) error {
+        // Access context methods
+        token := c.Header().Get("Authorization")
+        if token == "" {
+            return c.Send(401, map[string]string{"error": "Unauthorized"})
+        }
+        return next(c)
+    }
+})
+```
+
+For a detailed comparison between Standard Middleware and PreHandlers, see the [Middleware Guide](docs/middleware.md).
+
 ### Route Groups
 
 Group routes with shared middlewares using `Group()`:
@@ -264,7 +283,7 @@ type RouteOptions struct {
     // Custom metadata accessible in handlers
     Meta any
     // Route-specific middlewares
-    Middlewares []gofi.MiddlewareFunc
+    PreHandlers []gofi.PreHandler
     // The handler function
     Handler func(c gofi.Context) error
 }

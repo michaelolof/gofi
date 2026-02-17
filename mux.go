@@ -20,6 +20,7 @@ type serveMux struct {
 	middlewares       Middlewares
 	inlineMiddlewares Middlewares
 	prefix            string
+	preHandlers       []PreHandler
 }
 
 func NewServeMux() Router {
@@ -101,6 +102,11 @@ func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
 	newMux.inlineMiddlewares = make(Middlewares, len(s.inlineMiddlewares), len(s.inlineMiddlewares)+len(middlewares))
 	copy(newMux.inlineMiddlewares, s.inlineMiddlewares)
 	newMux.inlineMiddlewares = append(newMux.inlineMiddlewares, middlewares...)
+
+	// Deep copy preHandlers for isolation
+	newMux.preHandlers = make([]PreHandler, len(s.preHandlers))
+	copy(newMux.preHandlers, s.preHandlers)
+
 	return &newMux
 }
 
@@ -176,6 +182,10 @@ func (s *serveMux) UseErrorHandler(handler func(err error, c Context)) {
 	if handler != nil {
 		s.opts.errHandler = handler
 	}
+}
+
+func (s *serveMux) UsePreHandler(h ...func(h HandlerFunc) HandlerFunc) {
+	s.preHandlers = append(s.preHandlers, h...)
 }
 
 func (s *serveMux) RegisterSpec(list ...CustomSpec) {
@@ -271,7 +281,12 @@ func (s *serveMux) Inject(opts InjectOptions) (rec *httptest.ResponseRecorder, e
 	}
 	setupInjectContext(opts.Path, opts.Method, opts.Handler, routeMeta)
 
-	handler := applyMiddleware(def.Handler, def.PreHandlers)
+	// Combine global and route-specific pre-handlers
+	allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(def.PreHandlers))
+	allPreHandlers = append(allPreHandlers, s.preHandlers...)
+	allPreHandlers = append(allPreHandlers, def.PreHandlers...)
+
+	handler := applyMiddleware(def.Handler, allPreHandlers)
 	err = handler(c)
 	if err != nil {
 		s.opts.errHandler(err, c)
@@ -323,7 +338,13 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 		c := newContext(w, r)
 		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
-		err := applyMiddleware(opts.Handler, opts.PreHandlers)(c)
+		// Combine global and route-specific pre-handlers
+		// Note: We create a new slice to avoid modifying the backing array
+		allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(opts.PreHandlers))
+		allPreHandlers = append(allPreHandlers, s.preHandlers...)
+		allPreHandlers = append(allPreHandlers, opts.PreHandlers...)
+
+		err := applyMiddleware(opts.Handler, allPreHandlers)(c)
 		if err != nil {
 			s.opts.errHandler(err, c)
 		}
@@ -360,6 +381,7 @@ func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore
 		globalStore:       globalStore,
 		middlewares:       m,
 		inlineMiddlewares: make(Middlewares, 0),
+		preHandlers:       make([]PreHandler, 0),
 		opts:              opts,
 		rOpts:             nil,
 	}

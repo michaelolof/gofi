@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -240,55 +241,207 @@ func TestRouteGroup(t *testing.T) {
 	})
 }
 
-// func TestMount(t *testing.T) {
-// 	t.Run("Mount Sub-Handler with StripPrefix", func(t *testing.T) {
-// 		mux := NewServeMux()
+func TestUsePreHandler(t *testing.T) {
+	r := NewServeMux()
 
-// 		subMux := http.NewServeMux()
-// 		// Sub-handler expects "/test", not "/sub/test" because of stripping
-// 		subMux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
-// 			t.Logf("SubMux received request: %s %s", r.Method, r.URL.Path)
-// 			w.Write([]byte("mounted"))
-// 		})
+	// Global PreHandler 1
+	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			c.Writer().Header().Add("X-PreHandler-1", "executed")
+			return next(c)
+		}
+	})
 
-// 		mux.Mount("/sub", subMux)
+	// Global PreHandler 2
+	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			c.Writer().Header().Add("X-PreHandler-2", "executed")
+			return next(c)
+		}
+	})
 
-// 		w := httptest.NewRecorder()
-// 		r := httptest.NewRequest("GET", "/sub/test", nil)
-// 		mux.ServeHTTP(w, r)
+	handler := DefineHandler(RouteOptions{
+		Handler: func(c Context) error {
+			return c.SendString(200, "OK")
+		},
+	})
 
-// 		if w.Body.String() != "mounted" {
-// 			t.Errorf("Expected 'mounted', got '%s'", w.Body.String())
-// 		}
-// 	})
+	r.Get("/test", handler)
 
-// 	t.Run("Mount with Middlewares", func(t *testing.T) {
-// 		mux := NewServeMux()
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
 
-// 		mw := func(next http.Handler) http.Handler {
-// 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// 				w.Header().Set("X-Mount", "true")
-// 				next.ServeHTTP(w, r)
-// 			})
-// 		}
+	if w.Header().Get("X-PreHandler-1") != "executed" {
+		t.Error("Expected X-PreHandler-1 to be executed")
+	}
+	if w.Header().Get("X-PreHandler-2") != "executed" {
+		t.Error("Expected X-PreHandler-2 to be executed")
+	}
+}
 
-// 		subMux := http.NewServeMux()
-// 		subMux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
-// 			w.Write([]byte("mounted"))
-// 		})
+func TestUsePreHandler_GroupIsolation(t *testing.T) {
+	r := NewServeMux()
 
-// 		// Use With().Mount to apply middleware
-// 		mux.With(mw).Mount("/sub", subMux)
+	// Base handler
+	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			c.Writer().Header().Add("X-Base", "true")
+			return next(c)
+		}
+	})
 
-// 		w := httptest.NewRecorder()
-// 		r := httptest.NewRequest("GET", "/sub/test", nil)
-// 		mux.ServeHTTP(w, r)
+	// Group 1
+	r.Group(func(sub Router) {
+		sub.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+			return func(c Context) error {
+				c.Writer().Header().Add("X-Group-1", "true")
+				return next(c)
+			}
+		})
 
-// 		if w.Body.String() != "mounted" {
-// 			t.Errorf("Expected 'mounted', got '%s'", w.Body.String())
-// 		}
-// 		if w.Header().Get("X-Mount") != "true" {
-// 			t.Errorf("Expected X-Mount header to be true")
-// 		}
-// 	})
-// }
+		sub.Get("/group1", DefineHandler(RouteOptions{
+			Handler: func(c Context) error { return c.SendString(200, "G1") },
+		}))
+	})
+
+	// Group 2 (Should NOT have X-Group-1)
+	r.Group(func(sub Router) {
+		sub.Get("/group2", DefineHandler(RouteOptions{
+			Handler: func(c Context) error { return c.SendString(200, "G2") },
+		}))
+	})
+
+	// Test Group 1
+	w1 := httptest.NewRecorder()
+	r1, _ := http.NewRequest("GET", "/group1", nil)
+	r.ServeHTTP(w1, r1)
+
+	if w1.Header().Get("X-Base") != "true" {
+		t.Error("Group 1 should have base prehandler")
+	}
+	if w1.Header().Get("X-Group-1") != "true" {
+		t.Error("Group 1 should have group prehandler")
+	}
+
+	// Test Group 2
+	w2 := httptest.NewRecorder()
+	r2, _ := http.NewRequest("GET", "/group2", nil)
+	r.ServeHTTP(w2, r2)
+
+	if w2.Header().Get("X-Base") != "true" {
+		t.Error("Group 2 should have base prehandler")
+	}
+	if w2.Header().Get("X-Group-1") == "true" {
+		t.Error("Group 2 should NOT have group 1 prehandler (Leak detected!)")
+	}
+}
+
+func TestUsePreHandler_Inject(t *testing.T) {
+	r := NewServeMux()
+
+	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			c.Writer().Header().Add("X-Injected", "true")
+			return next(c)
+		}
+	})
+
+	handler := DefineHandler(RouteOptions{
+		Handler: func(c Context) error {
+			return c.SendString(200, "OK")
+		},
+	})
+
+	w, err := r.Inject(InjectOptions{
+		Method:  "GET",
+		Path:    "/inject",
+		Handler: &handler,
+	})
+
+	if err != nil {
+		t.Fatalf("Inject failed: %v", err)
+	}
+
+	if w.Header().Get("X-Injected") != "true" {
+		t.Error("Inject should execute global prehandlers")
+	}
+}
+
+func TestUsePreHandler_ExecutionOrder(t *testing.T) {
+	r := NewServeMux()
+	var order []string
+
+	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			order = append(order, "global-start")
+			err := next(c)
+			order = append(order, "global-end")
+			return err
+		}
+	})
+
+	handler := DefineHandler(RouteOptions{
+		PreHandlers: []PreHandler{
+			func(next HandlerFunc) HandlerFunc {
+				return func(c Context) error {
+					order = append(order, "route-start")
+					err := next(c)
+					order = append(order, "route-end")
+					return err
+				}
+			},
+		},
+		Handler: func(c Context) error {
+			order = append(order, "handler")
+			return nil
+		},
+	})
+
+	r.Get("/order", handler)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/order", nil)
+	r.ServeHTTP(w, req)
+
+	expected := []string{"global-start", "route-start", "handler", "route-end", "global-end"}
+
+	if len(order) != len(expected) {
+		t.Fatalf("Expected order length %d, got %d: %v", len(expected), len(order), order)
+	}
+
+	for i, v := range expected {
+		if order[i] != v {
+			t.Errorf("Expected order[%d] to be %s, got %s", i, v, order[i])
+		}
+	}
+}
+
+func TestUsePreHandler_ErrorShortCircuit(t *testing.T) {
+	r := NewServeMux()
+
+	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			return errors.New("auth failed")
+		}
+	})
+
+	handler := DefineHandler(RouteOptions{
+		Handler: func(c Context) error {
+			t.Error("Handler should not be called")
+			return nil
+		},
+	})
+
+	r.Get("/short-circuit", handler)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/short-circuit", nil)
+	r.ServeHTTP(w, req)
+
+	// Default error handler should catch the error and return 500 (or whatever default is)
+	// We just want to ensure handler wasn't called (checked above)
+	if w.Code != 500 {
+		t.Logf("Expected code 500 for unhandled error, got %d", w.Code)
+	}
+}

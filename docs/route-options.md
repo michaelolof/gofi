@@ -202,7 +202,7 @@ PreHandlers are Gofi-specific middlewares that run **after** the Gofi `Context` 
 
 - **Interface**: `func(gofi.HandlerFunc) gofi.HandlerFunc`
 - **Use Case**: Authentication, Authorization, Validation logic that needs access to the `Context` (stores, schema validation results, etc.).
-- **Scope**: Per-route (defined in `RouteOptions`).
+- **Scope**: Can be Global (using `UsePreHandler`), Group-specific (using `Group().UsePreHandler`), or Per-route (defined in `RouteOptions`).
 
 ```go
 func AuthPreHandler(next gofi.HandlerFunc) gofi.HandlerFunc {
