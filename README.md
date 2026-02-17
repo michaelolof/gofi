@@ -153,7 +153,7 @@ The `RouteOptions` struct is used to configure your route, including metadata, s
 ```go
 var UsersHandler = gofi.DefineHandler(gofi.RouteOptions{
     Info: gofi.Info{ Description: "Returns a list Users" },
-    Schema: UserListSchema{},
+    Schema: &UserListSchema{},
     Handler: func(c gofi.Context) error {
         // ... implementation ...
         return c.Send(200, response)
@@ -313,6 +313,10 @@ err := gofi.ServeDocs(r, gofi.DocsOptions{
         {
             RoutePrefix: "/docs/swagger",
             Template:    gofi.SwaggerTemplate(),
+            Match: func(path string) bool {
+                // Serve only for routes that begin with /api/v1/
+                return strings.HasPrefix(path, "/api/v1/")
+            },
         },
         {
             RoutePrefix: "/docs/scalar",
@@ -392,7 +396,7 @@ func TestMyHandler(t *testing.T) {
     w, err := r.Inject(gofi.InjectOptions{
         Method: "GET",
         Path:   "/test-path",
-        Handler: myHandlerOpts, // Pass the RouteOptions directly (no need to register)
+        Handler: &myHandlerOpts, // Pass the RouteOptions directly (no need to register)
         
         // Optional inputs:
         Query:   map[string]string{"foo": "bar"},

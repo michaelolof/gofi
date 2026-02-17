@@ -88,11 +88,16 @@ type DocsUiOptions struct {
 }
 
 type DocsView struct {
+	// The prefix for the route where the documentation will be served.
 	RoutePrefix string
-	Template    DocsUiTemplate
-	UrlMatch    func(url string) bool
-	DocsPath    string
-	Components  DocsComponent
+	// The template to use for the documentation. Defaults to Swagger UI if none is passed
+	Template DocsUiTemplate
+	// Match the URL path fo be served. This is useful for serving multiple docs on the same server. (E.g admin /admin/v1/, client /v1/)
+	UrlMatch func(url string) bool
+	// The path to the generated OpenAPI specification in JSON.
+	DocsPath string
+	// The components to use for the documentation.
+	Components DocsComponent
 }
 
 type DocsComponent struct {
