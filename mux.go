@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 
 	"github.com/michaelolof/gofi/validators/rules"
 )
@@ -21,6 +22,7 @@ type serveMux struct {
 	inlineMiddlewares Middlewares
 	prefix            string
 	preHandlers       []PreHandler
+	ctxPool           *sync.Pool
 }
 
 func NewServeMux() Router {
@@ -110,45 +112,6 @@ func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
 	return &newMux
 }
 
-// func (s *serveMux) Mount(pattern string, handler http.Handler) {
-// 	if pattern == "" {
-// 		pattern = "/"
-// 	}
-
-// 	// Ensure pattern starts with / if not empty
-// 	if pattern != "/" && !strings.HasPrefix(pattern, "/") {
-// 		pattern = "/" + pattern
-// 	}
-
-// 	// If there is a prefix (from Route method), prepend it
-// 	if s.prefix != "" {
-// 		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(pattern, "/") {
-// 			pattern = "/" + pattern
-// 		}
-// 		pattern = s.prefix + pattern
-// 	}
-
-// 	// Mount logic: Mount usually implies a subtree, so we ensure trailing slash
-// 	// for the registration pattern on the underlying ServeMux.
-// 	mountPath := pattern
-// 	if !strings.HasSuffix(mountPath, "/") {
-// 		mountPath += "/"
-// 	}
-
-// 	// Apply middlewares
-// 	middlewares := s.inlineMiddlewares
-// 	if len(middlewares) > 0 {
-// 		handler = middlewares[len(middlewares)-1](handler)
-// 		for i := len(middlewares) - 2; i >= 0; i-- {
-// 			handler = middlewares[i](handler)
-// 		}
-// 	}
-
-// 	// Register with StripPrefix to ensure the sub-handler sees relative paths
-// 	stripPath := strings.TrimSuffix(mountPath, "/")
-// 	s.sm.Handle(mountPath, http.StripPrefix(stripPath, handler))
-// }
-
 func (s *serveMux) Handle(pattern string, handler http.Handler) {
 	s.sm.Handle(pattern, handler)
 }
@@ -168,6 +131,16 @@ func (s *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.ServeHTTP(w, r)
+}
+
+func (s *serveMux) acquireContext(w http.ResponseWriter, r *http.Request) *context {
+	c := s.ctxPool.Get().(*context)
+	c.reset(w, r)
+	return c
+}
+
+func (s *serveMux) releaseContext(c *context) {
+	s.ctxPool.Put(c)
 }
 
 func (s *serveMux) GlobalStore() GofiStore {
@@ -261,7 +234,8 @@ func (s *serveMux) Inject(opts InjectOptions) (rec *httptest.ResponseRecorder, e
 	}
 
 	w := httptest.NewRecorder()
-	c := newContext(w, r)
+	c := s.acquireContext(w, r)
+	defer s.releaseContext(c)
 
 	setupInjectContext := func(path, method string, ropts *RouteOptions, meta metaMap) {
 		if ropts.Schema != nil {
@@ -335,7 +309,9 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 	}
 
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := newContext(w, r)
+		c := s.acquireContext(w, r)
+		defer s.releaseContext(c)
+
 		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
 		// Combine global and route-specific pre-handlers
@@ -384,5 +360,17 @@ func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore
 		preHandlers:       make([]PreHandler, 0),
 		opts:              opts,
 		rOpts:             nil,
+		ctxPool: &sync.Pool{
+			New: func() interface{} {
+				// Allocate a new context, but don't set ephemeral fields yet
+				return &context{
+					routeMeta:         map[string]map[string]any{},
+					globalStore:       globalStore, // Shared global store reference
+					dataStore:         NewDataStore(),
+					serverOpts:        opts, // Shared options reference
+					bindedCacheResult: bindedResult{bound: false},
+				}
+			},
+		},
 	}
 }

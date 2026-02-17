@@ -57,14 +57,33 @@ type context struct {
 
 func newContext(w http.ResponseWriter, r *http.Request) *context {
 	return &context{
-		w:                 w,
-		r:                 r,
-		routeMeta:         map[string]map[string]any{},
-		globalStore:       NewGlobalStore(),
+		w:         w,
+		r:         r,
+		routeMeta: map[string]map[string]any{},
+		// GlobalStore is set by the pool New function or setContextSettings
 		dataStore:         NewDataStore(),
 		serverOpts:        defaultMuxOptions(),
 		bindedCacheResult: bindedResult{bound: false},
 	}
+}
+
+func (c *context) reset(w http.ResponseWriter, r *http.Request) {
+	c.w = w
+	c.r = r
+	c.opts = contextOptions{}
+	c.routeMeta = nil // Will be set via setContextSettings if needed
+	// GlobalStore remains constant per router instance
+	// DataStore needs clearing. If GofiStore is just a map, we can clear it.
+	// Assuming NewDataStore() creates a map-backed store.
+	// For now, let's re-allocate DataStore if we can't clear efficiently, or better:
+	// If DataStore interface exposes a Reset/Clear, use that.
+	// Since GofiStore interface isn't visible here, let's assume we re-create it for safety
+	// or perform a simple clear if it's a map.
+	// Checking context.go line 64: dataStore: NewDataStore().
+	// Let's create a new one for safety to avoid leaking request data.
+	c.dataStore = NewDataStore()
+
+	c.bindedCacheResult = bindedResult{bound: false}
 }
 
 func (c *context) Writer() http.ResponseWriter {
@@ -95,7 +114,7 @@ func (c *context) GetSchemaRules(pattern, method string) any {
 func (c *context) SendString(code int, s string) error {
 	c.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.w.WriteHeader(code)
-	_, err := c.w.Write([]byte(s))
+	_, err := c.w.Write(utils.StringToBytes(s))
 	return err
 }
 

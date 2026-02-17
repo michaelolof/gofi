@@ -219,6 +219,10 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 }
 
 func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *RuleDef) openapiSchema {
+	return s.getTypeInfoRecursive(typ, value, name, ruleDefs, make(map[reflect.Type]*RuleDef))
+}
+
+func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string, ruleDefs *RuleDef, visited map[reflect.Type]*RuleDef) openapiSchema {
 
 	kind := typ.Kind()
 
@@ -239,6 +243,25 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 	requiredProps := make([]string, 0)
 
 	var pRequired bool
+
+	// Check for recursion
+	if visited == nil {
+		visited = make(map[reflect.Type]*RuleDef)
+	}
+	if cachedRule, ok := visited[typ]; ok {
+		// e.g. Recursion detected. Link properties from cached rule to current ruleDefs
+		if ruleDefs != nil {
+			ruleDefs.properties = cachedRule.properties
+			ruleDefs.item = cachedRule.item
+			ruleDefs.additionalProperties = cachedRule.additionalProperties
+		}
+		// Return a placeholder schema for documentation to avoid infinite recursion in JSON serialization
+		return openapiSchema{Type: "object", Description: "Recursive Type"}
+	}
+	// Add current to visited
+	if ruleDefs != nil {
+		visited[typ] = ruleDefs
+	}
 
 	if ruleDefs != nil {
 		minOpts := ruleDefs.ruleOptions("min")
@@ -348,14 +371,14 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 			typeStr = "array"
 			_ruleDefs := getItemRuleDef(typ.Elem())
 			ruleDefs.append(_ruleDefs)
-			i := s.getTypeInfo(typ.Elem(), value, name, _ruleDefs)
+			i := s.getTypeInfoRecursive(typ.Elem(), value, name, _ruleDefs, visited)
 			items = &i
 
 		case reflect.Map:
 			typeStr = "object"
 			_ruleDefs := getItemRuleDef(typ.Elem())
 			ruleDefs.addProps(_ruleDefs)
-			i := s.getTypeInfo(typ.Elem(), value, name, _ruleDefs)
+			i := s.getTypeInfoRecursive(typ.Elem(), value, name, _ruleDefs, visited)
 			addProps = &i
 
 		case reflect.Struct:
@@ -390,14 +413,14 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 					if _ruleDefs.hasRule("required") {
 						requiredProps = append(requiredProps, name)
 					}
-					properties[name] = s.getTypeInfo(sf.Type, val, name, _ruleDefs)
+					properties[name] = s.getTypeInfoRecursive(sf.Type, val, name, _ruleDefs, visited)
 				}
 
 			}
 
 		case reflect.Pointer:
 			ruleDefs.kind = typ.Elem().Kind()
-			return s.getTypeInfo(typ.Elem(), value, name, ruleDefs)
+			return s.getTypeInfoRecursive(typ.Elem(), value, name, ruleDefs, visited)
 
 		}
 	}

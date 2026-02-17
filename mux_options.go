@@ -13,7 +13,6 @@ type muxOptions struct {
 	customValidators rules.ContextValidators
 	customSpecs      CustomSpecs
 	bodyParsers      []BodyParser
-	logger           Logger
 	schemaRules      SchemaRulesMap
 }
 
@@ -26,7 +25,6 @@ func defaultMuxOptions() *muxOptions {
 		customValidators: make(rules.ContextValidators),
 		customSpecs:      make(CustomSpecs),
 		bodyParsers:      bp,
-		logger:           &consoleLogger{},
 		schemaRules:      make(SchemaRulesMap),
 	}
 }

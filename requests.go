@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"time"
@@ -72,7 +73,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 
 	defer func() {
 		if e := recover(); e != nil {
-			c.serverOpts.logger.Error(newErrReport(ResponseErr, schemaBody, "", "typeMismatch", e.(error)))
+			slog.ErrorContext(c.r.Context(), newErrReport(ResponseErr, schemaBody, "", "typeMismatch", e.(error)).Error())
 		}
 	}()
 
