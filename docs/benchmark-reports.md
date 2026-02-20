@@ -1,305 +1,332 @@
-# Gofi vs Chi — Benchmark Comparison
+# Gofi vs Chi vs Echo — Benchmark Comparison
 
-Comprehensive performance benchmark comparing [**Gofi**](https://github.com/michaelolof/gofi) (with and without schema validation) and [**Chi**](https://github.com/go-chi/chi) HTTP routers for Go.
+Comprehensive performance benchmark comparing [**Gofi**](https://github.com/michaelolof/gofi), [**Chi**](https://github.com/go-chi/chi), and [**Echo**](https://github.com/labstack/echo) HTTP routers for Go — each tested plain and with schema validation/binding.
 
-Three configurations tested:
-- **Gofi** — Plain routing, no schema (raw `http.ServeMux` wrapper)
-- **GofiSchema** — Routes with typed schema structs + `ValidateAndBind` (Gofi's key differentiator)
-- **Chi** — Standard Chi router
+**Six configurations tested:**
+- **Gofi** — Go 1.22+ `http.ServeMux` wrapper
+- **Gofi + Schema** — Gofi with typed schema structs + `ValidateAndBind`
+- **Chi** — Standard Chi v5 radix trie router
+- **Chi + Schema** — Chi with manual struct binding + `go-playground/validator`
+- **Echo** — Echo v4 high-performance router
+- **Echo + Schema** — Echo with `c.Bind()` + `c.Validate()` + validator
 
-Benchmark methodology inspired by [gin-gonic/gin BENCHMARKS.md](https://github.com/gin-gonic/gin/blob/master/BENCHMARKS.md) and [go-http-routing-benchmark](https://github.com/michaelolof/gofi-go-http-routing-benchmark).
-
-## System Info
-
-```
-goos: darwin
-goarch: amd64
-cpu: Intel(R) Core(TM) i7-4980HQ CPU @ 2.80GHz
-go: go1.25.0
-benchmarks: -bench=. -benchmem -count=3
-```
+Full raw data: [benchmark-results.md](./benchmark-results.md)
 
 ---
 
-## Summary
+## Memory Consumption
 
-| Category | Gofi | GofiSchema | Chi | Winner |
-|---|---|---|---|---|
-| Static Route | 508 ns | 574 ns | 303 ns | Chi |
-| Single Param | 624 ns | 2,519 ns | 544 ns | Chi |
-| 5 Params | 1,155 ns | 3,168 ns | 789 ns | Chi |
-| **20 Params** | **1,950 ns** | — | 3,473 ns | **Gofi** ⭐ |
-| **Param Write** | **348 ns** | 2,558 ns | 710 ns | **Gofi** ⭐ |
-| Multi Param (2) | 1,028 ns | 3,962 ns | 980 ns | Chi |
-| Wildcard | 1,395 ns | — | 1,867 ns | Gofi |
-| Deep Nesting | 1,285 ns | — | 474 ns | Chi |
-| 404 Handling | 1,330 ns | — | 1,329 ns | Tie |
-| Middleware ×5 | 1,582 ns | — | 601 ns | Chi |
-| Middleware ×10 | 1,468 ns | — | 657 ns | Chi |
-| Middleware ×20 | 2,102 ns | — | 699 ns | Chi |
-| JSON Bind | 9,360 ns | 13,933 ns | 9,250 ns | Chi |
-| JSON Response | 20,992 ns | — | 24,158 ns | Gofi |
-| **Parallel** | **217 ns** | — | 355 ns | **Gofi** ⭐ |
-| **Route Groups** | **777 ns** | — | 1,315 ns | **Gofi** ⭐ |
-| Static (157 all) | 117 µs | 123 µs | 70 µs | Chi |
-| GitHub (static) | 659 ns | 680 ns | 384 ns | Chi |
-| GitHub (param) | 1,110 ns | 1,135 ns | 887 ns | Chi |
-| GitHub (all) | 204 µs | 216 µs | 241 µs | **Gofi** ⭐ |
-| GPlus (static) | 719 ns | 740 ns | 715 ns | Tie |
-| GPlus (param) | 1,755 ns | 2,477 ns | 4,047 ns | Gofi |
-| GPlus (2 params) | 8,809 ns | 4,766 ns | 3,212 ns | Chi |
-| GPlus (all) | 48,223 ns | 26,358 ns | 38,258 ns | **GofiSchema** ⭐ |
-| Parse (static) | 1,810 ns | 1,554 ns | 763 ns | Chi |
-| Parse (param) | 1,387 ns | 1,308 ns | 1,197 ns | Chi |
-| Parse (2 params) | 1,604 ns | 1,500 ns | 1,492 ns | Tie |
-| Parse (all) | 29,081 ns | 28,402 ns | 33,666 ns | **GofiSchema** ⭐ |
+| API | Routes | Gofi | Gofi + Schema | Chi | Echo |
+|---|---|---|---|---|---|
+| Static | 157 | 91 KB | 346 KB | **78 KB** | 88 KB |
+| GitHub | 203 | 135 KB | 423 KB | **91 KB** | 114 KB |
+| Google+ | 13 | 10 KB | 30 KB | **6 KB** | 10 KB |
+| Parse.com | 26 | 17 KB | 51 KB | **8 KB** | 13 KB |
 
-> **—** indicates GofiSchema was not benchmarked for that category (no schema-specific behavior applies).
+> 🥇 **Chi** — consistently lowest memory for route storage
+> 🥈 **Echo** — moderate footprint
+> 🥉 **Gofi** — slightly higher than Echo. Gofi + Schema uses ~3.5x more due to schema compilation at registration
 
 ---
 
-## 1. Memory Consumption
+## Micro Benchmarks
 
-Memory required to load the routing structure for each API:
+### Static Route — `GET /`
 
-| API | Routes | Gofi | GofiSchema | Chi |
-|---|---|---|---|---|
-| Static | 157 | 127 KB | 234 KB | 81 KB |
-| GitHub | 203 | 174 KB | 333 KB | 99 KB |
-| Google+ | 13 | 12 KB | 23 KB | 7 KB |
-| Parse.com | 26 | 23 KB | 43 KB | 8 KB |
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Chi** | **319** | **368** | **2** |
+| Chi + Schema | 389 | 370 | 3 |
+| Gofi | 468 | 416 | 3 |
+| Gofi + Schema | 614 | 432 | 5 |
+| Echo + Schema | 13,892 | 424 | 4 |
+| Echo | 14,220 | 424 | 4 |
 
-> GofiSchema roughly doubles Gofi's memory due to schema compilation (struct reflection, validation rule parsing) at route registration time. Chi is the most memory efficient for route storage.
+> 🥇 **Chi** — 319 ns (32% faster than Gofi)
+> 🥈 **Gofi** — 468 ns
+> 🥉 **Echo** — 14,220 ns (higher single-route overhead, but excels in full API traversals)
+
+### Single Param — `GET /user/:name`
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Gofi** | **568** | **432** | **4** |
+| Chi | 781 | 704 | 4 |
+| Chi + Schema | 938 | 722 | 6 |
+| Gofi + Schema | 2,515 | 1,504 | 19 |
+
+> 🥇 **Gofi** — 568 ns (27% faster than Chi, 39% less memory)
+> 🥈 **Chi** — 781 ns
+> 🥉 **Chi + Schema** — 938 ns (only 20% overhead vs plain Chi)
+
+### 5 Params — `GET /:a/:b/:c/:d/:e`
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Gofi** | **979** | 656 | 7 |
+| Chi | 1,110 | **704** | **4** |
+| Chi + Schema | 1,575 | 786 | 6 |
+| Gofi + Schema | 4,817 | 1,936 | 27 |
+
+> 🥇 **Gofi** — 979 ns (12% faster than Chi)
+> 🥈 **Chi** — 1,110 ns (constant 4 allocs regardless of param count)
+> 🥉 **Chi + Schema** — 1,575 ns
+
+### 20 Params — `GET /:a/:b/.../:t`
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Gofi** | **2,075** | 1,424 | 9 |
+| Chi | 3,583 | 2,504 | 9 |
+
+> 🥇 **Gofi** — 2,075 ns (42% faster, 43% less memory)
+> 🥈 **Chi** — 3,583 ns
+
+### Param Write — `GET /user/:name` (reads param + writes to response)
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Gofi** | **252** | **16** | **1** |
+| Chi | 746 | 704 | 4 |
+| Chi + Schema | 905 | 720 | 5 |
+| Gofi + Schema | 2,754 | 1,088 | 16 |
+
+> 🥇 **Gofi** — 252 ns / 16 B / 1 alloc (**3x faster** than Chi, **98% less memory**)
+> 🥈 **Chi** — 746 ns / 704 B
+> 🥉 **Chi + Schema** — 905 ns
+
+### Multi Param — `GET /users/:userID/posts/:postID`
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Gofi** | **707** | **464** | 5 |
+| Chi | 878 | 704 | **4** |
+| Chi + Schema | 1,058 | 738 | 6 |
+| Gofi + Schema | 2,953 | 1,568 | 21 |
+
+> 🥇 **Gofi** — 707 ns (19% faster, 34% less memory)
+> 🥈 **Chi** — 878 ns
+> 🥉 **Chi + Schema** — 1,058 ns
+
+### Wildcard — `GET /files/*`
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Chi** | **836** | 704 | **4** |
+| Gofi | 1,413 | **504** | 8 |
+
+> 🥇 **Chi** — 836 ns (41% faster)
+> 🥈 **Gofi** — 1,413 ns (28% less memory)
+
+### Deep Nesting — `GET /v1/api/deep/nested/resource/action`
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Chi** | **388** | **368** | **2** |
+| Gofi | 738 | 416 | 3 |
+
+> 🥇 **Chi** — 388 ns (1.9x faster via single trie traversal)
+> 🥈 **Gofi** — 738 ns
+
+### 404 Handling
+
+| Router | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| **Gofi** | **803** | **464** | **6** |
+| Chi | 977 | 816 | 7 |
+| Echo | 3,441 | 896 | 10 |
+
+> 🥇 **Gofi** — 803 ns (18% faster, 43% less memory than Chi)
+> 🥈 **Chi** — 977 ns
+> 🥉 **Echo** — 3,441 ns
 
 ---
 
-## 2. Micro Benchmarks
+## Middleware Scalability
 
-### Static Route `GET /`
+| Middlewares | Gofi | Chi | Echo | Gofi allocs | Chi allocs | Echo allocs |
+|---|---|---|---|---|---|---|
+| 5 | 644 | **628** | 869 | 3 | **2** | 9 |
+| 10 | 1,265 | **699** | 909 | 3 | **2** | 14 |
+| 20 | 912 | **600** | 1,274 | 3 | **2** | 24 |
 
-| Router | ns/op | B/op | allocs/op |
-|---|---|---|---|
-| Gofi | 508 | 472 | 5 |
-| GofiSchema | 574 | 472 | 5 |
-| Chi | 303 | 368 | 2 |
-
-> GofiSchema adds minimal overhead (~13%) for static routes — schema is compiled at registration, not per-request.
-
-### Single Parameter `GET /user/:name`
-
-| Router | ns/op | B/op | allocs/op |
-|---|---|---|---|
-| Gofi | 624 | 488 | 6 |
-| GofiSchema | 2,519 | 1,120 | 17 |
-| Chi | 544 | 704 | 4 |
-
-> GofiSchema adds ~4x overhead due to `ValidateAndBind` performing struct instantiation, path value extraction, type coercion, and validation per request.
-
-### 5 Params `GET /:a/:b/:c/:d/:e`
-
-| Router | ns/op | B/op | allocs/op |
-|---|---|---|---|
-| Gofi | 1,155 | 712 | 9 |
-| GofiSchema | 3,168 | 1,600 | 21 |
-| Chi | 789 | 704 | 4 |
-
-### 20 Params `GET /:a/:b/.../:t`
-
-| Router | ns/op | B/op | allocs/op |
-|---|---|---|---|
-| **Gofi** | **1,950** | **1,480** | **11** |
-| Chi | 3,473 | 2,505 | 9 |
-
-> ⭐ **Gofi wins decisively** at high param counts — **44% faster** and **41% less memory**. Go 1.22's `http.ServeMux` scales better with many parameters.
-
-### Param Write `GET /user/:name` (reads + writes param value)
-
-| Router | ns/op | B/op | allocs/op |
-|---|---|---|---|
-| **Gofi** | **348** | **72** | **3** |
-| GofiSchema | 2,558 | 1,144 | 18 |
-| Chi | 710 | 704 | 4 |
-
-> ⭐ **Gofi is 2x faster** than Chi with **90% less memory** for raw param access. Go's `PathValue()` is extremely efficient. GofiSchema trades performance for type-safe, validated binding.
-
-### Multi Parameter `GET /users/:userID/posts/:postID`
-
-| Router | ns/op | B/op | allocs/op |
-|---|---|---|---|
-| Gofi | 1,028 | 520 | 7 |
-| GofiSchema | 3,962 | 1,624 | 23 |
-| Chi | 980 | 704 | 4 |
+> 🥇 **Chi** — constant 2 allocs, fastest at all counts
+> 🥈 **Gofi** — constant 3 allocs, competitive at ×5
+> 🥉 **Echo** — allocations grow linearly (9 → 14 → 24)
 
 ---
 
-## 3. Middleware Scalability
-
-| Middlewares | Gofi (ns/op) | Chi (ns/op) | Gofi allocs | Chi allocs |
-|---|---|---|---|---|
-| 5 | 1,582 | 601 | 10 | 2 |
-| 10 | 1,468 | 657 | 15 | 2 |
-| 20 | 2,102 | 699 | 25 | 2 |
-
-> Chi maintains **constant 2 allocs** regardless of middleware count. Gofi's allocation count grows linearly. This is Chi's biggest architectural advantage.
-
----
-
-## 4. Data Handling & I/O
+## Data Handling
 
 ### JSON Binding (Small Payload)
 
 | Router | ns/op | B/op | allocs/op |
 |---|---|---|---|
-| Gofi | 9,360 | 7,528 | 32 |
-| GofiSchema | 13,933 | 8,425 | 51 |
-| Chi | 9,250 | 7,103 | 29 |
+| Echo | 5,752 | 7,478 | 31 |
+| Chi + Schema | 6,126 | 7,105 | **29** |
+| Echo + Schema | 6,875 | 7,482 | 31 |
+| Chi | 6,905 | **7,101** | **29** |
+| Gofi | 7,570 | 7,469 | 30 |
+| Gofi + Schema | 11,574 | 8,367 | 49 |
 
-> GofiSchema adds ~50% overhead for JSON binding — the cost of schema-based validation + type-safe struct binding. Chi and plain Gofi are comparable (both use `encoding/json`).
+> 🥇 **Echo** — 5,752 ns
+> 🥈 **Chi + Schema** — 6,126 ns
+> 🥉 **Echo + Schema** — 6,875 ns
+>
+> All within ~20% — bottleneck is `encoding/json`. Gofi + Schema has the most overhead (~53%) due to its richer binding pipeline.
 
 ### JSON Response (100 items)
 
 | Router | ns/op | B/op | allocs/op |
 |---|---|---|---|
-| **Gofi** | **20,992** | **8,840** | **21** |
-| Chi | 24,158 | 9,152 | 21 |
+| **Echo** | **15,643** | 8,824 | 20 |
+| Gofi | 18,740 | **8,777** | **19** |
+| Chi | 21,590 | 9,147 | 21 |
 
-> Gofi is ~13% faster for JSON responses — both use `encoding/json`, but Gofi's writer path has slightly less overhead.
+> 🥇 **Echo** — 15,643 ns (16% faster than Gofi)
+> 🥈 **Gofi** — 18,740 ns (least memory per op)
+> 🥉 **Chi** — 21,590 ns
 
 ---
 
-## 5. Concurrency
+## Concurrency
 
 | Router | ns/op | B/op | allocs/op |
 |---|---|---|---|
-| **Gofi** | **217** | **78** | **3** |
-| Chi | 355 | 368 | 2 |
+| **Echo** | **62** | **14** | **1** |
+| Gofi | 141 | 22 | 1 |
+| Chi | 363 | 368 | 2 |
 
-> ⭐ **Gofi is ~40% faster** under parallel load with **79% less memory per operation**. Go's built-in `http.ServeMux` is highly optimized for concurrent access.
+> 🥇 **Echo** — 62 ns (2.3x faster than Gofi, 5.9x faster than Chi)
+> 🥈 **Gofi** — 141 ns (single-allocation concurrency)
+> 🥉 **Chi** — 363 ns
 
 ---
 
-## 6. Route Groups (with nested middleware)
+## Route Groups (nested middleware)
 
 | Router | ns/op | B/op | allocs/op |
 |---|---|---|---|
-| **Gofi** | **777** | **512** | **7** |
-| Chi | 1,315 | 736 | 6 |
+| **Echo** | **729** | 472 | 7 |
+| Gofi | 917 | **432** | **4** |
+| Chi | 1,644 | 736 | 6 |
 
-> ⭐ **Gofi is ~40% faster** for grouped routes with nested middleware.
+> 🥇 **Echo** — 729 ns (20% faster than Gofi)
+> 🥈 **Gofi** — 917 ns (least memory and allocs)
+> 🥉 **Chi** — 1,644 ns
 
 ---
 
-## 7. Real-World API: GitHub (203 routes)
+## Real-World APIs
 
-| Benchmark | Gofi | GofiSchema | Chi |
+### GitHub API (203 routes)
+
+| Benchmark | Gofi | Gofi + Schema | Chi | Echo | Echo + Schema |
+|---|---|---|---|---|---|
+| Memory | 135 KB | 423 KB | **91 KB** | 114 KB | 115 KB |
+| Static (ns/op) | 814 | 673 | **465** | 592 | 654 |
+| Param (ns/op) | 916 | 868 | 937 | **867** | 994 |
+| **All (ns/op)** | 276,279 | 229,135 | 257,763 | **124,922** | 590,463 |
+| All (B/op) | 94,232 | 94,233 | 130,866 | **86,105** | **86,105** |
+| All (allocs) | 946 | 946 | **740** | 812 | 812 |
+
+> 🥇 **Echo** — 124,922 ns full traversal (2x faster, least memory per iteration at 86 KB)
+> 🥈 **Gofi + Schema** — 229,135 ns (faster than both plain Gofi and Chi)
+> 🥉 **Chi** — 257,763 ns (fewest allocs at 740, fastest for static lookups)
+
+### Google+ API (13 routes)
+
+| Benchmark | Gofi | Gofi + Schema | Chi | Echo | Echo + Schema |
+|---|---|---|---|---|---|
+| Memory | 10 KB | 30 KB | **6 KB** | 10 KB | 10 KB |
+| Static (ns/op) | 1,043 | 1,208 | 1,407 | 1,082 | **1,036** |
+| 1 Param (ns/op) | 2,208 | 3,784 | 3,329 | 1,862 | **1,122** |
+| 2 Params (ns/op) | 5,054 | 4,932 | 4,638 | 1,726 | **1,187** |
+| **All (ns/op)** | 64,994 | 110,089 | 101,901 | **7,577** | 11,608 |
+| All (B/op) | 5,746 | 5,746 | 8,483 | **5,514** | **5,514** |
+
+> 🥇 **Echo** — 7,577 ns full traversal (8.6x faster than Gofi, least memory per iteration)
+> 🥈 **Echo + Schema** — 11,608 ns (fastest for individual param lookups)
+> 🥉 **Gofi** — 64,994 ns
+
+### Parse.com API (26 routes)
+
+| Benchmark | Gofi | Gofi + Schema | Chi | Echo | Echo + Schema |
+|---|---|---|---|---|---|
+| Memory | 17 KB | 51 KB | **8 KB** | 13 KB | 13 KB |
+| Static (ns/op) | 5,484 | 6,207 | 4,696 | **1,045** | 1,239 |
+| 1 Param (ns/op) | 8,362 | 8,256 | 8,774 | 1,095 | **755** |
+| 2 Params (ns/op) | 12,052 | 29,341 | 19,587 | 1,239 | **601** |
+| **All (ns/op)** | 358,621 | 210,491 | 233,078 | 24,826 | **16,729** |
+| All (B/op) | 11,173 | 11,173 | 14,949 | **11,028** | **11,028** |
+
+> 🥇 **Echo + Schema** — 16,729 ns full traversal (14x faster than Gofi)
+> 🥈 **Echo** — 24,826 ns
+> 🥉 **Gofi + Schema** — 210,491 ns
+
+---
+
+## Schema Overhead
+
+The cost of adding schema validation/binding to each router:
+
+| Scenario | Gofi | Gofi + Schema | Chi | Chi + Schema | Echo | Echo + Schema |
+|---|---|---|---|---|---|---|
+| Static | 468 ns | 614 ns (1.3x) | 319 ns | 389 ns (1.2x) | 14,220 ns | 13,892 ns (1.0x) |
+| 1 param | 568 ns | 2,515 ns (**4.4x**) | 781 ns | 938 ns (1.2x) | 15,288 ns | 38,383 ns (2.5x) |
+| 5 params | 979 ns | 4,817 ns (**4.9x**) | 1,110 ns | 1,575 ns (1.4x) | 4,379 ns | 23,150 ns (**5.3x**) |
+| JSON bind | 7,570 ns | 11,574 ns (1.5x) | 6,905 ns | 6,126 ns (0.9x) | 5,752 ns | 6,875 ns (1.2x) |
+
+> 🥇 **Chi + Schema** — lowest overhead (~1.2x) via direct struct assignment without reflection
+> 🥈 **Echo + Schema** — moderate overhead (~1.2x for JSON, higher for params)
+> 🥉 **Gofi + Schema** — highest per-request overhead (~4-5x for params) — the cost of **automatic, type-safe binding**
+
+---
+
+## Key Takeaways
+
+### Gofi excels at:
+- **Parameterized routing** — 🥇 for 1-20 params in isolated benchmarks (27-42% faster than Chi)
+- **Raw param access** — 🥇 at 252 ns / 16 B / 1 alloc (3x faster than Chi)
+- **404 handling** — 🥇 fastest unmatched route resolution
+- **Low per-operation memory** — uses 25-34% less memory than Chi per request
+- **Gofi + Schema** — automatic `ValidateAndBind` with type safety (unique feature)
+
+### Chi excels at:
+- **Static & deep nested routes** — 🥇 fastest trie lookup (32-47% faster than Gofi)
+- **Middleware scalability** — 🥇 constant 2 allocs (best in class)
+- **Route storage memory** — 🥇 40-60% less than Gofi at registration
+- **Schema overhead** — 🥇 Chi + Schema adds only ~20% (direct struct assignment)
+
+### Echo excels at:
+- **Concurrency** — 🥇 2.3x faster than Gofi, 5.9x faster than Chi
+- **Full API traversal** — 🥇 dominates GitHub, Google+, Parse.com (2-14x faster)
+- **JSON handling** — 🥇 fastest for both bind and response
+- **Route groups** — 🥇 20% faster than Gofi
+
+### The trade-off:
+
+| | Gofi | Chi | Echo |
 |---|---|---|---|
-| **Memory** | 174 KB | 333 KB | 99 KB |
-| Static (ns/op) | 659 | 680 | 384 |
-| Param (ns/op) | 1,110 | 1,135 | 887 |
-| **All (ns/op)** | **204,000** | **216,000** | 241,000 |
-| All (B/op) | **105,630** | **105,630** | 130,880 |
-| All (allocs) | 1,352 | 1,352 | 740 |
-
-> ⭐ For the full GitHub API traversal: **Gofi is ~15% faster** than Chi and uses **19% less memory** (105 KB vs 131 KB per iteration). GofiSchema adds negligible routing overhead when schemas use empty structs (schema validation only triggers on `ValidateAndBind` calls).
+| **Fastest for** | Params, raw access, 404s | Static, deep nesting, middleware | API traversal, concurrency, JSON |
+| **Memory model** | Low per-request, moderate storage | Low storage, higher per-request | Variable per-request, moderate storage |
+| **Schema cost** | ~4.5x (full auto ValidateAndBind) | ~1.2x (manual struct binding) | ~2.5x (built-in Bind + Validate) |
+| **Best for** | Type-safe APIs with validation | Many static routes, heavy middleware | High-throughput API servers |
 
 ---
 
-## 8. Real-World API: Google+ (13 routes)
-
-| Benchmark | Gofi | GofiSchema | Chi |
-|---|---|---|---|
-| **Memory** | 12 KB | 23 KB | 7 KB |
-| Static (ns/op) | 719 | 740 | 715 |
-| 1 Param (ns/op) | 1,755 | 2,477 | 4,047 |
-| 2 Params (ns/op) | 8,809 | 4,766 | 3,212 |
-| **All (ns/op)** | 48,223 | **26,358** | 38,258 |
-| All (B/op) | **6,475** | **6,475** | 8,484 |
-
-> ⭐ **GofiSchema** was the fastest for the full Google+ API traversal! GofiSchema uses **24% less memory** per iteration (6.5 KB vs 8.5 KB) compared to Chi.
-
----
-
-## 9. Real-World API: Parse.com (26 routes)
-
-| Benchmark | Gofi | GofiSchema | Chi |
-|---|---|---|---|
-| **Memory** | 23 KB | 43 KB | 8 KB |
-| Static (ns/op) | 1,810 | 1,554 | 763 |
-| 1 Param (ns/op) | 1,387 | 1,308 | 1,197 |
-| 2 Params (ns/op) | 1,604 | 1,500 | 1,492 |
-| **All (ns/op)** | 29,081 | **28,402** | 33,666 |
-| All (B/op) | **12,631** | **12,631** | 14,951 |
-
-> ⭐ **GofiSchema** was the fastest for the full Parse.com API traversal and uses **16% less memory** per iteration than Chi.
-
----
-
-## The GofiSchema Overhead
-
-GofiSchema adds a **per-request cost** when `ValidateAndBind` is called:
-
-| Scenario | Overhead vs Gofi | What's happening |
-|---|---|---|
-| Static routes (no bind) | ~5-13% | Minimal — schema compiled at registration only |
-| 1 param + bind | ~4x | Struct alloc + path extraction + type coercion + validation |
-| 2 params + bind | ~3.5x | Same, scales sub-linearly |
-| 5 params + bind | ~2.7x | Same pattern |
-| JSON body + bind | ~50% | JSON decode + struct validation |
-| Full API traversal (no bind) | ~0-5% | Negligible — handler doesn't call ValidateAndBind |
-
-**Key insight:** The schema overhead is **per `ValidateAndBind` call**, not per route registration. If your handler doesn't call `ValidateAndBind`, GofiSchema routes perform identically to plain Gofi routes. The schema compilation (struct reflection) happens once at route registration time, adding to startup memory but not per-request latency.
-
----
-
-## Conclusions
-
-### Where Gofi Excels
-
-1. **High parameter counts (20 params):** Gofi is **44% faster** — Go 1.22's `http.ServeMux` scales better with many URL parameters
-2. **Raw parameter access:** Gofi's `PathValue()` is **2x faster** with **90% less memory** than Chi's context-based extraction
-3. **Parallel/concurrent access:** Gofi is **~40% faster** under parallel load — the stdlib `ServeMux` is highly optimized for concurrency
-4. **Route groups with middleware:** Gofi is **~40% faster** for nested route resolution
-5. **Full API traversal memory:** Gofi consistently uses **16-24% less memory per operation** than Chi for real-world APIs
-
-### Where GofiSchema Adds Value
-
-1. **Type-safe parameter binding:** Automatic struct binding with validation — a feature Chi doesn't offer
-2. **Real-world API traversal:** GofiSchema was **fastest overall** for Google+ and Parse.com full API traversals
-3. **Startup-only compilation:** Schema overhead is at registration, not per-request (unless you call `ValidateAndBind`)
-4. **Competitive at scale:** For full API traversals, GofiSchema matches or beats Chi despite adding validation
-
-### Where Chi Excels
-
-1. **Static route lookup:** Chi's radix trie is **40-65% faster** for static and deeply nested routes
-2. **Middleware scalability:** Chi maintains **constant 2 allocations** regardless of middleware count
-3. **Route storage memory:** Chi requires **40-60% less memory** to store route structures
-4. **Low param count routing:** For 1-5 parameters, Chi is **15-30% faster**
-
-### The Trade-off
-
-| | Chi | Gofi | GofiSchema |
-|---|---|---|---|
-| **Fastest for** | Static, deep nesting, middleware | Parallel, param access, high params | Full API traversals, type safety |
-| **Memory model** | Low storage, higher per-op | Higher storage, lower per-op | Highest storage, lowest full-API per-op |
-| **Best for** | Many static routes, heavy middleware | High concurrency, simple APIs | Type-safe APIs with validation |
-
----
-
-## Usage
+## Running Benchmarks
 
 ```bash
-# Run all benchmarks
-go test -bench=. -benchmem -count=3 -timeout=15m
+# Run all benchmarks and generate benchmark-results.md
+go run ./cmd/report/
+
+# Run benchmarks manually
+go test -bench=. -benchmem -count=3 -timeout=20m
 
 # Run specific category
-go test -bench="Gofi|GofiSchema|Chi" -benchmem
-
-# Compare just Gofi vs Chi (no schema)
-go test -bench="Benchmark(Gofi|Chi)_" -benchmem
-
-# Run only GitHub API benchmarks
 go test -bench="Github" -benchmem
 
-# Run only GofiSchema benchmarks
-go test -bench="GofiSchema" -benchmem
+# Run only schema benchmarks
+go test -bench="GofiS|ChiS|EchoS" -benchmem
 ```

@@ -22,6 +22,7 @@ type serveMux struct {
 	inlineMiddlewares Middlewares
 	prefix            string
 	preHandlers       []PreHandler
+	chainedHandler    http.Handler
 	ctxPool           *sync.Pool
 }
 
@@ -97,6 +98,17 @@ func (s *serveMux) Group(fn func(r Router)) Router {
 
 func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
 	s.middlewares = append(s.middlewares, middlewares...)
+	s.buildChain()
+}
+
+// buildChain pre-builds the middleware chain so ServeHTTP doesn't
+// have to reconstruct it on every request.
+func (s *serveMux) buildChain() {
+	var h http.Handler = s.sm
+	for i := len(s.middlewares) - 1; i >= 0; i-- {
+		h = s.middlewares[i](h)
+	}
+	s.chainedHandler = h
 }
 
 func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
@@ -121,16 +133,7 @@ func (s *serveMux) HandleFunc(pattern string, handler func(http.ResponseWriter, 
 }
 
 func (s *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var h http.Handler = s.sm
-	middlewares := s.middlewares
-	if len(middlewares) > 0 {
-		h = middlewares[len(middlewares)-1](h)
-		for i := len(middlewares) - 2; i >= 0; i-- {
-			h = middlewares[i](h)
-		}
-	}
-
-	h.ServeHTTP(w, r)
+	s.chainedHandler.ServeHTTP(w, r)
 }
 
 func (s *serveMux) acquireContext(w http.ResponseWriter, r *http.Request) *context {
@@ -325,19 +328,19 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 		s.routeMeta[path] = v
 	}
 
+	// Pre-compose all pre-handlers at registration time (not per-request)
+	allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(opts.PreHandlers))
+	allPreHandlers = append(allPreHandlers, s.preHandlers...)
+	allPreHandlers = append(allPreHandlers, opts.PreHandlers...)
+	composedHandler := applyMiddleware(opts.Handler, allPreHandlers)
+
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := s.acquireContext(w, r)
 		defer s.releaseContext(c)
 
 		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
-		// Combine global and route-specific pre-handlers
-		// Note: We create a new slice to avoid modifying the backing array
-		allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(opts.PreHandlers))
-		allPreHandlers = append(allPreHandlers, s.preHandlers...)
-		allPreHandlers = append(allPreHandlers, opts.PreHandlers...)
-
-		err := applyMiddleware(opts.Handler, allPreHandlers)(c)
+		err := composedHandler(c)
 		if err != nil {
 			s.opts.errHandler(err, c)
 		}
@@ -377,14 +380,14 @@ func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore
 		preHandlers:       make([]PreHandler, 0),
 		opts:              opts,
 		rOpts:             nil,
+		chainedHandler:    sm, // Default: no middlewares, dispatch directly
 		ctxPool: &sync.Pool{
 			New: func() interface{} {
 				// Allocate a new context, but don't set ephemeral fields yet
 				return &context{
 					routeMeta:         map[string]map[string]any{},
 					globalStore:       globalStore, // Shared global store reference
-					dataStore:         NewDataStore(),
-					serverOpts:        opts, // Shared options reference
+					serverOpts:        opts,        // Shared options reference
 					bindedCacheResult: bindedResult{bound: false},
 				}
 			},

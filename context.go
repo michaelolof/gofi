@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"io"
 	"net/http"
 	"reflect"
 
@@ -50,18 +51,16 @@ type context struct {
 	// rules             *schemaRules
 	routeMeta         metaMap
 	globalStore       ReadOnlyStore
-	dataStore         GofiStore
+	dataStore         *gofiStore
 	serverOpts        *muxOptions
 	bindedCacheResult bindedResult
 }
 
 func newContext(w http.ResponseWriter, r *http.Request) *context {
 	return &context{
-		w:         w,
-		r:         r,
-		routeMeta: map[string]map[string]any{},
-		// GlobalStore is set by the pool New function or setContextSettings
-		dataStore:         NewDataStore(),
+		w:                 w,
+		r:                 r,
+		routeMeta:         map[string]map[string]any{},
 		serverOpts:        defaultMuxOptions(),
 		bindedCacheResult: bindedResult{bound: false},
 	}
@@ -71,18 +70,8 @@ func (c *context) reset(w http.ResponseWriter, r *http.Request) {
 	c.w = w
 	c.r = r
 	c.opts = contextOptions{}
-	c.routeMeta = nil // Will be set via setContextSettings if needed
-	// GlobalStore remains constant per router instance
-	// DataStore needs clearing. If GofiStore is just a map, we can clear it.
-	// Assuming NewDataStore() creates a map-backed store.
-	// For now, let's re-allocate DataStore if we can't clear efficiently, or better:
-	// If DataStore interface exposes a Reset/Clear, use that.
-	// Since GofiStore interface isn't visible here, let's assume we re-create it for safety
-	// or perform a simple clear if it's a map.
-	// Checking context.go line 64: dataStore: NewDataStore().
-	// Let's create a new one for safety to avoid leaking request data.
-	c.dataStore = NewDataStore()
-
+	c.routeMeta = nil
+	c.dataStore = nil // Lazy: only allocate on first DataStore() access
 	c.bindedCacheResult = bindedResult{bound: false}
 }
 
@@ -99,6 +88,9 @@ func (c *context) GlobalStore() ReadOnlyStore {
 }
 
 func (c *context) DataStore() GofiStore {
+	if c.dataStore == nil {
+		c.dataStore = NewDataStore()
+	}
 	return c.dataStore
 }
 
@@ -112,8 +104,14 @@ func (c *context) GetSchemaRules(pattern, method string) any {
 }
 
 func (c *context) SendString(code int, s string) error {
-	c.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if h := c.w.Header(); h != nil {
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+	}
 	c.w.WriteHeader(code)
+	if sw, ok := c.w.(io.StringWriter); ok {
+		_, err := sw.WriteString(s)
+		return err
+	}
 	_, err := c.w.Write(utils.StringToBytes(s))
 	return err
 }
