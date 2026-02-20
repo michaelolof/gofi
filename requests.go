@@ -71,173 +71,119 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		return schemaPtr, nil
 	}
 
-	defer func() {
-		if e := recover(); e != nil {
-			slog.ErrorContext(c.r.Context(), newErrReport(ResponseErr, schemaBody, "", "typeMismatch", e.(error)).Error())
-		}
-	}()
-
 	var reqStruct reflect.Value
 	if shouldBind {
 		reqStruct = reflect.ValueOf(schemaPtr).Elem().FieldByName(string(schemaReq))
 	}
 
-	validateStrAndBind := func(field schemaField, qv string, def *RuleDef) error {
-		if qv == "" && def.defStr != "" {
-			qv = def.defStr
-		}
-
-		if !def.required && qv == "" {
-			return nil
-		}
-
-		var val any
-		var err error
-		if spec, ok := c.serverOpts.customSpecs.Find(string(def.format)); ok {
-			val, err = spec.Decode(qv)
-			if err != nil {
-				return newErrReport(RequestErr, field, def.field, "typeCast", err)
-			}
-		} else {
-			val, err = utils.PrimitiveFromStr(def.kind, qv)
-			if err != nil || utils.NotPrimitive(val) {
-				if err == nil {
-					err = errors.New("unsupported header type passed")
-				}
-				// Handle special cases.
-				switch def.format {
-				case utils.TimeObjectFormat:
-					val, err = time.Parse(def.pattern, qv)
-					if err != nil {
-						return newErrReport(RequestErr, field, def.field, "typeCast", err)
-					}
-				default:
-					return newErrReport(RequestErr, field, def.field, "typeCast", err)
-				}
-			}
-		}
-
-		err = runValidation(val, RequestErr, field, def.field, def.rules)
-		if err != nil {
-			return err
-		}
-
-		if shouldBind {
-			sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
-			sf.Set(reflect.ValueOf(val).Convert(sf.Type()))
-		}
-
-		return nil
-	}
+	// Shared error buffer — nil-initialized, only allocates on first error
+	var errs []error
 
 	// Handle Headers
-	pdef := c.rules().getReqRules(schemaHeaders)
-	errs := make([]error, 0, len(pdef.properties))
-	for _, def := range pdef.properties {
-		hv := c.r.Header.Get(def.field)
-		err := validateStrAndBind(schemaHeaders, hv, def)
-		if err != nil {
-			errs = append(errs, err)
+	if pdef := c.rules().getReqRules(schemaHeaders); pdef != nil && len(pdef.properties) > 0 {
+		for _, def := range pdef.properties {
+			hv := c.r.Header.Get(def.field)
+			if err := doValidateStrAndBind(c, schemaHeaders, hv, def, shouldBind, reqStruct); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		if len(errs) > 0 {
+			return nil, errors.Join(errs...)
+		}
 	}
 
 	// Handle queries
-	pdef = c.rules().getReqRules(schemaQuery)
-	errs = make([]error, 0, len(pdef.properties))
-	for _, def := range pdef.properties {
-		qv := c.r.URL.Query().Get(def.field)
-		err := validateStrAndBind(schemaQuery, qv, def)
-		if err != nil {
-			errs = append(errs, err)
+	if pdef := c.rules().getReqRules(schemaQuery); pdef != nil && len(pdef.properties) > 0 {
+		for _, def := range pdef.properties {
+			qv := c.r.URL.Query().Get(def.field)
+			if err := doValidateStrAndBind(c, schemaQuery, qv, def, shouldBind, reqStruct); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		if len(errs) > 0 {
+			return nil, errors.Join(errs...)
+		}
 	}
 
 	// Handle Paths
-	pdef = c.rules().getReqRules(schemaPath)
-	errs = make([]error, 0, len(pdef.properties))
-	for _, def := range pdef.properties {
-		pv := c.r.PathValue(def.field)
-		err := validateStrAndBind(schemaPath, pv, def)
-		if err != nil {
-			errs = append(errs, err)
+	if pdef := c.rules().getReqRules(schemaPath); pdef != nil && len(pdef.properties) > 0 {
+		for _, def := range pdef.properties {
+			pv := c.r.PathValue(def.field)
+			if err := doValidateStrAndBind(c, schemaPath, pv, def, shouldBind, reqStruct); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		if len(errs) > 0 {
+			return nil, errors.Join(errs...)
+		}
 	}
 
 	// Handle Cookies
-	pdef = c.rules().getReqRules(schemaCookies)
-	errs = make([]error, 0, len(pdef.properties))
-	for _, def := range pdef.properties {
-		cv, err := c.r.Cookie(def.field)
-		if def.required && err == http.ErrNoCookie {
-			errs = append(errs, err)
-			continue
-		} else if !def.required && cv == nil {
-			continue
-		} else if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		switch def.format {
-		case utils.CookieObjectFormat:
-			err := runValidation(cv.Value, RequestErr, schemaCookies, def.field, def.rules)
-			if err != nil {
+	if pdef := c.rules().getReqRules(schemaCookies); pdef != nil && len(pdef.properties) > 0 {
+		for _, def := range pdef.properties {
+			cv, err := c.r.Cookie(def.field)
+			if def.required && err == http.ErrNoCookie {
+				errs = append(errs, err)
+				continue
+			} else if !def.required && cv == nil {
+				continue
+			} else if err != nil {
 				errs = append(errs, err)
 				continue
 			}
 
-			if shouldBind {
-				sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
-				if sf.Kind() == reflect.Pointer {
-					sf.Set(reflect.ValueOf(cv).Convert(sf.Type()))
-				} else if cv != nil {
-					sf.Set(reflect.ValueOf(*cv).Convert(sf.Type()))
+			switch def.format {
+			case utils.CookieObjectFormat:
+				err := runValidation(cv.Value, RequestErr, schemaCookies, def.field, def.rules)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if shouldBind {
+					sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
+					if sf.Kind() == reflect.Pointer {
+						sf.Set(reflect.ValueOf(cv).Convert(sf.Type()))
+					} else if cv != nil {
+						sf.Set(reflect.ValueOf(*cv).Convert(sf.Type()))
+					}
+				}
+
+			default:
+				cvs, err := utils.PrimitiveFromStr(def.kind, cv.Value)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if utils.NotPrimitive(cvs) {
+					errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "invalid_type", errors.New("only primitives and http.Cookie types are supported")))
+					continue
+				}
+
+				err = runValidation(cvs, RequestErr, schemaCookies, def.field, def.rules)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if shouldBind {
+					sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
+					if sf.Kind() == reflect.Pointer {
+						sf.Elem().Set(reflect.ValueOf(cvs).Convert(sf.Elem().Type()))
+					} else {
+						sf.Set(reflect.ValueOf(cvs).Convert(sf.Type()))
+					}
 				}
 			}
-
-		default:
-			cvs, err := utils.PrimitiveFromStr(def.kind, cv.Value)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-
-			if utils.NotPrimitive(cvs) {
-				errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "invalid_type", errors.New("only primitives and http.Cookie types are supported")))
-				continue
-			}
-
-			err = runValidation(cvs, RequestErr, schemaCookies, def.field, def.rules)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-
-			if shouldBind {
-				sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
-				if sf.Kind() == reflect.Pointer {
-					sf.Elem().Set(reflect.ValueOf(cvs).Convert(sf.Elem().Type()))
-				} else {
-					sf.Set(reflect.ValueOf(cvs).Convert(sf.Type()))
-				}
-			}
 		}
-	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		if len(errs) > 0 {
+			return nil, errors.Join(errs...)
+		}
 	}
 
 	// Handle Body
-	pdef = c.rules().getReqRules(schemaBody)
+	pdef := c.rules().getReqRules(schemaBody)
 	if pdef == nil || pdef.kind == reflect.Invalid {
 		return schemaPtr, nil
 	}
@@ -266,6 +212,62 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		return schemaPtr, err
 	}
 
-	return schemaPtr, errors.Join(errs...)
+	return schemaPtr, nil
 
+}
+
+// doValidateStrAndBind validates a string value against rules and optionally binds to a struct field.
+// Extracted from closure to avoid per-request heap allocation.
+func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef, shouldBind bool, reqStruct reflect.Value) error {
+	if qv == "" && def.defStr != "" {
+		qv = def.defStr
+	}
+
+	if !def.required && qv == "" {
+		return nil
+	}
+
+	var val any
+	var err error
+	if spec, ok := c.serverOpts.customSpecs.Find(string(def.format)); ok {
+		val, err = spec.Decode(qv)
+		if err != nil {
+			return newErrReport(RequestErr, field, def.field, "typeCast", err)
+		}
+	} else {
+		val, err = utils.PrimitiveFromStr(def.kind, qv)
+		if err != nil || utils.NotPrimitive(val) {
+			if err == nil {
+				err = errors.New("unsupported header type passed")
+			}
+			// Handle special cases.
+			switch def.format {
+			case utils.TimeObjectFormat:
+				val, err = time.Parse(def.pattern, qv)
+				if err != nil {
+					return newErrReport(RequestErr, field, def.field, "typeCast", err)
+				}
+			default:
+				return newErrReport(RequestErr, field, def.field, "typeCast", err)
+			}
+		}
+	}
+
+	err = runValidation(val, RequestErr, field, def.field, def.rules)
+	if err != nil {
+		return err
+	}
+
+	if shouldBind {
+		sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
+		rv := reflect.ValueOf(val)
+		if rv.Type().ConvertibleTo(sf.Type()) {
+			sf.Set(rv.Convert(sf.Type()))
+		} else {
+			slog.ErrorContext(c.r.Context(), newErrReport(ResponseErr, schemaBody, def.field, "typeMismatch",
+				errors.New("cannot convert "+rv.Type().String()+" to "+sf.Type().String())).Error())
+		}
+	}
+
+	return nil
 }

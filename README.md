@@ -14,21 +14,6 @@ Gofi is an openapi3 schema-based HTTP router for Golang.
 - **Error Handling**: Built-in error handling with customizable handlers.
 - **Middleware Support**: Easy integration with standard `http.Handler` middlewares.
 
-## Benchmarks
-
-Gofi is designed for performance. You can find detailed benchmarks comparing it to other routers in the [gofi-benchmarks](gofi-benchmarks) directory.
-
-Summary of Gofi vs Go-Chi:
-- **Memory Efficiency**: Gofi uses ~80-90% less memory per request.
-- **Concurrency**: Gofi handles parallel requests with significantly lower latency.
-- **Dynamic Routes**: Gofi excels at keyed parameter lookups.
-
-To run the benchmarks yourself:
-
-```sh
-cd gofi-benchmarks
-go test -bench=.
-```
 
 ## Installation
 
@@ -580,3 +565,9 @@ func (p *MyXMLParser) ValidateAndEncodeResponse(s any, opts gofi.ResponseOptions
 // Register
 r.RegisterBodyParser(&MyXMLParser{})
 ```
+
+## Benchmarks
+
+Gofi is benchmarked against [go-chi/chi](https://github.com/go-chi/chi) and [labstack/echo](https://github.com/labstack/echo) across micro-benchmarks, real-world API traversals, middleware scalability, and concurrency.
+
+> Full benchmark suite and reproducible results: **[gofi-benchmarks](https://github.com/michaelolof/gofi-benchmarks)**

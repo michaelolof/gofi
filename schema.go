@@ -266,11 +266,13 @@ func (s schemaField) String() string {
 }
 
 func runValidation(val any, typ errorType, schema schemaField, keypath string, rules []ruleOpts) error {
-	errs := make([]error, 0, len(rules))
+	if len(rules) == 0 {
+		return nil
+	}
 
+	var errs []error
 	for _, rule := range rules {
-		err := rule.dator(val)
-		if err != nil {
+		if err := rule.dator(val); err != nil {
 			errs = append(errs, newErrReport(typ, schema, keypath, rule.rule, err))
 		}
 	}

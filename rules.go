@@ -196,14 +196,18 @@ func (s *schemaRules) getReqRules(key schemaField) *RuleDef {
 	}
 
 	prefix := string(schemaReq)
-	rtn := s.req[prefix+"."+string(key)]
-	return &rtn
+	if rtn, ok := s.req[prefix+"."+string(key)]; ok {
+		return &rtn
+	}
+	return nil
 }
 
 func (s *schemaRules) reqContent() cont.ContentType {
 	hs := s.getReqRules(schemaHeaders)
-	if dv, ok := hs.tags["content-type"]; ok && len(dv) > 0 {
-		return cont.ContentType(dv[0])
+	if hs != nil {
+		if dv, ok := hs.tags["content-type"]; ok && len(dv) > 0 {
+			return cont.ContentType(dv[0])
+		}
 	}
 
 	return cont.ApplicationJson
