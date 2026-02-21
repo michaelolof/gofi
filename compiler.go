@@ -173,13 +173,28 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 		if tag, ok := sf.Tag.Lookup(stag); ok {
 			switch stag {
 			case "json":
+				if len(strings.TrimSpace(tag)) == 0 {
+					continue
+				}
+
 				tagList[stag] = strings.Split(tag, ",")
 			case "example", "deprecated", "description", "pattern", "spec":
+				if len(strings.TrimSpace(tag)) == 0 {
+					continue
+				}
+
 				tagList[stag] = []string{parseTagValue(tag, sf.Type)}
 			case "default":
+				if len(strings.TrimSpace(tag)) == 0 {
+					continue
+				}
+
 				defStr = parseTagValue(tag, sf.Type)
 			case "validate":
-				// vtags := s.splitByUnescapedComma(tag)
+				if len(strings.TrimSpace(tag)) == 0 {
+					continue
+				}
+
 				vtags := strings.Split(tag, ",")
 				rules = make([]ruleOpts, 0, len(vtags))
 				for _, tag := range vtags {
@@ -257,6 +272,8 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			ruleDefs.properties = cachedRule.properties
 			ruleDefs.item = cachedRule.item
 			ruleDefs.additionalProperties = cachedRule.additionalProperties
+			ruleDefs.format = cachedRule.format
+			ruleDefs.pattern = cachedRule.pattern
 		}
 		// Return a placeholder schema for documentation to avoid infinite recursion in JSON serialization
 		return openapiSchema{Type: "object", Description: "Recursive Type"}

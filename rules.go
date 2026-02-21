@@ -205,8 +205,11 @@ func (s *schemaRules) getReqRules(key schemaField) *RuleDef {
 func (s *schemaRules) reqContent() cont.ContentType {
 	hs := s.getReqRules(schemaHeaders)
 	if hs != nil {
-		if dv, ok := hs.tags["content-type"]; ok && len(dv) > 0 {
-			return cont.ContentType(dv[0])
+		if v, ok := hs.properties["content-type"]; ok && len(v.defStr) > 0 {
+			return cont.ContentType(v.defStr)
+
+		} else if v, ok := hs.properties["Content-Type"]; ok && len(v.defStr) > 0 {
+			return cont.ContentType(v.defStr)
 		}
 	}
 

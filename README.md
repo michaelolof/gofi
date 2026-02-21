@@ -570,4 +570,4 @@ r.RegisterBodyParser(&MyXMLParser{})
 
 Gofi is benchmarked against [go-chi/chi](https://github.com/go-chi/chi) and [labstack/echo](https://github.com/labstack/echo) across micro-benchmarks, real-world API traversals, middleware scalability, and concurrency.
 
-> Full benchmark suite and reproducible results: **[gofi-benchmarks](https://github.com/michaelolof/gofi-benchmarks)**
+> Full benchmark suite and reproducible results: **[gofi-test-utils](https://github.com/michaelolof/gofi-test-utils)**
