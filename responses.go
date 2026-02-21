@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/michaelolof/gofi/utils"
@@ -47,7 +48,7 @@ func (c *context) Send(code int, obj any) error {
 		return err
 	}
 
-	contentType := c.rules().reqContent()
+	contentType := c.rules().respContent(code)
 	sz, err := c.serverOpts.getSerializer(contentType)
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
@@ -67,6 +68,7 @@ func (c *context) Send(code int, obj any) error {
 		return err
 	}
 
+	c.w.Header().Set("Content-Type", string(contentType))
 	c.w.WriteHeader(code)
 	_, err = c.w.Write(bs)
 	if err != nil {
@@ -99,6 +101,10 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 	}
 
 	for key, val := range ruleProps {
+
+		if strings.ToLower(key) == "content-type" {
+			continue
+		}
 
 		hf := headers.FieldByName(val.fieldName)
 		if !hf.IsValid() {
@@ -152,6 +158,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 					}
 
 					c.w.Header().Set(key, tv.Format(val.pattern))
+
 				case reflect.Struct:
 					tv, ok := hv.(time.Time)
 					if !ok {

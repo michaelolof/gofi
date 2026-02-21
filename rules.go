@@ -216,6 +216,21 @@ func (s *schemaRules) reqContent() cont.ContentType {
 	return cont.ApplicationJson
 }
 
+func (s *schemaRules) respContent(code int) cont.ContentType {
+	_, hsc, _ := s.getRespRulesByCode(code)
+	if hsc != nil {
+		if hs, ok := hsc[string(schemaHeaders)]; ok {
+			if v, ok := hs.properties["content-type"]; ok && len(v.defStr) > 0 {
+				return cont.ContentType(v.defStr)
+
+			} else if v, ok := hs.properties["Content-Type"]; ok && len(v.defStr) > 0 {
+				return cont.ContentType(v.defStr)
+			}
+		}
+	}
+	return cont.ApplicationJson
+}
+
 func (s *schemaRules) getRespRulesByCode(code int) (string, ruleDefMap, error) {
 
 	handleDefaults := func() (string, ruleDefMap, error) {
