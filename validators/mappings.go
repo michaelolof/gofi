@@ -137,9 +137,9 @@ var Validators = rules.ContextValidators{
 	"filepath": rules.IsFilePath,
 
 	// Misc Rules
-	"boolean": rules.IsBoolean,
-	"json":    rules.IsJSON,
-	"default": rules.IsDefault,
+	"boolean":   rules.IsBoolean,
+	"json":      rules.IsJSON,
+	"isdefault": rules.IsDefault,
 
 	// Payment Rules
 	"credit_card":   rules.IsCreditCard,

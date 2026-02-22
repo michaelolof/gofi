@@ -13,6 +13,7 @@ import (
 )
 
 var fileHeaderType = reflect.TypeOf(multipart.FileHeader{})
+var tagFieldRegex = regexp.MustCompile(`([a-zA-Z0-9_]+)(?:=([^,]+)|@([^,]+))?`)
 
 type compiledSchema struct {
 	specs openapiOperationObject
@@ -169,6 +170,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 	var rules []ruleOpts
 	var required bool
 	var max *float64
+
 	for _, stag := range supportedTags {
 		if tag, ok := sf.Tag.Lookup(stag); ok {
 			switch stag {
@@ -198,7 +200,6 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 				vtags := strings.Split(tag, ",")
 				rules = make([]ruleOpts, 0, len(vtags))
 				for _, tag := range vtags {
-					tagFieldRegex := regexp.MustCompile(`([a-zA-Z0-9_]+)(?:=([^,]+)|@([^,]+))?`)
 					maches := tagFieldRegex.FindStringSubmatch(tag)
 					ruleName := maches[1]
 					optionStr := maches[2]
@@ -210,7 +211,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 					}
 
 					var options []string
-					if len(optionStr) > 1 {
+					if len(optionStr) > 0 {
 						options = strings.Split(optionStr, " ")
 					}
 
