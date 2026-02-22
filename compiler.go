@@ -2,7 +2,6 @@ package gofi
 
 import (
 	"log"
-	"mime/multipart"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -12,7 +11,6 @@ import (
 	"github.com/michaelolof/gofi/utils"
 )
 
-var fileHeaderType = reflect.TypeOf(multipart.FileHeader{})
 var tagFieldRegex = regexp.MustCompile(`([a-zA-Z0-9_]+)(?:=([^,]+)|@([^,]+))?`)
 
 type compiledSchema struct {
@@ -398,7 +396,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 				format = string(utils.CookieObjectFormat)
 				ruleDefs.format = utils.CookieObjectFormat
 
-			case fileHeaderType:
+			case utils.MultipartFile:
 				typeStr = "string"
 				format = "binary"
 

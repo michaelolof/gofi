@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"mime/multipart"
 	"reflect"
 	"strings"
 	"time"
@@ -99,7 +98,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 			if fileOk {
 				if rule.kind == reflect.Slice || rule.kind == reflect.Array {
 					elemType := fieldVal.Type().Elem()
-					if elemType != reflect.TypeOf(&multipart.FileHeader{}) {
+					if elemType != utils.MultipartFile {
 						return newErrReport(RequestErr, schemaBody, key, "typeMismatch", errors.New("field must be []*multipart.FileHeader"))
 					}
 					slice := reflect.MakeSlice(fieldVal.Type(), len(files), len(files))
@@ -111,7 +110,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 					}
 				} else {
 					if len(files) > 0 {
-						if fieldVal.Type() != reflect.TypeOf(&multipart.FileHeader{}) {
+						if fieldVal.Type() != utils.MultipartFile {
 							return newErrReport(RequestErr, schemaBody, key, "typeMismatch", errors.New("field must be *multipart.FileHeader"))
 						}
 						if err := m.bindValue(fieldVal, files[0]); err != nil {

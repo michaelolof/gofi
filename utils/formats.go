@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"mime/multipart"
 	"net/http"
 	"reflect"
 	"time"
@@ -16,3 +17,4 @@ const (
 
 var TimeType = reflect.TypeOf(time.Time{})
 var CookieType = reflect.TypeOf(http.Cookie{})
+var MultipartFile = reflect.TypeOf(multipart.FileHeader{})
