@@ -21,6 +21,7 @@ import (
 type JSONBodyParser struct {
 	MaxRequestSize int64
 	MaxDepth       int
+	MaintainOrder  bool
 }
 
 func (j *JSONBodyParser) Match(contentType string) bool {
@@ -142,7 +143,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 		return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
 	}
 
-	if val == nil && opts.SchemaRules.defVal != nil {
+	if (val == nil || val == cont.EOF) && opts.SchemaRules.defVal != nil {
 		val = opts.SchemaRules.defVal
 	} else if val == cont.EOF {
 		val = nil
@@ -156,18 +157,61 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 		opts.Body.Set(reflect.New(opts.Body.Type().Elem()))
 	}
 
+	if opts.SchemaRules.format == utils.TimeObjectFormat || opts.SchemaRules.format == utils.CookieObjectFormat {
+		if err := runValidation(val, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
+			return nil, err
+		}
+
+		if opts.ShouldBind && opts.Body != nil {
+			err = j.decodeFieldValue(opts.Body, val)
+			if err != nil {
+				newErrReport(RequestErr, schemaField, kp, "encoder", err)
+			}
+		}
+
+		return &walkFinished, nil
+	}
+
 	switch opts.SchemaRules.kind {
 	case reflect.Struct:
-		for childKey, childDef := range opts.SchemaRules.properties {
-			var childStruct reflect.Value
-			if opts.ShouldBind && opts.Body != nil {
-				childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
-			}
+		if j.MaintainOrder && opts.SchemaRules.typ != nil {
+			for _, field := range reflect.VisibleFields(opts.SchemaRules.typ) {
+				jsonTags := strings.Split(field.Tag.Get("json"), ",")
+				var name string
+				if len(jsonTags) > 0 && jsonTags[0] != "" {
+					name = jsonTags[0]
+				} else {
+					name = field.Name
+				}
 
-			childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-			_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childKey))
-			if err != nil {
-				return nil, err
+				childDef, ok := opts.SchemaRules.properties[name]
+				if !ok {
+					continue
+				}
+
+				var childStruct reflect.Value
+				if opts.ShouldBind && opts.Body != nil {
+					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
+				}
+
+				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
+				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, name))
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			for childKey, childDef := range opts.SchemaRules.properties {
+				var childStruct reflect.Value
+				if opts.ShouldBind && opts.Body != nil {
+					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
+				}
+
+				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
+				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childKey))
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -418,6 +462,21 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 			return fmt.Errorf("type mismatch. expected array value got %T", val)
 		}
 	default:
+		if field.Type() == utils.TimeType {
+			if s, ok := val.(string); ok {
+				t, err := time.Parse(time.RFC3339, s)
+				if err != nil {
+					// try other formats or fallback
+					t, err = time.Parse(time.RFC3339Nano, s)
+				}
+				if err == nil {
+					field.Set(reflect.ValueOf(t))
+					return nil
+				}
+				return err
+			}
+		}
+
 		v, err := utils.SafeConvert(reflect.ValueOf(val), field.Type())
 		if err != nil {
 			return err
@@ -551,20 +610,53 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 		buf.WriteString("{")
 		first := true
 
-		for field, frules := range rules.properties {
-			fieldValue := val.FieldByName(frules.fieldName)
-			if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
-				continue
-			}
+		if j.MaintainOrder && rules != nil {
+			typ := val.Type()
+			for _, field := range reflect.VisibleFields(typ) {
+				jsonTags := strings.Split(field.Tag.Get("json"), ",")
+				var name string
+				if len(jsonTags) > 0 && jsonTags[0] != "" {
+					name = jsonTags[0]
+				} else {
+					name = field.Name
+				}
 
-			if !first {
-				buf.WriteString(",")
-			}
-			first = false
+				frules, ok := rules.properties[name]
+				if !ok {
+					continue
+				}
 
-			buf.WriteString(fmt.Sprintf(`"%s":`, field))
-			if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, field)); err != nil {
-				return err
+				fieldValue := val.FieldByName(field.Name)
+				if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
+					continue
+				}
+
+				if !first {
+					buf.WriteString(",")
+				}
+				first = false
+
+				buf.WriteString(fmt.Sprintf(`"%s":`, name))
+				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, name)); err != nil {
+					return err
+				}
+			}
+		} else if rules != nil {
+			for field, frules := range rules.properties {
+				fieldValue := val.FieldByName(frules.fieldName)
+				if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
+					continue
+				}
+
+				if !first {
+					buf.WriteString(",")
+				}
+				first = false
+
+				buf.WriteString(fmt.Sprintf(`"%s":`, field))
+				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, field)); err != nil {
+					return err
+				}
 			}
 		}
 

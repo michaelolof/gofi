@@ -17,10 +17,8 @@ type muxOptions struct {
 }
 
 func defaultMuxOptions() *muxOptions {
-	bp := make([]BodyParser, 0, 10)
-	bp = append(bp, &JSONBodyParser{})
-	bp = append(bp, &FormBodyParser{})
-	bp = append(bp, &MultipartBodyParser{})
+	bp := make([]BodyParser, 0, 20)
+	bp = append(bp, &JSONBodyParser{}, &FormBodyParser{}, &MultipartBodyParser{})
 
 	return &muxOptions{
 		errHandler:       defaultErrorHandler,

@@ -21,6 +21,10 @@ Gofi is an openapi3 schema-based HTTP router for Golang.
 go get -u github.com/michaelolof/gofi
 ```
 
+## Examples
+
+You can find examples of using a Gofi router [here](https://github.com/michaelolof/gofi-test-utils/tree/7a9bf615e9328d7ee30511bac6ce50677f6be274/cmd/examples) 
+
 ## Quick Start
 
 Here is a minimal example to get you started with Gofi.
