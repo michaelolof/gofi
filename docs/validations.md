@@ -195,7 +195,7 @@ Here is the complete list of supported validation tags in Gofi.
 
 ### Miscellaneous
 - `boolean` - String "true"/"false" or boolean
-- `default` - Sets a default value if empty
+- `isdefault` - Sets a default value if empty
 - `e164` - Valid E.164 phone number format
 
 ## Validation Utilities
