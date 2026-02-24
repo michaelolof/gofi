@@ -34,6 +34,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	optsObj.urlPath = info.Url
 	optsObj.Description = info.Description
 	optsObj.ExternalDocs = info.ExternalDocs
+	optsObj.Tags = info.Tags
 	if info.Deprecated {
 		optsObj.Deprecated = &info.Deprecated
 	}

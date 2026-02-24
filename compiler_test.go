@@ -34,6 +34,21 @@ func TestOpenAPISpecsMethod(t *testing.T) {
 	assert.Equal(t, cs.specs.responsesSchema["Ok"].Properties["custom"].Format, "string", "custom format is correctly set")
 }
 
+func TestCompilerTags(t *testing.T) {
+	type testSchema struct {
+		Ok struct {
+			Body string `json:"body"`
+		}
+	}
+
+	r := newServeMux()
+	cs := r.compileSchema(&testSchema{}, Info{
+		Tags: []string{"User", "Profile"},
+	})
+
+	assert.Equal(t, cs.specs.Tags, []string{"User", "Profile"}, "tags are correctly propagated")
+}
+
 func TestCompilerHooksOpenAPISpecs(t *testing.T) {
 
 	type testSchema struct {

@@ -21,7 +21,7 @@ type DocsOptions struct {
 	Info         DocsInfoOptions     `json:"info,omitempty"`
 	Servers      []DocsServerOptions `json:"servers,omitempty"`
 	ExternalDocs *ExternalDocs       `json:"externalDocs,omitempty"`
-	Tags         *DocsInfoTag        `json:"tags,omitempty"`
+	Tags         []DocsInfoTag       `json:"tags,omitempty"`
 	Views        []DocsView          `json:"-"`
 }
 
@@ -61,8 +61,9 @@ type DocsInfoContact struct {
 }
 
 type DocsInfoTag struct {
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
+	Name         string        `json:"name,omitempty"`
+	Description  string        `json:"description,omitempty"`
+	ExternalDocs *ExternalDocs `json:"externalDocs,omitempty"`
 }
 
 type ExternalDocs struct {

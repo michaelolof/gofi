@@ -116,6 +116,7 @@ type openapiOperationObject struct {
 	RequestBody  *openapiRequestObject            `json:"requestBody,omitempty"`
 	Responses    map[string]openapiResponseObject `json:"responses,omitempty"`
 	ExternalDocs []ExternalDocs                   `json:"externalDocs,omitempty"`
+	Tags         []string                         `json:"tags,omitempty"`
 
 	urlPath             string
 	method              string
@@ -228,6 +229,7 @@ type Info struct {
 	Url          string
 	Description  string
 	ExternalDocs []ExternalDocs
+	Tags         []string
 }
 
 type schemaField string
