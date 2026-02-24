@@ -123,7 +123,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		for _, def := range pdef.properties {
 			cv, err := c.r.Cookie(def.field)
 			if def.required && err == http.ErrNoCookie {
-				errs = append(errs, err)
+				errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "required", err))
 				continue
 			} else if !def.required && cv == nil {
 				continue
