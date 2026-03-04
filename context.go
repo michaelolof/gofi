@@ -54,6 +54,7 @@ type context struct {
 	dataStore         *gofiStore
 	serverOpts        *muxOptions
 	bindedCacheResult bindedResult
+	params            Params
 }
 
 func newContext(w http.ResponseWriter, r *http.Request) *context {
@@ -67,12 +68,22 @@ func newContext(w http.ResponseWriter, r *http.Request) *context {
 }
 
 func (c *context) reset(w http.ResponseWriter, r *http.Request) {
+	if c.bindedCacheResult.bound && c.bindedCacheResult.val != nil {
+		if rules := c.rules(); rules != nil && rules.schemaPool != nil {
+			// Zero out the struct before returning it to the pool
+			reflect.ValueOf(c.bindedCacheResult.val).Elem().SetZero()
+			rules.schemaPool.Put(c.bindedCacheResult.val)
+		}
+	}
+
 	c.w = w
 	c.r = r
 	c.opts = contextOptions{}
 	c.routeMeta = nil
 	c.dataStore = nil // Lazy: only allocate on first DataStore() access
 	c.bindedCacheResult = bindedResult{bound: false}
+	// Truncate params slice, retaining capacity
+	c.params = c.params[:0]
 }
 
 func (c *context) Writer() http.ResponseWriter {

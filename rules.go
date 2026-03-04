@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
+	"strings"
+	"sync"
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
@@ -39,6 +41,14 @@ func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string
 	}
 }
 
+type fieldAccessor struct {
+	offset    uintptr
+	index     []int
+	fieldType reflect.Type
+	kind      reflect.Kind
+	name      string
+}
+
 type RuleDef struct {
 	typ                  reflect.Type
 	kind                 reflect.Kind
@@ -52,23 +62,52 @@ type RuleDef struct {
 	item                 *RuleDef
 	additionalProperties *RuleDef
 	properties           map[string]*RuleDef
+	orderedProps         []*RuleDef
 	max                  *float64
 	required             bool
 
-	tags map[string][]string
+	tags         map[string][]string
+	accessor     fieldAccessor
+	jsonKeyBytes []byte
 }
 
-func newRuleDef(typ reflect.Type, kind reflect.Kind, field string, fleldName string, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {
+func preComputeJSONKey(name string) []byte {
+	if name == "" {
+		return nil
+	}
+	buf := make([]byte, 0, len(name)+4)
+	buf = append(buf, '"')
+	buf = append(buf, name...)
+	buf = append(buf, '"', ':')
+	return buf
+}
+
+func newRuleDef(sf reflect.StructField, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {
 	props := make(map[string]*RuleDef)
 	if properties != nil {
 		props = properties
 	}
+	var ordered []*RuleDef
+
+	// Parse JSON tag for name if needed
+	var fieldName string
+	var tagName string
+	if tag, ok := sf.Tag.Lookup("json"); ok {
+		parts := strings.Split(tag, ",")
+		if len(parts) > 0 && parts[0] != "" {
+			tagName = parts[0]
+		}
+	}
+	if tagName == "" {
+		tagName = sf.Name
+	}
+	fieldName = sf.Name
 
 	return &RuleDef{
-		typ:                  typ,
-		kind:                 kind,
-		field:                field,
-		fieldName:            fleldName,
+		typ:                  sf.Type,
+		kind:                 sf.Type.Kind(),
+		field:                tagName,
+		fieldName:            fieldName,
 		defStr:               defStr,
 		defVal:               defVal,
 		rules:                rules,
@@ -76,7 +115,16 @@ func newRuleDef(typ reflect.Type, kind reflect.Kind, field string, fleldName str
 		max:                  max,
 		item:                 items,
 		properties:           props,
+		orderedProps:         ordered,
 		additionalProperties: addProps,
+		accessor: fieldAccessor{
+			offset:    sf.Offset,
+			index:     sf.Index,
+			fieldType: sf.Type,
+			kind:      sf.Type.Kind(),
+			name:      sf.Name,
+		},
+		jsonKeyBytes: preComputeJSONKey(tagName),
 	}
 }
 
@@ -100,6 +148,7 @@ func (r *RuleDef) attach(name string, item *RuleDef) {
 
 	if r != nil {
 		r.properties[name] = item
+		r.orderedProps = append(r.orderedProps, item)
 	}
 }
 
@@ -189,20 +238,37 @@ func (r *RuleDef) findRules(rules []string, fallback string) string {
 }
 
 func getItemRuleDef(typ reflect.Type) *RuleDef {
-	return newRuleDef(typ, typ.Kind(), "", "", "", nil, nil, false, nil, nil, nil, nil)
+	// Create a dummy StructField to reuse newRuleDef
+	sf := reflect.StructField{
+		Type: typ,
+		Name: "",
+	}
+	return newRuleDef(sf, "", nil, nil, false, nil, nil, nil, nil)
 }
 
 type ruleDefMap map[string]RuleDef
 
 type schemaRules struct {
-	req       map[string]RuleDef
-	responses map[string]map[string]RuleDef
+	req        map[string]RuleDef
+	responses  map[string]map[string]RuleDef
+	schemaPool *sync.Pool
+	schemaType reflect.Type
 }
 
-func newSchemaRules() schemaRules {
+func newSchemaRules(typ reflect.Type) schemaRules {
+	var pool *sync.Pool
+	if typ != nil {
+		pool = &sync.Pool{
+			New: func() any {
+				return reflect.New(typ).Interface()
+			},
+		}
+	}
 	return schemaRules{
-		req:       make(map[string]RuleDef),
-		responses: make(map[string]map[string]RuleDef),
+		req:        make(map[string]RuleDef),
+		responses:  make(map[string]map[string]RuleDef),
+		schemaPool: pool,
+		schemaType: typ,
 	}
 }
 

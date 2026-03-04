@@ -59,12 +59,17 @@ func ValidateAndBind[T any](c Context) (*T, error) {
 
 func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	var schemaPtr *T
-	if shouldBind {
-		schemaPtr = new(T)
-	}
 
 	if c.rules() == nil {
 		return nil, newErrReport(RequestErr, schemaReq, "", "required", errors.New("schema not properly registered to route handler"))
+	}
+
+	if shouldBind {
+		if c.rules().schemaPool != nil {
+			schemaPtr = c.rules().schemaPool.Get().(*T)
+		} else {
+			schemaPtr = new(T)
+		}
 	}
 
 	if len(c.rules().req) == 0 {
@@ -108,7 +113,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	// Handle Paths
 	if pdef := c.rules().getReqRules(schemaPath); pdef != nil && len(pdef.properties) > 0 {
 		for _, def := range pdef.properties {
-			pv := c.r.PathValue(def.field)
+			pv := c.params.Get(def.field)
 			if err := doValidateStrAndBind(c, schemaPath, pv, def, shouldBind, reqStruct); err != nil {
 				errs = append(errs, err)
 			}

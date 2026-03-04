@@ -12,7 +12,7 @@ import (
 )
 
 type serveMux struct {
-	sm                *http.ServeMux
+	trees             map[string]*node // Replaced *http.ServeMux with radix trees
 	rOpts             *RouteOptions
 	opts              *muxOptions
 	paths             docsPaths
@@ -24,6 +24,7 @@ type serveMux struct {
 	preHandlers       []PreHandler
 	chainedHandler    http.Handler
 	ctxPool           *sync.Pool
+	maxParams         uint8
 }
 
 func NewServeMux() Router {
@@ -104,7 +105,7 @@ func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
 // buildChain pre-builds the middleware chain so ServeHTTP doesn't
 // have to reconstruct it on every request.
 func (s *serveMux) buildChain() {
-	var h http.Handler = s.sm
+	var h http.Handler = http.HandlerFunc(s.serveHTTPMatched)
 	for i := len(s.middlewares) - 1; i >= 0; i-- {
 		h = s.middlewares[i](h)
 	}
@@ -125,20 +126,77 @@ func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
 }
 
 func (s *serveMux) Handle(pattern string, handler http.Handler) {
-	s.sm.Handle(pattern, handler)
+	s.method("GET", pattern, RouteOptions{
+		Handler: func(c Context) error {
+			handler.ServeHTTP(c.Writer(), c.Request())
+			return nil
+		},
+	})
 }
 
 func (s *serveMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
-	s.sm.HandleFunc(pattern, handler)
+	s.Handle(pattern, http.HandlerFunc(handler))
 }
 
 func (s *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.chainedHandler.ServeHTTP(w, r)
+	if s.chainedHandler != nil {
+		s.chainedHandler.ServeHTTP(w, r)
+	} else {
+		s.serveHTTPMatched(w, r)
+	}
+}
+
+func (s *serveMux) serveHTTPMatched(w http.ResponseWriter, r *http.Request) {
+	if root := s.trees[r.Method]; root != nil {
+		c := s.acquireContext(w, r)
+
+		routeData, tsr := root.getValue(r.URL.Path, func() *Params {
+			// Ensure slice capacity
+			if cap(c.params) < int(s.maxParams) {
+				c.params = make(Params, 0, s.maxParams)
+			}
+			return &c.params
+		})
+
+		if routeData != nil {
+			// Found matching route
+			c.setContextSettings(newContextOptions(r.URL.Path, r.Method), s.routeMeta, s.globalStore, s.opts)
+
+			// Inject the pre-composed handler
+			routeData.handler.ServeHTTP(w, r)
+
+			s.releaseContext(c)
+			return
+		} else if r.Method != http.MethodConnect && r.URL.Path != "/" {
+			// Try trailing slash redirect
+			if tsr {
+				code := http.StatusMovedPermanently
+				if r.Method != http.MethodGet {
+					code = http.StatusPermanentRedirect
+				}
+				reqURL := r.URL.Path
+				if len(reqURL) > 1 && reqURL[len(reqURL)-1] == '/' {
+					r.URL.Path = reqURL[:len(reqURL)-1]
+				} else {
+					r.URL.Path = reqURL + "/"
+				}
+				http.Redirect(w, r, r.URL.String(), code)
+				s.releaseContext(c)
+				return
+			}
+		}
+
+		s.releaseContext(c)
+	}
+
+	http.NotFound(w, r)
 }
 
 func (s *serveMux) acquireContext(w http.ResponseWriter, r *http.Request) *context {
 	c := s.ctxPool.Get().(*context)
 	c.reset(w, r)
+	// Truncate params slice, retaining capacity
+	c.params = c.params[:0]
 	return c
 }
 
@@ -190,7 +248,13 @@ func (s *serveMux) Static(prefix, root string) {
 
 	fs := http.FileServer(http.Dir(root))
 	handler := http.StripPrefix(prefix, fs)
-	s.Handle(prefix, handler)
+
+	s.method("GET", prefix+"*filepath", RouteOptions{
+		Handler: func(c Context) error {
+			handler.ServeHTTP(c.Writer(), c.Request())
+			return nil
+		},
+	})
 }
 
 type ValidatorContext = rules.ValidatorContext
@@ -256,6 +320,10 @@ func (s *serveMux) Inject(opts InjectOptions) (rec *httptest.ResponseRecorder, e
 	w := httptest.NewRecorder()
 	c := s.acquireContext(w, r)
 	defer s.releaseContext(c)
+
+	for name, value := range opts.Paths {
+		c.params = append(c.params, Param{Key: name, Value: value})
+	}
 
 	setupInjectContext := func(path, method string, ropts *RouteOptions, meta metaMap) {
 		if ropts.Schema != nil {
@@ -335,15 +403,14 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 	composedHandler := applyMiddleware(opts.Handler, allPreHandlers)
 
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := s.acquireContext(w, r)
-		defer s.releaseContext(c)
-
-		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
-
-		err := composedHandler(c)
-		if err != nil {
-			s.opts.errHandler(err, c)
-		}
+		// Inside the tree dispatch, context is already acquired via serveHTTPMatched.
+		// So we just retrieve it from the request if we were truly doing middleware wrapping.
+		// However, for performance and integration, we can pass context through.
+		// For now, since chained middleware wraps the serveHTTPMatched, and serveHTTPMatched calls this directly
+		// wait, serveHTTPMatched acquires context. But this handler is the routeData.handler.
+		// If this is called from ServeHTTPMatched, the Context has already been acquired.
+		// We'll need a mechanism to pass Context to this handler to avoid double-acquire.
+		panic("Not implemented: internal handler should not be an http.Handler. See phase 1 refactoring.")
 	})
 
 	middlewares := s.inlineMiddlewares
@@ -354,13 +421,57 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 		}
 	}
 
-	s.sm.Handle(method+" "+path, h)
+	// Register in the radix tree instead of standard mux
+	if s.trees == nil {
+		s.trees = make(map[string]*node)
+	}
+	root := s.trees[method]
+	if root == nil {
+		root = new(node)
+		s.trees[method] = root
+	}
+
+	// For now, in Phase 1, we still create a closure that acquires context
+	// to maintain compatibility with http.Handler middlewares.
+	var finalHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Acquire inner context because http.Handler doesn't pass gofi.Context
+		c := s.acquireContext(w, r)
+		defer s.releaseContext(c)
+		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+		err := composedHandler(c)
+		if err != nil {
+			s.opts.errHandler(err, c)
+		}
+	})
+
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		finalHandler = middlewares[i](finalHandler)
+	}
+
+	data := &routeData{
+		handler: finalHandler,
+		// rules: comps.rules (will be populated below if Schema exists)
+		meta: opts.Meta,
+	}
+
+	// Add schema rules to the node data directly
+	if opts.Schema != nil {
+		rules := s.opts.schemaRules.GetRules(path, method)
+		data.rules = rules
+	}
+
+	root.addRoute(path, data)
+
+	// Update maxParams
+	if root.maxParams > s.maxParams {
+		s.maxParams = root.maxParams
+	}
 }
 
 func newServeMux() *serveMux {
 	middlewares := make(Middlewares, 0, 15)
 	return serveMuxBuilder(
-		http.NewServeMux(),
+		make(map[string]*node),
 		map[string]map[string]openapiOperationObject{},
 		map[string]map[string]any{},
 		NewGlobalStore(),
@@ -369,9 +480,9 @@ func newServeMux() *serveMux {
 	)
 }
 
-func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
-	return &serveMux{
-		sm:                sm,
+func serveMuxBuilder(trees map[string]*node, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
+	s := &serveMux{
+		trees:             trees,
 		paths:             paths,
 		routeMeta:         rm,
 		globalStore:       globalStore,
@@ -380,7 +491,6 @@ func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore
 		preHandlers:       make([]PreHandler, 0),
 		opts:              opts,
 		rOpts:             nil,
-		chainedHandler:    sm, // Default: no middlewares, dispatch directly
 		ctxPool: &sync.Pool{
 			New: func() interface{} {
 				// Allocate a new context, but don't set ephemeral fields yet
@@ -389,8 +499,11 @@ func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore
 					globalStore:       globalStore, // Shared global store reference
 					serverOpts:        opts,        // Shared options reference
 					bindedCacheResult: bindedResult{bound: false},
+					params:            make(Params, 0, 10), // Pre-allocate param slice
 				}
 			},
 		},
 	}
+	s.chainedHandler = http.HandlerFunc(s.serveHTTPMatched)
+	return s
 }

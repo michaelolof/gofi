@@ -26,7 +26,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	}
 
 	optsObj := initOpenapiOperationObject()
-	sRules := newSchemaRules()
+	sRules := newSchemaRules(strct)
 
 	optsObj.OperationId = info.OperationId
 	optsObj.method = info.Method
@@ -59,7 +59,8 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						continue
 					}
 
-					pruleDefs := newRuleDef(rqf.Type, kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
+					sfummy := reflect.StructField{Type: rqf.Type, Name: string(rqn)}
+					pruleDefs := newRuleDef(sfummy, "", nil, nil, false, nil, nil, nil, nil)
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
@@ -108,7 +109,8 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					}
 
 					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
-					pruleDefs := newRuleDef(rqf.Type, kind, string(rqn), rqf.Name, "", nil, nil, false, nil, nil, nil, nil)
+					sfummy := reflect.StructField{Type: rqf.Type, Name: string(rqn)}
+					pruleDefs := newRuleDef(sfummy, "", nil, nil, false, nil, nil, nil, nil)
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
@@ -231,7 +233,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defV
 		}
 	}
 
-	rtn := newRuleDef(sf.Type, sf.Type.Kind(), tagName, sf.Name, defStr, defVal, rules, required, max, nil, nil, nil)
+	rtn := newRuleDef(sf, defStr, defVal, rules, required, max, nil, nil, nil)
 	rtn.tags = tagList
 	return rtn
 }

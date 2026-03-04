@@ -316,7 +316,7 @@ func ServeDocs(r Router, opts DocsOptions) error {
 			continue
 		}
 
-		m.sm.HandleFunc(fmt.Sprintf("GET %s", path.Join(vopt.RoutePrefix, docsPath)), func(w http.ResponseWriter, r *http.Request) {
+		m.HandleFunc(path.Join(vopt.RoutePrefix, docsPath), func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("content-type", "application/json")
 			var d Docs
 			if vopt.UrlMatch == nil {
@@ -335,7 +335,7 @@ func ServeDocs(r Router, opts DocsOptions) error {
 			w.Write(ds)
 		})
 
-		m.sm.HandleFunc(fmt.Sprintf("GET %s", vopt.RoutePrefix), func(w http.ResponseWriter, r *http.Request) {
+		m.HandleFunc(vopt.RoutePrefix, func(w http.ResponseWriter, r *http.Request) {
 			tmplt := vopt.Template
 			if tmplt == nil {
 				// Make swagger the default template :(
