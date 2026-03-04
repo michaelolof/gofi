@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"fmt"
+	"iter"
 	"reflect"
 
 	"github.com/michaelolof/gofi/cont"
@@ -121,6 +122,42 @@ func (r *RuleDef) addProps(props *RuleDef) {
 
 	if r != nil {
 		r.additionalProperties = props
+	}
+}
+
+func (r *RuleDef) Walk() iter.Seq[*RuleDef] {
+	return func(yield func(*RuleDef) bool) {
+		if r == nil {
+			return
+		}
+
+		if !yield(r) {
+			return
+		}
+
+		if r.item != nil {
+			for child := range r.item.Walk() {
+				if !yield(child) {
+					return
+				}
+			}
+		}
+
+		if r.additionalProperties != nil {
+			for child := range r.additionalProperties.Walk() {
+				if !yield(child) {
+					return
+				}
+			}
+		}
+
+		for _, child := range r.properties {
+			for subChild := range child.Walk() {
+				if !yield(subChild) {
+					return
+				}
+			}
+		}
 	}
 }
 

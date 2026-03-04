@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 )
 
@@ -16,6 +17,8 @@ type ReadOnlyStore interface {
 	Get(key string) (any, bool)
 	// Returns the value set in the global store using the key passed. Panics if the value isn't found
 	TryGet(key string) any
+	// All returns an iterator over all keys and values in the store
+	All() iter.Seq2[string, any]
 }
 
 type GofiStore interface {
@@ -54,6 +57,16 @@ func (g *gofiStore) TryGet(key string) any {
 	}
 }
 
+func (g *gofiStore) All() iter.Seq2[string, any] {
+	return func(yield func(string, any) bool) {
+		for k, v := range g.m {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+
 type metaMap map[string]map[string]any
 
 type contextMeta struct {
@@ -68,8 +81,10 @@ type RouterMeta interface {
 	Route(path, method string) (any, bool)
 	TryRoute(path, method string) any
 	All() map[string]map[string]any
+	AllSeq() iter.Seq[MetaMapInfo]
 	Filter(fn func(path, method string) bool) map[string]map[string]any
 	FilterAsSlice(fn func(path, method string) bool) []MetaMapInfo
+	FilterSeq(fn func(path, method string) bool) iter.Seq[MetaMapInfo]
 }
 
 // Gets current meta for the current url and true if found. Returns false if not found
@@ -126,4 +141,30 @@ func (m metaMap) FilterAsSlice(fn func(path, method string) bool) []MetaMapInfo 
 	}
 
 	return r
+}
+
+func (m metaMap) AllSeq() iter.Seq[MetaMapInfo] {
+	return func(yield func(MetaMapInfo) bool) {
+		for p, v := range m {
+			for mt, vp := range v {
+				if !yield(MetaMapInfo{Path: p, Method: mt, MetaValue: vp}) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (m metaMap) FilterSeq(fn func(path, method string) bool) iter.Seq[MetaMapInfo] {
+	return func(yield func(MetaMapInfo) bool) {
+		for p, v := range m {
+			for mt, vp := range v {
+				if fn(p, mt) {
+					if !yield(MetaMapInfo{Path: p, Method: mt, MetaValue: vp}) {
+						return
+					}
+				}
+			}
+		}
+	}
 }
