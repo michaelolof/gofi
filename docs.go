@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"path"
 )
 
@@ -308,44 +307,54 @@ func ServeDocs(r Router, opts DocsOptions) error {
 		return errors.New("invalid server mux passed when serving docs")
 	}
 
-	var cerr error
-
 	for _, vopt := range opts.Views {
 
 		if vopt.RoutePrefix == "" {
 			continue
 		}
 
-		m.HandleFunc(path.Join(vopt.RoutePrefix, docsPath), func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("content-type", "application/json")
-			var d Docs
-			if vopt.UrlMatch == nil {
-				d = opts.getMatchingDocs(m, func(url string) bool { return true })
-			} else {
-				d = opts.getMatchingDocs(m, vopt.UrlMatch)
-			}
+		// Capture vopt for the closures
+		viewOpt := vopt
 
-			d.Components = vopt.Components
-			ds, err := json.Marshal(d)
-			if err != nil {
-				cerr = err
-				return
-			}
+		// Serve the OpenAPI spec JSON
+		m.Get(path.Join(viewOpt.RoutePrefix, docsPath), RouteOptions{
+			Handler: func(c Context) error {
+				var d Docs
+				if viewOpt.UrlMatch == nil {
+					d = opts.getMatchingDocs(m, func(url string) bool { return true })
+				} else {
+					d = opts.getMatchingDocs(m, viewOpt.UrlMatch)
+				}
 
-			w.Write(ds)
+				d.Components = viewOpt.Components
+				ds, err := json.Marshal(d)
+				if err != nil {
+					return err
+				}
+
+				ctx := c.(*context)
+				ctx.fctx.Response.Header.Set("Content-Type", "application/json")
+				ctx.fctx.Response.SetStatusCode(200)
+				ctx.fctx.Response.SetBody(ds)
+				return nil
+			},
 		})
 
-		m.HandleFunc(vopt.RoutePrefix, func(w http.ResponseWriter, r *http.Request) {
-			tmplt := vopt.Template
-			if tmplt == nil {
-				// Make swagger the default template :(
-				tmplt = SwaggerTemplate()
-			}
-			w.Header().Set("content-type", "text/html")
-			w.Write(tmplt.HTML(path.Join(vopt.RoutePrefix, docsPath)))
+		// Serve the docs UI HTML
+		m.Get(viewOpt.RoutePrefix, RouteOptions{
+			Handler: func(c Context) error {
+				tmplt := viewOpt.Template
+				if tmplt == nil {
+					tmplt = SwaggerTemplate()
+				}
+				ctx := c.(*context)
+				ctx.fctx.Response.Header.Set("Content-Type", "text/html")
+				ctx.fctx.Response.SetStatusCode(200)
+				ctx.fctx.Response.SetBody(tmplt.HTML(path.Join(viewOpt.RoutePrefix, docsPath)))
+				return nil
+			},
 		})
-
 	}
 
-	return cerr
+	return nil
 }

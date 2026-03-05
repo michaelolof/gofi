@@ -147,7 +147,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	}
 
 	var data testSchemaBody
-	err = json.Unmarshal(resp.Body.Bytes(), &data)
+	err = json.Unmarshal(resp.Body, &data)
 	if err != nil {
 		log.Fatalln(err)
 	}

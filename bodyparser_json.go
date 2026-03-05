@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net/http"
 	"reflect"
 	"slices"
 	"strconv"
@@ -46,7 +45,9 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		bsMax = 1048576 // defaultReqSize
 	}
 
-	body = http.MaxBytesReader(opts.Context.Writer(), body, bsMax)
+	// Limit body size without depending on net/http
+	limitedBody := io.NopCloser(io.LimitReader(body, bsMax))
+	body = limitedBody
 
 	buf := jsonBodyPool.Get().(*bytes.Buffer)
 	buf.Reset()

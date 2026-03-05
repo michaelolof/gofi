@@ -89,7 +89,7 @@ type RouterMeta interface {
 
 // Gets current meta for the current url and true if found. Returns false if not found
 func (m *contextMeta) This() (any, bool) {
-	v, f := m.c.routeMeta[m.c.r.URL.String()][strings.ToLower(m.c.r.Method)]
+	v, f := m.c.routeMeta[m.c.opts.Pattern][strings.ToLower(m.c.opts.Method)]
 	return v, f
 }
 

@@ -1,10 +1,5 @@
 package gofi
 
-import (
-	"net/http"
-	"net/http/httptest"
-)
-
 type Router interface {
 	Connect(pattern string, o RouteOptions)
 	Delete(pattern string, o RouteOptions)
@@ -16,10 +11,11 @@ type Router interface {
 	Put(pattern string, o RouteOptions)
 	Trace(pattern string, o RouteOptions)
 
-	// Method atss route for pattern that matches the method http method
+	// Method adds a route for the pattern that matches the given HTTP method
 	Method(method string, pattern string, opts RouteOptions)
+
 	// With adds inline middlewares for an endpoint handler
-	With(middlewares ...func(http.Handler) http.Handler) Router
+	With(middlewares ...MiddlewareFunc) Router
 
 	// Route mounts a sub-Router along a `pattern` string.
 	Route(pattern string, fn func(r Router)) Router
@@ -28,26 +24,26 @@ type Router interface {
 	// with a fresh middleware stack for the inline router
 	Group(fn func(r Router)) Router
 
-	// Mount attaches another http.Handler or chi Router as a subrouter along a routing
-	// path. It's very useful to split up a large API as many independent routers and
-	// compose them as a single service using Mount
-	// Mount(pattern string, handler http.Handler)
-
 	// Use appends one or more middleware onto the router stack
-	Use(middlewares ...func(http.Handler) http.Handler)
+	Use(middlewares ...MiddlewareFunc)
+
 	// UseErrorHandler sets the general error handler for the router
 	UseErrorHandler(func(err error, c Context))
+
 	// UsePreHandler appends one or more pre-handler onto the router stack
 	UsePreHandler(h ...func(h HandlerFunc) HandlerFunc)
 
-	Handle(pattern string, handler http.Handler)
-	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+	// Inject allows you to inject a request into the router and get a response.
+	// Used for testing routes, requests and responses.
+	Inject(opts InjectOptions) (*InjectResponse, error)
 
-	// ServeHTTP implements the http.Handler interface
-	ServeHTTP(w http.ResponseWriter, r *http.Request)
+	// Test dispatches a request through the full route tree (including middleware,
+	// pre-handlers, and 404 handling) and returns the response. This is the
+	// primary way to test routing behavior from external packages.
+	Test(method, path string) *InjectResponse
 
-	// Inject allows you to inject a request into the router and get a response. Used for testing routes requests and responses
-	Inject(opts InjectOptions) (*httptest.ResponseRecorder, error)
+	// Listen starts the server on the given address
+	Listen(addr string) error
 
 	GlobalStore() GofiStore
 	Meta() RouterMeta

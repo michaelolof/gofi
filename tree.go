@@ -1,7 +1,5 @@
 package gofi
 
-import "net/http"
-
 type nodeType uint8
 
 const (
@@ -12,9 +10,9 @@ const (
 )
 
 type routeData struct {
-	handler http.Handler
-	rules   *schemaRules
-	meta    any
+	handlers []HandlerFunc
+	rules    *schemaRules
+	meta     any
 }
 
 type node struct {

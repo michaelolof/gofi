@@ -1,7 +1,9 @@
 package gofi
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -87,7 +89,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	// Handle Headers
 	if pdef := c.rules().getReqRules(schemaHeaders); pdef != nil && len(pdef.properties) > 0 {
 		for _, def := range pdef.properties {
-			hv := c.r.Header.Get(def.field)
+			hv := c.headerGet(def.field)
 			if err := doValidateStrAndBind(c, schemaHeaders, hv, def, shouldBind, reqStruct); err != nil {
 				errs = append(errs, err)
 			}
@@ -100,7 +102,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	// Handle queries
 	if pdef := c.rules().getReqRules(schemaQuery); pdef != nil && len(pdef.properties) > 0 {
 		for _, def := range pdef.properties {
-			qv := c.r.URL.Query().Get(def.field)
+			qv := c.queryGet(def.field)
 			if err := doValidateStrAndBind(c, schemaQuery, qv, def, shouldBind, reqStruct); err != nil {
 				errs = append(errs, err)
 			}
@@ -126,7 +128,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	// Handle Cookies
 	if pdef := c.rules().getReqRules(schemaCookies); pdef != nil && len(pdef.properties) > 0 {
 		for _, def := range pdef.properties {
-			cv, err := c.r.Cookie(def.field)
+			cv, err := c.cookieGet(def.field)
 			if def.required && err == http.ErrNoCookie {
 				errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "required", err))
 				continue
@@ -193,12 +195,15 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 		return schemaPtr, nil
 	}
 
-	body := c.r.Body
-	if body == nil && pdef.required {
+	bodyBytes := c.Body()
+	if len(bodyBytes) == 0 && pdef.required {
 		return schemaPtr, newErrReport(RequestErr, schemaBody, "", "required", errors.New("request body is required"))
-	} else if body == nil {
+	} else if len(bodyBytes) == 0 {
 		return schemaPtr, nil
 	}
+
+	// Create an io.ReadCloser from the body bytes
+	body := io.NopCloser(bytes.NewReader(bodyBytes))
 
 	contentType := c.rules().reqContent()
 	sz, err := c.serverOpts.getSerializer(contentType)
@@ -269,7 +274,7 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 		if rv.Type().ConvertibleTo(sf.Type()) {
 			sf.Set(rv.Convert(sf.Type()))
 		} else {
-			slog.ErrorContext(c.r.Context(), newErrReport(ResponseErr, schemaBody, def.field, "typeMismatch",
+			slog.Error(newErrReport(ResponseErr, schemaBody, def.field, "typeMismatch",
 				errors.New("cannot convert "+rv.Type().String()+" to "+sf.Type().String())).Error())
 		}
 	}

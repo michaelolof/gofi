@@ -704,7 +704,7 @@ func TestResponse_Cookies(t *testing.T) {
 		})
 		assert.Nil(t, err)
 
-		cookies := rec.Result().Cookies()
+		cookies := rec.Cookies()
 		if len(cookies) == 0 {
 			t.Fatal("Expected cookies to be set")
 		}
@@ -781,7 +781,7 @@ func TestResponseBody_RawString(t *testing.T) {
 		Handler: &handler,
 	})
 	assert.Nil(t, err)
-	assert.Equal(t, "\"response-value\"", rec.Body.String()) // Should be JSON quoted
+	assert.Equal(t, "\"response-value\"", string(rec.Body)) // Should be JSON quoted
 }
 
 func TestRequestBody_Bytes(t *testing.T) {
@@ -846,7 +846,7 @@ func TestResponseBody_Bytes(t *testing.T) {
 
 	assert.Nil(t, err)
 	// Gofi encoding iterates slice and writes array: [65,66,67]
-	assert.Equal(t, "[65,66,67]", rec.Body.String())
+	assert.Equal(t, "[65,66,67]", string(rec.Body))
 }
 
 func TestBody_Map(t *testing.T) {

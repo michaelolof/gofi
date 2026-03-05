@@ -2,7 +2,6 @@ package gofi
 
 import (
 	"errors"
-	"net/http"
 	"strings"
 	"testing"
 )
@@ -42,8 +41,8 @@ func TestSafeConvert_PreventsPanic(t *testing.T) {
 	}
 
 	// We expect a non-200 code because validation/parsing should fail
-	if w.Code == http.StatusOK {
-		t.Errorf("Expected error status for mismatched type, got 200. Body: %s", w.Body.String())
+	if w.StatusCode == 200 {
+		t.Errorf("Expected error status for mismatched type, got 200. Body: %s", string(w.Body))
 	}
 }
 
@@ -67,8 +66,8 @@ func TestInject_RecoversFromPanic(t *testing.T) {
 		t.Error("Expected error from panic recovery, got nil")
 	}
 
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 status code from panic, got %d", w.Code)
+	if w.StatusCode != 500 {
+		t.Errorf("Expected 500 status code from panic, got %d", w.StatusCode)
 	}
 }
 
@@ -114,12 +113,12 @@ func _TestRecursionLimit(t *testing.T) {
 	}
 
 	// Should fail with recursion error
-	if w.Code == http.StatusOK {
+	if w.StatusCode == 200 {
 		t.Error("Expected recursion limit error, got 200 OK")
 	}
 
-	if !strings.Contains(w.Body.String(), "max recursion depth exceeded") {
-		t.Errorf("Expected recursion error message, got: %s", w.Body.String())
+	if !strings.Contains(string(w.Body), "max recursion depth exceeded") {
+		t.Errorf("Expected recursion error message, got: %s", string(w.Body))
 	}
 }
 

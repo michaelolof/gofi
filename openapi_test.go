@@ -1,12 +1,16 @@
 package gofi
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
-	"net/http/httptest"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 func TestOpenAPIGeneration(t *testing.T) {
@@ -225,15 +229,18 @@ func TestOpenAPIServing(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("OpenAPIJSON", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/docs/q/openapi", nil)
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
+		m := r.(*serveMux)
+		var fctx fasthttp.RequestCtx
+		var rawReq bytes.Buffer
+		rawReq.WriteString("GET /docs/q/openapi HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
+		m.handleFastHTTP(&fctx)
 
-		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+		assert.Equal(t, 200, fctx.Response.StatusCode())
+		assert.Equal(t, "application/json", string(fctx.Response.Header.Peek("Content-Type")))
 
 		var doc Docs
-		err := json.Unmarshal(w.Body.Bytes(), &doc)
+		err := json.Unmarshal(fctx.Response.Body(), &doc)
 		require.NoError(t, err)
 
 		assert.Equal(t, "3.0.3", doc.OpenApi)
@@ -266,13 +273,17 @@ func TestOpenAPIServing(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			req := httptest.NewRequest("GET", "/docs", nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+			m := r.(*serveMux)
+			var fctx fasthttp.RequestCtx
+			var rawReq bytes.Buffer
+			rawReq.WriteString("GET /docs HTTP/1.1\r\nHost: localhost\r\n\r\n")
+			fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
+			m.handleFastHTTP(&fctx)
 
-			assert.Equal(t, 200, w.Code)
-			assert.Equal(t, "text/html", w.Header().Get("Content-Type"))
-			assert.Contains(t, w.Body.String(), tt.contains)
+			assert.Equal(t, 200, fctx.Response.StatusCode())
+			assert.Equal(t, "text/html", string(fctx.Response.Header.Peek("Content-Type")))
+			assert.True(t, strings.Contains(string(fctx.Response.Body()), tt.contains),
+				fmt.Sprintf("Expected body to contain %q", tt.contains))
 		})
 	}
 }

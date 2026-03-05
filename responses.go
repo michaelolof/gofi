@@ -68,12 +68,9 @@ func (c *context) Send(code int, obj any) error {
 		return err
 	}
 
-	c.w.Header().Set("Content-Type", string(contentType))
-	c.w.WriteHeader(code)
-	_, err = c.w.Write(bs)
-	if err != nil {
-		return newErrReport(RequestErr, schemaBody, "", "writer", err)
-	}
+	c.fctx.Response.Header.Set("Content-Type", string(contentType))
+	c.fctx.Response.SetStatusCode(code)
+	c.fctx.Response.SetBody(bs)
 
 	return nil
 }
@@ -118,7 +115,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				return err
 			}
 
-			c.w.Header().Set(key, val)
+			c.fctx.Response.Header.Set(key, val)
 			return nil
 		}
 
@@ -142,7 +139,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 					return err
 				}
 
-				c.w.Header().Set(key, fmt.Sprintf("%v", hv))
+				c.fctx.Response.Header.Set(key, fmt.Sprintf("%v", hv))
 
 			case val.format == utils.TimeObjectFormat:
 				switch hf.Kind() {
@@ -157,7 +154,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return err
 					}
 
-					c.w.Header().Set(key, tv.Format(val.pattern))
+					c.fctx.Response.Header.Set(key, tv.Format(val.pattern))
 
 				case reflect.Struct:
 					tv, ok := hv.(time.Time)
@@ -170,7 +167,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return err
 					}
 
-					c.w.Header().Set(key, tv.Format(val.pattern))
+					c.fctx.Response.Header.Set(key, tv.Format(val.pattern))
 				}
 			}
 		}
@@ -218,7 +215,9 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 			if err != nil {
 				return err
 			}
-			http.SetCookie(c.w, &http.Cookie{Name: key, Value: fmt.Sprintf("%v", cv)})
+			// Set cookie via fasthttp
+			cookie := &http.Cookie{Name: key, Value: fmt.Sprintf("%v", cv)}
+			c.fctx.Response.Header.Add("Set-Cookie", cookie.String())
 
 		case val.format == utils.CookieObjectFormat:
 			switch cf.Kind() {
@@ -238,7 +237,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return err
 				}
 
-				http.SetCookie(c.w, cook)
+				c.fctx.Response.Header.Add("Set-Cookie", cook.String())
 			case reflect.Struct:
 				cook, ok := cv.(http.Cookie)
 				if !ok {
@@ -250,7 +249,7 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return err
 				}
 
-				http.SetCookie(c.w, &cook)
+				c.fctx.Response.Header.Add("Set-Cookie", cook.String())
 			}
 		}
 	}

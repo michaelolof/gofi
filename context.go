@@ -1,11 +1,11 @@
 package gofi
 
 import (
-	"io"
 	"net/http"
 	"reflect"
 
 	"github.com/michaelolof/gofi/utils"
+	"github.com/valyala/fasthttp"
 )
 
 type bindedResult struct {
@@ -15,10 +15,10 @@ type bindedResult struct {
 }
 
 type Context interface {
-	// Returns the http writer instance for the request
-	Writer() http.ResponseWriter
-	// Returns the http request instance for the request
-	Request() *http.Request
+	// Writer returns a ResponseWriter for backward compatibility (implements http.ResponseWriter)
+	Writer() ResponseWriter
+	// Request returns a Request adapter for backward compatibility
+	Request() *Request
 	// Access global store defined on the server router instance
 	GlobalStore() ReadOnlyStore
 	// Access route context data store. Useful for passing and retrieving during a request lifetime
@@ -27,12 +27,23 @@ type Context interface {
 	Meta() ContextMeta
 	// Sends a schema response object for the given status code
 	Send(code int, obj any) error
-
 	SendString(code int, s string) error
-
 	SendBytes(code int, b []byte) error
-
 	GetSchemaRules(pattern, method string) any
+	// Next calls the next handler in the middleware chain
+	Next() error
+	// Param returns the named path parameter value
+	Param(name string) string
+	// Query returns the query parameter value
+	Query(name string) string
+	// HeaderVal returns the request header value
+	HeaderVal(name string) string
+	// Body returns the raw request body bytes
+	Body() []byte
+	// Path returns the request URL path
+	Path() string
+	// Method returns the HTTP method
+	Method() string
 }
 
 type contextOptions struct {
@@ -45,29 +56,30 @@ func newContextOptions(patt, method string) contextOptions {
 }
 
 type context struct {
-	w    http.ResponseWriter
-	r    *http.Request
-	opts contextOptions
-	// rules             *schemaRules
+	fctx              *fasthttp.RequestCtx
+	opts              contextOptions
 	routeMeta         metaMap
 	globalStore       ReadOnlyStore
 	dataStore         *gofiStore
 	serverOpts        *muxOptions
 	bindedCacheResult bindedResult
 	params            Params
+	handlers          []HandlerFunc
+	handlerIdx        int
+	rw                *responseWriter // cached response writer adapter
+	req               *Request        // cached request adapter
 }
 
-func newContext(w http.ResponseWriter, r *http.Request) *context {
+func newContext() *context {
 	return &context{
-		w:                 w,
-		r:                 r,
 		routeMeta:         map[string]map[string]any{},
 		serverOpts:        defaultMuxOptions(),
 		bindedCacheResult: bindedResult{bound: false},
+		params:            make(Params, 0, 10),
 	}
 }
 
-func (c *context) reset(w http.ResponseWriter, r *http.Request) {
+func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	if c.bindedCacheResult.bound && c.bindedCacheResult.val != nil {
 		if rules := c.rules(); rules != nil && rules.schemaPool != nil {
 			// Zero out the struct before returning it to the pool
@@ -76,22 +88,30 @@ func (c *context) reset(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	c.w = w
-	c.r = r
+	c.fctx = fctx
 	c.opts = contextOptions{}
 	c.routeMeta = nil
 	c.dataStore = nil // Lazy: only allocate on first DataStore() access
 	c.bindedCacheResult = bindedResult{bound: false}
-	// Truncate params slice, retaining capacity
 	c.params = c.params[:0]
+	c.handlers = nil
+	c.handlerIdx = -1
+	c.rw = nil
+	c.req = nil
 }
 
-func (c *context) Writer() http.ResponseWriter {
-	return c.w
+func (c *context) Writer() ResponseWriter {
+	if c.rw == nil {
+		c.rw = newResponseWriter(c.fctx)
+	}
+	return c.rw
 }
 
-func (c *context) Request() *http.Request {
-	return c.r
+func (c *context) Request() *Request {
+	if c.req == nil {
+		c.req = newRequest(c.fctx)
+	}
+	return c.req
 }
 
 func (c *context) GlobalStore() ReadOnlyStore {
@@ -115,22 +135,48 @@ func (c *context) GetSchemaRules(pattern, method string) any {
 }
 
 func (c *context) SendString(code int, s string) error {
-	if h := c.w.Header(); h != nil {
-		h.Set("Content-Type", "text/plain; charset=utf-8")
-	}
-	c.w.WriteHeader(code)
-	if sw, ok := c.w.(io.StringWriter); ok {
-		_, err := sw.WriteString(s)
-		return err
-	}
-	_, err := c.w.Write(utils.StringToBytes(s))
-	return err
+	c.fctx.Response.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	c.fctx.Response.SetStatusCode(code)
+	c.fctx.Response.SetBodyString(s)
+	return nil
 }
 
 func (c *context) SendBytes(code int, b []byte) error {
-	c.w.WriteHeader(code)
-	_, err := c.w.Write(b)
-	return err
+	c.fctx.Response.SetStatusCode(code)
+	c.fctx.Response.SetBody(b)
+	return nil
+}
+
+func (c *context) Next() error {
+	c.handlerIdx++
+	if c.handlerIdx < len(c.handlers) {
+		return c.handlers[c.handlerIdx](c)
+	}
+	return nil
+}
+
+func (c *context) Param(name string) string {
+	return c.params.Get(name)
+}
+
+func (c *context) Query(name string) string {
+	return string(c.fctx.QueryArgs().Peek(name))
+}
+
+func (c *context) HeaderVal(name string) string {
+	return string(c.fctx.Request.Header.Peek(name))
+}
+
+func (c *context) Body() []byte {
+	return c.fctx.PostBody()
+}
+
+func (c *context) Path() string {
+	return string(c.fctx.Path())
+}
+
+func (c *context) Method() string {
+	return string(c.fctx.Method())
 }
 
 func (c *context) setContextSettings(opts contextOptions, routeMeta metaMap, globalStore GofiStore, serverOpts *muxOptions) {
@@ -142,6 +188,28 @@ func (c *context) setContextSettings(opts contextOptions, routeMeta metaMap, glo
 
 func (c *context) rules() *schemaRules {
 	return c.serverOpts.schemaRules.GetRules(c.opts.Pattern, c.opts.Method)
+}
+
+// headerGet returns a request header value (used internally by requests.go)
+func (c *context) headerGet(name string) string {
+	return string(c.fctx.Request.Header.Peek(name))
+}
+
+// queryGet returns a query param value (used internally by requests.go)
+func (c *context) queryGet(name string) string {
+	return string(c.fctx.QueryArgs().Peek(name))
+}
+
+// cookieGet returns a request cookie (used internally by requests.go)
+func (c *context) cookieGet(name string) (*http.Cookie, error) {
+	val := c.fctx.Request.Header.Cookie(name)
+	if len(val) == 0 {
+		return nil, http.ErrNoCookie
+	}
+	return &http.Cookie{
+		Name:  name,
+		Value: string(val),
+	}, nil
 }
 
 type walkFinishStatus struct{}
