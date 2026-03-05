@@ -6,13 +6,12 @@ Gofi is an openapi3 schema-based HTTP router for Golang.
 
 - **Schema-Based Routing**: Define routes with type-safe schemas using Go structs.
 - **Automatic Validation**: Request and response validation based on your schema definitions.
-- **Fast Performance**: Designed to be performant with `fastjson` and optimized reflection logic.
+- **Fast Performance**: Uses `valyala/fasthttp` for HTTP and `valyala/fastjson` for optimized JSON encoding.
 - **Developer Friendly**: Simple, intuitive API for defining routes and handlers.
 - **OpenAPI Documentation**: Automatic API documentation generation with support for multiple UI providers (StopLight, Swagger, RapidDoc, Redocly, Scalar).
 - **Customizable**: Add custom validators, body parsers, and type specifications.
 - **Error Handling**: Built-in error handling with customizable handlers.
-- **Error Handling**: Built-in error handling with customizable handlers.
-- **Middleware Support**: Easy integration with standard `http.Handler` middlewares.
+- **Middleware Support**: Context-aware middleware via `MiddlewareFunc`.
 
 
 ## Installation
@@ -95,7 +94,7 @@ func main() {
 	})
 
 	log.Println("Server listening on :8080")
-	http.ListenAndServe(":8080", r)
+	r.Listen(":8080")
 }
 ```
 
@@ -216,11 +215,9 @@ gofi.DefineHandler(gofi.RouteOptions{
 Add global middlewares using `Use()`:
 
 ```go
-r.Use(func(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Println("Request received")
-        next.ServeHTTP(w, r)
-    })
+r.Use(func(c gofi.Context) error {
+    log.Println("Request received")
+    return c.Next()
 })
 ```
 
@@ -442,7 +439,7 @@ Gofi provides a convenient way to unit test your handlers without starting a ful
 
 ### The `Inject` Method
 
-The `Inject` method allows you to simulate an HTTP request against your router and returns a standard `httptest.ResponseRecorder`.
+The `Inject` method allows you to simulate an HTTP request against your router and returns an `*InjectResponse`.
 
 It is designed to test handlers in isolation. You pass the `RouteOptions` directly to `Inject`, so you don't even need to register the route on the mux to test it.
 
@@ -460,8 +457,8 @@ func TestMyHandler(t *testing.T) {
     })
 
     // 2. Use Inject to test
-    // Returns *httptest.ResponseRecorder
-    w, err := r.Inject(gofi.InjectOptions{
+    // Returns *InjectResponse
+    resp, err := r.Inject(gofi.InjectOptions{
         Method: "GET",
         Path:   "/test-path",
         Handler: &myHandlerOpts, // Pass the RouteOptions directly (no need to register)
@@ -477,16 +474,32 @@ func TestMyHandler(t *testing.T) {
     }
 
     // 3. Assert results
-    if w.Code != 200 {
-        t.Errorf("Expected 200, got %d", w.Code)
-    }
-    if w.Body.String() != "\"success\"" {
-        t.Errorf("Unexpected body: %s", w.Body.String())
+    if resp.StatusCode != 200 {
+        t.Errorf("Expected 200, got %d", resp.StatusCode)
     }
 }
 ```
 
-### InjectOptions
+### Lightweight Testing with `Test()`
+
+For quick tests on registered routes, use the `Test()` shorthand:
+
+```go
+func TestPing(t *testing.T) {
+    r := gofi.NewServeMux()
+    r.Get("/ping", gofi.RouteOptions{
+        Handler: func(c gofi.Context) error {
+            return c.SendString(200, "pong")
+        },
+    })
+
+    resp, err := r.Test("GET", "/ping")
+    assert.NoError(t, err)
+    assert.Equal(t, 200, resp.StatusCode)
+}
+```
+
+### InjectOptions & InjectResponse
 
 ```go
 type InjectOptions struct {
@@ -498,6 +511,12 @@ type InjectOptions struct {
     Cookies []http.Cookie       // Cookies
     Body    io.Reader           // Request Body
     Handler *RouteOptions       // The Handler definition to test
+}
+
+type InjectResponse struct {
+    StatusCode int
+    HeaderMap  http.Header
+    Body       []byte
 }
 ```
 

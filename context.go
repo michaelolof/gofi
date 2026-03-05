@@ -38,12 +38,16 @@ type Context interface {
 	Query(name string) string
 	// HeaderVal returns the request header value
 	HeaderVal(name string) string
+	// HeaderBytes returns the request header value as raw bytes (zero-copy from fasthttp)
+	HeaderBytes(name string) []byte
 	// Body returns the raw request body bytes
 	Body() []byte
 	// Path returns the request URL path
 	Path() string
 	// Method returns the HTTP method
 	Method() string
+	// QueryBytes returns the query parameter value as raw bytes (zero-copy from fasthttp)
+	QueryBytes(name string) []byte
 }
 
 type contextOptions struct {
@@ -169,6 +173,14 @@ func (c *context) HeaderVal(name string) string {
 
 func (c *context) Body() []byte {
 	return c.fctx.PostBody()
+}
+
+func (c *context) QueryBytes(name string) []byte {
+	return c.fctx.QueryArgs().Peek(name)
+}
+
+func (c *context) HeaderBytes(name string) []byte {
+	return c.fctx.Request.Header.Peek(name)
 }
 
 func (c *context) Path() string {

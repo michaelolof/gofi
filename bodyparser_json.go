@@ -135,13 +135,18 @@ func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 		return nil, newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
 	}
 
-	var buff bytes.Buffer
-	buff.Reset()
-	if err := j.encodeFieldValue(opts.Context, &buff, opts.Body, opts.SchemaRules, nil); err != nil {
+	buf := jsonBodyPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if err := j.encodeFieldValue(opts.Context, buf, opts.Body, opts.SchemaRules, nil); err != nil {
+		jsonBodyPool.Put(buf)
 		return nil, newErrReport(ResponseErr, schemaBody, "", "encoder", err)
 	}
 
-	return buff.Bytes(), nil
+	// Copy result before returning buffer to pool
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	jsonBodyPool.Put(buf)
+	return result, nil
 }
 
 func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
@@ -325,7 +330,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 			}
 
 			for {
-				_keys := append(keys, fmt.Sprintf("%d", i))
+				_keys := append(keys, strconv.Itoa(i))
 				_kp := strings.Join(_keys, ".")
 				if !pv.Exist(_keys...) {
 					if rules.required && i == 0 {
@@ -347,7 +352,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				}
 
 				fopts := j.getFieldOptions(opts, &istrct, rules.item)
-				_, err := j.walkStruct(pv, schemaBody, fopts, append(keys, fmt.Sprintf("%d", i)))
+				_, err := j.walkStruct(pv, schemaBody, fopts, append(keys, strconv.Itoa(i)))
 				if err != nil {
 					return nil, err
 				}

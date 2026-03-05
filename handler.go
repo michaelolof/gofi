@@ -48,8 +48,14 @@ type defaultErrResp struct {
 func defaultErrorHandler(err error, c Context) {
 	// Write JSON error response directly without encoding/json
 	msg := err.Error()
-	buf := make([]byte, 0, 128)
-	buf = append(buf, `{"status":"error","statusCode":500,"message":"`...)
+	var buf []byte
+	if prefix, ok := preComputedErrPrefix[500]; ok {
+		buf = make([]byte, 0, len(prefix)+len(msg)+4)
+		buf = append(buf, prefix...)
+	} else {
+		buf = make([]byte, 0, 128)
+		buf = append(buf, `{"status":"error","statusCode":500,"message":"`...)
+	}
 	// Simple JSON string escape for the error message
 	for i := 0; i < len(msg); i++ {
 		switch msg[i] {

@@ -6,8 +6,13 @@ import (
 	"strings"
 )
 
+type kv struct {
+	key string
+	val any
+}
+
 type gofiStore struct {
-	m map[string]any
+	items []kv
 }
 
 type ReadOnlyStore interface {
@@ -28,39 +33,54 @@ type GofiStore interface {
 }
 
 func NewGlobalStore() *gofiStore {
-	return &gofiStore{m: map[string]any{}}
+	return &gofiStore{items: make([]kv, 0, 8)}
 }
 
 func NewDataStore() *gofiStore {
-	return &gofiStore{m: map[string]any{}}
+	return &gofiStore{items: make([]kv, 0, 4)}
 }
 
 func (g *gofiStore) Has(key string) bool {
-	_, found := g.m[key]
-	return found
+	for i := range g.items {
+		if g.items[i].key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gofiStore) Set(key string, val any) {
-	g.m[key] = val
+	for i := range g.items {
+		if g.items[i].key == key {
+			g.items[i].val = val
+			return
+		}
+	}
+	g.items = append(g.items, kv{key: key, val: val})
 }
 
 func (g *gofiStore) Get(key string) (any, bool) {
-	v, found := g.m[key]
-	return v, found
+	for i := range g.items {
+		if g.items[i].key == key {
+			return g.items[i].val, true
+		}
+	}
+	return nil, false
 }
 
 func (g *gofiStore) TryGet(key string) any {
-	if v, found := g.m[key]; !found {
-		panic(fmt.Sprintf("global value with key %s doesn't exist on context object", key))
-	} else {
-		return v
+	for i := range g.items {
+		if g.items[i].key == key {
+			return g.items[i].val
+		}
 	}
+	panic(fmt.Sprintf("global value with key %s doesn't exist on context object", key))
 }
 
 func (g *gofiStore) All() iter.Seq2[string, any] {
 	return func(yield func(string, any) bool) {
-		for k, v := range g.m {
-			if !yield(k, v) {
+		for _, item := range g.items {
+			if !yield(item.key, item.val) {
 				return
 			}
 		}
