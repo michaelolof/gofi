@@ -32,7 +32,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{
 			OperationId: "getUser",
 			Summary:     "Get user detail",
@@ -105,7 +105,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{})
 		body := cs.specs.bodySchema
 
@@ -140,7 +140,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{})
 
 		assert.Contains(t, cs.specs.responsesSchema, "Ok")
@@ -168,7 +168,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{Method: "POST", Url: "/form"})
 		cs.specs.normalize("POST", "/form")
 
@@ -181,7 +181,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 	})
 
 	t.Run("CustomSpecs", func(t *testing.T) {
-		r := newServeMux()
+		r := newRouter()
 		r.RegisterSpec(&vendorSpec{})
 
 		type testSchema struct {
@@ -211,7 +211,7 @@ func TestOpenAPIServing(t *testing.T) {
 		}
 	}
 
-	r := NewServeMux()
+	r := NewRouter()
 	r.Get("/users", RouteOptions{
 		Schema: &getUsersSchema{},
 		Handler: func(c Context) error {
@@ -262,7 +262,7 @@ func TestOpenAPIServing(t *testing.T) {
 
 	for _, tt := range templates {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewServeMux()
+			r := NewRouter()
 			err := ServeDocs(r, DocsOptions{
 				Views: []DocsView{
 					{

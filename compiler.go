@@ -154,7 +154,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	}
 }
 
-func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, tagName string, defVal any) *RuleDef {
+func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any) *RuleDef {
 	supportedTags := []string{
 		"json",
 		"validate",

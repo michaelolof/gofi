@@ -17,7 +17,7 @@ type MismatchedTypeSchema struct {
 
 // Test SafeConvert prevents panic on type mismatch
 func TestSafeConvert_PreventsPanic(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 	handler := DefineHandler(RouteOptions{
 		Schema: &MismatchedTypeSchema{},
 		Handler: func(c Context) error {
@@ -48,7 +48,7 @@ func TestSafeConvert_PreventsPanic(t *testing.T) {
 
 // Test Inject recovers from panic
 func TestInject_RecoversFromPanic(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 	handler := DefineHandler(RouteOptions{
 		Handler: func(c Context) error {
 			panic("something went wrong")
@@ -83,47 +83,8 @@ type RecursiveSchema struct {
 	}
 }
 
-func _TestRecursionLimit(t *testing.T) {
-	r := NewServeMux()
-
-	// Register a body parser with a small recursion limit
-	r.RegisterBodyParser(&JSONBodyParser{MaxDepth: 5})
-
-	handler := DefineHandler(RouteOptions{
-		Schema: &RecursiveSchema{},
-		Handler: func(c Context) error {
-			_, err := ValidateAndBind[RecursiveSchema](c)
-			return err
-		},
-	})
-
-	// Create a deeply nested JSON that exceeds 5 levels
-	// {"next": {"next": {"next": {"next": {"next": {"next": {}}}}}}}
-	deepJson := strings.Repeat(`{"next": `, 10) + "{}" + strings.Repeat("}", 10)
-
-	w, err := r.Inject(InjectOptions{
-		Method:  "POST",
-		Path:    "/recursion",
-		Body:    strings.NewReader(deepJson),
-		Handler: &handler, // Fixed: Pass pointer
-	})
-
-	if err != nil {
-		t.Fatalf("Inject returned error: %v", err)
-	}
-
-	// Should fail with recursion error
-	if w.StatusCode == 200 {
-		t.Error("Expected recursion limit error, got 200 OK")
-	}
-
-	if !strings.Contains(string(w.Body), "max recursion depth exceeded") {
-		t.Errorf("Expected recursion error message, got: %s", string(w.Body))
-	}
-}
-
 func TestSoftConversion(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 	handler := DefineHandler(RouteOptions{
 		Schema: &MismatchedTypeSchema{},
 		Handler: func(c Context) error {

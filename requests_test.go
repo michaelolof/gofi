@@ -43,7 +43,7 @@ func TestCookieRequest(t *testing.T) {
 		},
 	}
 
-	m := newServeMux()
+	m := newRouter()
 	m.Inject(InjectOptions{
 		Path: "/test",
 		Cookies: []http.Cookie{
@@ -81,7 +81,7 @@ func TestJSONEncoder_NoRequesBody(t *testing.T) {
 		},
 	}
 
-	m := newServeMux()
+	m := newRouter()
 	m.Inject(InjectOptions{
 		Path: "/test/:id",
 		Paths: map[string]string{
@@ -111,7 +111,7 @@ func TestJSONEncoder_EmptyRequestBody(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:    "/test/one",
 		Method:  "POST",
@@ -148,7 +148,7 @@ func TestJSONEncoder_PrimitiveRequestBody(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:    "/test/one",
 		Method:  "POST",
@@ -191,7 +191,7 @@ func TestJSONEncoder_SimpleStructRequestBody(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:   "/test/one",
 		Method: "POST",
@@ -233,7 +233,7 @@ func TestJSONEncode_PrimitiveArrayRequestBody(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:    "/test/one",
 		Method:  "POST",
@@ -280,7 +280,7 @@ func TestJSONEncode_PrimitiveArrayTypesBody(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:   "/test/one",
 		Method: "POST",
@@ -333,7 +333,7 @@ func TestJSONEncode_StructArrayBody(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:    "/test/one",
 		Method:  "POST",
@@ -367,7 +367,7 @@ func TestIgnoredJSONField(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:   "/test/one",
 		Method: "POST",
@@ -403,7 +403,7 @@ func TestEncode_AnyValue(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:    "/test/one",
 		Method:  "POST",
@@ -441,7 +441,7 @@ func TestJSONEncode_AnyValue(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	m.Inject(InjectOptions{
 		Path:    "/test/one",
 		Method:  "POST",
@@ -474,7 +474,7 @@ func TestHeaderBinding(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method: "GET",
 			Path:   "/test",
@@ -498,7 +498,7 @@ func TestHeaderBinding(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method:  "GET",
 			Path:    "/test",
@@ -519,7 +519,7 @@ func TestHeaderBinding(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method: "GET",
 			Path:   "/test",
@@ -559,7 +559,7 @@ func TestQueryBinding(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method: "GET",
 			Path:   "/test",
@@ -584,7 +584,7 @@ func TestQueryBinding(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method:  "GET",
 			Path:    "/test",
@@ -617,7 +617,7 @@ func TestPathBinding(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	_, err := m.Inject(InjectOptions{
 		Method: "GET",
 		Path:   "/test/books/42",
@@ -653,7 +653,7 @@ func TestCookieBinding(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	_, err := m.Inject(InjectOptions{
 		Method: "GET",
 		Path:   "/test",
@@ -695,7 +695,7 @@ func TestResponse_Cookies(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		rec, err := m.Inject(InjectOptions{
 			Method:  "POST",
 			Path:    "/login",
@@ -743,7 +743,7 @@ func TestRequestBody_RawString(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method:  "POST",
 			Path:    "/raw",
@@ -774,7 +774,7 @@ func TestResponseBody_RawString(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	rec, err := m.Inject(InjectOptions{
 		Method:  "GET",
 		Path:    "/raw",
@@ -809,7 +809,7 @@ func TestRequestBody_Bytes(t *testing.T) {
 			},
 		}
 
-		m := NewServeMux()
+		m := NewRouter()
 		_, err := m.Inject(InjectOptions{
 			Method:  "POST",
 			Path:    "/bytes",
@@ -837,7 +837,7 @@ func TestResponseBody_Bytes(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	rec, err := m.Inject(InjectOptions{
 		Method:  "GET",
 		Path:    "/bytes",
@@ -867,7 +867,7 @@ func TestBody_Map(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	_, err := m.Inject(InjectOptions{
 		Method:  "POST",
 		Path:    "/map",
@@ -900,7 +900,7 @@ func TestBody_Nested(t *testing.T) {
 		},
 	}
 
-	m := NewServeMux()
+	m := NewRouter()
 	_, err := m.Inject(InjectOptions{
 		Method:  "POST",
 		Path:    "/nested",

@@ -236,17 +236,17 @@ type Info struct {
 type schemaField string
 
 const (
-	schemaOperationId schemaField = "OperationId"
-	schemaSummary     schemaField = "Summary"
-	schemaHttpMethod  schemaField = "Method"
-	schemaUrl         schemaField = "Url"
-	schemaDeprecated  schemaField = "Deprecated"
-	schemaReq         schemaField = "Request"
-	schemaHeaders     schemaField = "Header"
-	schemaCookies     schemaField = "Cookie"
-	schemaQuery       schemaField = "Query"
-	schemaPath        schemaField = "Path"
-	schemaBody        schemaField = "Body"
+	// schemaOperationId schemaField = "OperationId"
+	// schemaSummary     schemaField = "Summary"
+	// schemaHttpMethod  schemaField = "Method"
+	// schemaUrl         schemaField = "Url"
+	// schemaDeprecated  schemaField = "Deprecated"
+	schemaReq     schemaField = "Request"
+	schemaHeaders schemaField = "Header"
+	schemaCookies schemaField = "Cookie"
+	schemaQuery   schemaField = "Query"
+	schemaPath    schemaField = "Path"
+	schemaBody    schemaField = "Body"
 )
 
 func (s schemaField) reqSchemaIn() string {

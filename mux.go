@@ -8,10 +8,17 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/michaelolof/gofi/validators/rules"
 	"github.com/valyala/fasthttp"
 )
+
+// b2s converts []byte to string without allocation.
+// The resulting string MUST NOT be retained beyond the lifetime of the []byte.
+func b2s(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
 
 type serveMux struct {
 	trees             map[string]*node
@@ -28,8 +35,8 @@ type serveMux struct {
 	maxParams         uint8
 }
 
-func NewServeMux() Router {
-	return newServeMux()
+func NewRouter() Router {
+	return newRouter()
 }
 
 func (s *serveMux) Method(method string, path string, opts RouteOptions) {
@@ -116,8 +123,8 @@ func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 // handleFastHTTP is the main fasthttp request handler.
 // Called by fasthttp.Server for each incoming connection.
 func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
-	method := string(ctx.Method())
-	path := string(ctx.Path())
+	method := b2s(ctx.Method())
+	path := b2s(ctx.Path())
 
 	if root := s.trees[method]; root != nil {
 		c := s.acquireContext(ctx)
@@ -183,9 +190,9 @@ func (s *serveMux) Test(method, path string) *InjectResponse {
 
 	// Collect response headers
 	headerMap := make(http.Header)
-	fctx.Response.Header.VisitAll(func(key, val []byte) {
+	for key, val := range fctx.Response.Header.All() {
 		headerMap.Add(string(key), string(val))
-	})
+	}
 
 	return &InjectResponse{
 		StatusCode: fctx.Response.StatusCode(),
@@ -506,9 +513,9 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 	}
 }
 
-func newServeMux() *serveMux {
+func newRouter() *serveMux {
 	middlewares := make(Middlewares, 0, 15)
-	return serveMuxBuilder(
+	return serveRouterBuilder(
 		make(map[string]*node),
 		map[string]map[string]openapiOperationObject{},
 		map[string]map[string]any{},
@@ -518,7 +525,7 @@ func newServeMux() *serveMux {
 	)
 }
 
-func serveMuxBuilder(trees map[string]*node, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
+func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
 	s := &serveMux{
 		trees:             trees,
 		paths:             paths,

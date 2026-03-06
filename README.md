@@ -58,7 +58,7 @@ type PingSchema struct {
 
 func main() {
 	// Initialize the router
-	r := gofi.NewServeMux()
+	r := gofi.NewRouter()
 
 	// Define the handler
 	pingHandler := gofi.DefineHandler(gofi.RouteOptions{
@@ -105,7 +105,7 @@ func main() {
 Create a new router instance using `NewServeMux()`:
 
 ```go
-r := gofi.NewServeMux()
+r := gofi.NewRouter()
 ```
 
 ### Defining a Route Schema
@@ -446,7 +446,7 @@ It is designed to test handlers in isolation. You pass the `RouteOptions` direct
 ```go
 func TestMyHandler(t *testing.T) {
     // Initialize a router to provide the environment (stores, validation engine)
-    r := gofi.NewServeMux()
+    r := gofi.NewRouter()
 
     // 1. Define your handler options
     myHandlerOpts := gofi.DefineHandler(gofi.RouteOptions{
@@ -486,7 +486,7 @@ For quick tests on registered routes, use the `Test()` shorthand:
 
 ```go
 func TestPing(t *testing.T) {
-    r := gofi.NewServeMux()
+    r := gofi.NewRouter()
     r.Get("/ping", gofi.RouteOptions{
         Handler: func(c gofi.Context) error {
             return c.SendString(200, "pong")

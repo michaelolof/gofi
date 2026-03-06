@@ -20,16 +20,28 @@ type responseWriter struct {
 	ctx        *fasthttp.RequestCtx
 	header     http.Header
 	headerSync bool // whether headers have been synced to fasthttp
+	headerInit bool // whether header map was allocated
 }
 
 func newResponseWriter(ctx *fasthttp.RequestCtx) *responseWriter {
 	return &responseWriter{
-		ctx:    ctx,
-		header: make(http.Header),
+		ctx: ctx,
 	}
 }
 
+// reset reuses the responseWriter with a new fasthttp context, avoiding struct re-allocation.
+func (w *responseWriter) reset(ctx *fasthttp.RequestCtx) {
+	w.ctx = ctx
+	w.headerSync = false
+	w.headerInit = false
+	w.header = nil
+}
+
 func (w *responseWriter) Header() http.Header {
+	if !w.headerInit {
+		w.header = make(http.Header)
+		w.headerInit = true
+	}
 	return w.header
 }
 
@@ -48,6 +60,9 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 }
 
 func (w *responseWriter) syncHeaders() {
+	if !w.headerInit {
+		return // no headers were ever set via the adapter
+	}
 	w.headerSync = true
 	for key, vals := range w.header {
 		for _, val := range vals {

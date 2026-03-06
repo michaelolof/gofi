@@ -12,7 +12,7 @@ import (
 
 func TestMiddleware(t *testing.T) {
 	t.Run("Global Middleware", func(t *testing.T) {
-		r := NewServeMux()
+		r := NewRouter()
 
 		r.Use(func(c Context) error {
 			c.Writer().Header().Set("x-logger", "1")
@@ -42,7 +42,7 @@ func TestMiddleware(t *testing.T) {
 	})
 
 	t.Run("Inline Middleware via PreHandlers", func(t *testing.T) {
-		r := NewServeMux()
+		r := NewRouter()
 
 		handler1 := DefineHandler(RouteOptions{
 			PreHandlers: []PreHandler{
@@ -73,7 +73,7 @@ func TestMiddleware(t *testing.T) {
 	})
 
 	t.Run("Group Middleware", func(t *testing.T) {
-		r := NewServeMux()
+		r := NewRouter()
 
 		loggerMW := MiddlewareFunc(func(c Context) error {
 			c.Writer().Header().Set("x-logger", "1")
@@ -137,7 +137,7 @@ func TestMiddleware(t *testing.T) {
 
 func TestRouteGroup(t *testing.T) {
 	t.Run("Route Method", func(t *testing.T) {
-		r := NewServeMux()
+		r := NewRouter()
 
 		type usersSchema struct {
 			Ok struct {
@@ -209,7 +209,7 @@ func TestRouteGroup(t *testing.T) {
 }
 
 func TestUsePreHandler(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 
 	// Global PreHandler 1
 	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
@@ -253,7 +253,7 @@ func TestUsePreHandler(t *testing.T) {
 }
 
 func TestUsePreHandler_GroupIsolation(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 
 	// Base handler
 	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
@@ -317,7 +317,7 @@ func TestUsePreHandler_GroupIsolation(t *testing.T) {
 }
 
 func TestUsePreHandler_Inject(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 
 	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
 		return func(c Context) error {
@@ -348,7 +348,7 @@ func TestUsePreHandler_Inject(t *testing.T) {
 }
 
 func TestUsePreHandler_ExecutionOrder(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 	var order []string
 
 	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
@@ -402,7 +402,7 @@ func TestUsePreHandler_ExecutionOrder(t *testing.T) {
 }
 
 func TestUsePreHandler_ErrorShortCircuit(t *testing.T) {
-	r := NewServeMux()
+	r := NewRouter()
 
 	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
 		return func(c Context) error {

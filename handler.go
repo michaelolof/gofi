@@ -39,12 +39,6 @@ func applyMiddleware(handler HandlerFunc, middleware []PreHandler) HandlerFunc {
 	return handler
 }
 
-type defaultErrResp struct {
-	Status     string `json:"status"`
-	StatusCode int    `json:"statusCode"`
-	Message    string `json:"message"`
-}
-
 func defaultErrorHandler(err error, c Context) {
 	// Write JSON error response directly without encoding/json
 	msg := err.Error()

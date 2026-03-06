@@ -33,8 +33,7 @@ type Router interface {
 	// UsePreHandler appends one or more pre-handler onto the router stack
 	UsePreHandler(h ...func(h HandlerFunc) HandlerFunc)
 
-	// Inject allows you to inject a request into the router and get a response.
-	// Used for testing routes, requests and responses.
+	// Inject allows you to inject a request handler into the router and get a response.
 	Inject(opts InjectOptions) (*InjectResponse, error)
 
 	// Test dispatches a request through the full route tree (including middleware,

@@ -8,6 +8,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// Pre-allocated content-type byte slices for zero-alloc header setting
+var (
+	contentTypePlain = []byte("text/plain; charset=utf-8")
+)
+
 type bindedResult struct {
 	bound bool
 	err   error
@@ -74,15 +79,6 @@ type context struct {
 	req               *Request        // cached request adapter
 }
 
-func newContext() *context {
-	return &context{
-		routeMeta:         map[string]map[string]any{},
-		serverOpts:        defaultMuxOptions(),
-		bindedCacheResult: bindedResult{bound: false},
-		params:            make(Params, 0, 10),
-	}
-}
-
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	if c.bindedCacheResult.bound && c.bindedCacheResult.val != nil {
 		if rules := c.rules(); rules != nil && rules.schemaPool != nil {
@@ -100,8 +96,14 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.params = c.params[:0]
 	c.handlers = nil
 	c.handlerIdx = -1
-	c.rw = nil
-	c.req = nil
+
+	// Reset adapters in-place instead of nil-ing to avoid re-allocation
+	if c.rw != nil {
+		c.rw.reset(fctx)
+	}
+	if c.req != nil {
+		c.req = nil // Request adapter is complex; nil and lazy-init
+	}
 }
 
 func (c *context) Writer() ResponseWriter {
@@ -139,7 +141,7 @@ func (c *context) GetSchemaRules(pattern, method string) any {
 }
 
 func (c *context) SendString(code int, s string) error {
-	c.fctx.Response.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	c.fctx.Response.Header.SetContentTypeBytes(contentTypePlain)
 	c.fctx.Response.SetStatusCode(code)
 	c.fctx.Response.SetBodyString(s)
 	return nil

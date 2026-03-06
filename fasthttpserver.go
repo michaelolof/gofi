@@ -17,7 +17,7 @@ type FasthttpServer struct {
 
 // NewFasthttpServer creates a FasthttpServer backed by a new serveMux.
 func NewFasthttpServer() *FasthttpServer {
-	m := newServeMux()
+	m := newRouter()
 	return &FasthttpServer{
 		mux: m,
 		server: &fasthttp.Server{
