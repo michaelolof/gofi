@@ -179,9 +179,15 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 	ctx.SetBodyString("404 page not found\n")
 }
 
+// dummyLogger implements fasthttp.Logger
+type dummyLogger struct{}
+
+func (d *dummyLogger) Printf(format string, args ...interface{}) {}
+
 // Test dispatches a request through the full route tree and returns an InjectResponse.
 func (s *serveMux) Test(method, path string) *InjectResponse {
 	var fctx fasthttp.RequestCtx
+	fctx.Init2(nil, &dummyLogger{}, false)
 	fctx.Request.Header.SetMethod(method)
 	fctx.Request.SetRequestURI(path)
 	fctx.Request.Header.SetHost("localhost")
@@ -356,6 +362,7 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 
 	// Create fasthttp context from raw request
 	var fctx fasthttp.RequestCtx
+	fctx.Init2(nil, &dummyLogger{}, false)
 	fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
 
 	c := s.acquireContext(&fctx)
