@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strings"
+	"sync"
 )
 
 type Docs struct {
@@ -93,7 +95,7 @@ type DocsView struct {
 	// The template to use for the documentation. Defaults to Swagger UI if none is passed
 	Template DocsUiTemplate
 	// Match the URL path fo be served. This is useful for serving multiple docs on the same server. (E.g admin /admin/v1/, client /v1/)
-	UrlMatch func(url string) bool
+	URLMatch func(url string) bool
 	// The path to the generated OpenAPI specification in JSON.
 	DocsPath string
 	// The components to use for the documentation.
@@ -299,6 +301,78 @@ func (u *uiTemplate) HTML(specPath string) []byte {
 	return []byte(fmt.Sprintf(u.html, specPath))
 }
 
+// OpenAPISpec extracts the OpenAPI 3.0.3 specification directly from the Router.
+// This is useful for programmatic access, testing, or building static documentation
+// files without running the server.
+func OpenAPISpec(r Router, opts DocsOptions) Docs {
+	m, ok := r.(*serveMux)
+	if !ok {
+		// Should not happen unless a mock router is passed
+		return Docs{
+			OpenApi:     "3.0.3",
+			DocsOptions: &opts,
+		}
+	}
+
+	return opts.getMatchingDocs(m, func(url string) bool { return true })
+}
+
+// Filter creates a shallow copy of Docs, retaining only the paths that
+// satisfy the match callback function.
+func (d Docs) Filter(match func(path string) bool) Docs {
+	newPaths := make(docsPaths)
+
+	if d.Paths != nil {
+		for p, methods := range *d.Paths {
+			if match == nil || match(p) {
+				newPaths[p] = methods
+			}
+		}
+	}
+
+	filteredDocs := d
+	filteredDocs.Paths = &newPaths
+	return filteredDocs
+}
+
+// FilterByURL creates a shallow copy of Docs, retaining only the paths
+// that start with the exact prefix string.
+func (d Docs) FilterByURL(prefix string) Docs {
+	return d.Filter(func(p string) bool {
+		return strings.HasPrefix(p, prefix)
+	})
+}
+
+// FilterByRoutePrefix returns a shallow copy of Docs dynamically tailored
+// to match the specific UI View configured for routePrefix in DocsOptions.Views.
+// It applies the view's custom URLMatch filter and custom Components.
+func (d Docs) FilterByRoutePrefix(routePrefix string) Docs {
+	if d.DocsOptions == nil {
+		return d
+	}
+
+	for _, view := range d.DocsOptions.Views {
+		if view.RoutePrefix == routePrefix {
+			filtered := d
+			if view.URLMatch != nil {
+				filtered = d.Filter(view.URLMatch)
+			}
+			filtered.Components = view.Components
+			return filtered
+		}
+	}
+
+	return d
+}
+
+type docsViewState struct {
+	specOnce sync.Once
+	specJSON []byte
+
+	htmlOnce sync.Once
+	htmlBody []byte
+}
+
 func ServeDocs(r Router, opts DocsOptions) error {
 	const docsPath = "/q/openapi"
 
@@ -316,26 +390,29 @@ func ServeDocs(r Router, opts DocsOptions) error {
 		// Capture vopt for the closures
 		viewOpt := vopt
 
+		state := &docsViewState{}
+
 		// Serve the OpenAPI spec JSON
 		m.Get(path.Join(viewOpt.RoutePrefix, docsPath), RouteOptions{
 			Handler: func(c Context) error {
-				var d Docs
-				if viewOpt.UrlMatch == nil {
-					d = opts.getMatchingDocs(m, func(url string) bool { return true })
-				} else {
-					d = opts.getMatchingDocs(m, viewOpt.UrlMatch)
-				}
+				state.specOnce.Do(func() {
+					var d Docs
+					if viewOpt.URLMatch == nil {
+						d = opts.getMatchingDocs(m, func(url string) bool { return true })
+					} else {
+						d = opts.getMatchingDocs(m, viewOpt.URLMatch)
+					}
 
-				d.Components = viewOpt.Components
-				ds, err := json.Marshal(d)
-				if err != nil {
-					return err
-				}
+					d.Components = viewOpt.Components
+					// In the event of a marshal error, it will just leave specJSON as []byte{}
+					// which will be served as an empty response. This is acceptable for a fatal developer error.
+					state.specJSON, _ = json.Marshal(d)
+				})
 
 				ctx := c.(*context)
 				ctx.fctx.Response.Header.Set("Content-Type", "application/json")
 				ctx.fctx.Response.SetStatusCode(200)
-				ctx.fctx.Response.SetBody(ds)
+				ctx.fctx.Response.SetBodyRaw(state.specJSON)
 				return nil
 			},
 		})
@@ -343,14 +420,18 @@ func ServeDocs(r Router, opts DocsOptions) error {
 		// Serve the docs UI HTML
 		m.Get(viewOpt.RoutePrefix, RouteOptions{
 			Handler: func(c Context) error {
-				tmplt := viewOpt.Template
-				if tmplt == nil {
-					tmplt = SwaggerTemplate()
-				}
+				state.htmlOnce.Do(func() {
+					tmplt := viewOpt.Template
+					if tmplt == nil {
+						tmplt = SwaggerTemplate()
+					}
+					state.htmlBody = tmplt.HTML(path.Join(viewOpt.RoutePrefix, docsPath))
+				})
+
 				ctx := c.(*context)
 				ctx.fctx.Response.Header.Set("Content-Type", "text/html")
 				ctx.fctx.Response.SetStatusCode(200)
-				ctx.fctx.Response.SetBody(tmplt.HTML(path.Join(viewOpt.RoutePrefix, docsPath)))
+				ctx.fctx.Response.SetBodyRaw(state.htmlBody)
 				return nil
 			},
 		})

@@ -373,10 +373,68 @@ func (m *MyCustomDocs) HTML(specPath string) []byte {
 gofi.ServeDocs(r, gofi.DocsOptions{
     Views: []gofi.DocsView{
         {
-            RoutePrefix: "/custom-docs",
+            RoutePrefix: "/docs",
             Template:    &MyCustomDocs{},
         },
     },
+})
+```
+
+### Exporting OpenAPI Specification
+
+If you need to programmatically access the OpenAPI specification to generate a static file for CI/CD, feed code generators (like `oapi-codegen`), or assert against it in tests, you can use `gofi.OpenAPISpec()`.
+
+This function extracts the `gofi.Docs` struct directly from your router without needing to start the server:
+
+```go
+func main() {
+    r := gofi.New()
+    // ... register all your routes and middlewares ...
+
+    // Extract the full OpenAPI 3.0.3 specification
+    opts := gofi.DocsOptions{
+        Info: gofi.DocsInfoOptions{Title: "My API", Version: "1.0"},
+    }
+    masterSpec := gofi.OpenAPISpec(r, opts)
+
+    // Marshal to JSON
+    bytes, _ := json.MarshalIndent(masterSpec, "", "  ")
+
+    // Write to file
+    os.WriteFile("openapi.json", bytes, 0644)
+}
+```
+
+#### Slicing Documentation (Filtering)
+
+When you have multiple documentation views configured via `gofi.DocsOptions.Views` (e.g. one for internal admin panels and one for public clients), you may want to export those restricted subsets to JSON as well. 
+
+The `gofi.Docs` type provides native filtering methods to extract slices:
+
+**Option 1: Extract by View Route Prefix (Recommended)**
+Extract the exact specification that `gofi.ServeDocs` would have served for a given view (automatically applies its `URLMatch` rules and component scoping).
+```go
+opts := gofi.DocsOptions{
+    Views: []gofi.DocsView{
+        { RoutePrefix: "/docs/admin", URLMatch: func(p string) bool { return strings.HasPrefix(p, "/admin") } },
+        { RoutePrefix: "/docs/public" },
+    },
+}
+masterSpec := gofi.OpenAPISpec(r, opts)
+
+// Pull out the spec dynamically bound to the /docs/admin view rules
+adminSpec := masterSpec.FilterByRoutePrefix("/docs/admin")
+```
+
+**Option 2: Filter by URL Prefix**
+```go
+publicSpec := masterSpec.FilterByURL("/public")
+```
+
+**Option 3: Custom Callback Filtering**
+```go
+customSpec := masterSpec.Filter(func(path string) bool {
+    return !strings.HasPrefix(path, "/legacy")
 })
 ```
 
