@@ -41,32 +41,22 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
-	t.Run("Inline Middleware via PreHandlers", func(t *testing.T) {
+	t.Run("Inline Middleware via With", func(t *testing.T) {
 		r := NewRouter()
 
+		mw := MiddlewareFunc(func(c Context) error {
+			c.Writer().Header().Set("x-test-1", "1")
+			return c.Next()
+		})
+
 		handler1 := DefineHandler(RouteOptions{
-			PreHandlers: []PreHandler{
-				func(next HandlerFunc) HandlerFunc {
-					return func(c Context) error {
-						c.Writer().Header().Set("x-test-1", "1")
-						return next(c)
-					}
-				},
-			},
 			Handler: func(c Context) error {
 				return c.SendString(200, "finished")
 			},
 		})
-		r.Get("/test-1", handler1)
+		r.With(mw).Get("/test-1", handler1)
 
-		w, err := r.Inject(InjectOptions{
-			Method:  "GET",
-			Path:    "/test-1",
-			Handler: &handler1,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
+		w := r.Test("GET", "/test-1")
 		if w.HeaderMap.Get("X-Test-1") != "1" {
 			t.Errorf("Expected x-test-1 header to be 1, got %s", w.HeaderMap.Get("X-Test-1"))
 		}
@@ -208,23 +198,19 @@ func TestRouteGroup(t *testing.T) {
 	})
 }
 
-func TestUsePreHandler(t *testing.T) {
+func TestUseMiddleware(t *testing.T) {
 	r := NewRouter()
 
-	// Global PreHandler 1
-	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-		return func(c Context) error {
-			c.Writer().Header().Add("X-PreHandler-1", "executed")
-			return next(c)
-		}
+	// Global Middleware 1
+	r.Use(func(c Context) error {
+		c.Writer().Header().Add("X-Middleware-1", "executed")
+		return c.Next()
 	})
 
-	// Global PreHandler 2
-	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-		return func(c Context) error {
-			c.Writer().Header().Add("X-PreHandler-2", "executed")
-			return next(c)
-		}
+	// Global Middleware 2
+	r.Use(func(c Context) error {
+		c.Writer().Header().Add("X-Middleware-2", "executed")
+		return c.Next()
 	})
 
 	handler := DefineHandler(RouteOptions{
@@ -244,32 +230,28 @@ func TestUsePreHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if w.HeaderMap.Get("X-Prehandler-1") != "executed" {
-		t.Error("Expected X-PreHandler-1 to be executed")
+	if w.HeaderMap.Get("X-Middleware-1") != "executed" {
+		t.Error("Expected X-Middleware-1 to be executed")
 	}
-	if w.HeaderMap.Get("X-Prehandler-2") != "executed" {
-		t.Error("Expected X-PreHandler-2 to be executed")
+	if w.HeaderMap.Get("X-Middleware-2") != "executed" {
+		t.Error("Expected X-Middleware-2 to be executed")
 	}
 }
 
-func TestUsePreHandler_GroupIsolation(t *testing.T) {
+func TestUseMiddleware_GroupIsolation(t *testing.T) {
 	r := NewRouter()
 
-	// Base handler
-	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-		return func(c Context) error {
-			c.Writer().Header().Add("X-Base", "true")
-			return next(c)
-		}
+	// Base middleware
+	r.Use(func(c Context) error {
+		c.Writer().Header().Add("X-Base", "true")
+		return c.Next()
 	})
 
 	// Group 1
 	r.Group(func(sub Router) {
-		sub.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-			return func(c Context) error {
-				c.Writer().Header().Add("X-Group-1", "true")
-				return next(c)
-			}
+		sub.Use(func(c Context) error {
+			c.Writer().Header().Add("X-Group-1", "true")
+			return c.Next()
 		})
 
 		sub.Get("/group1", DefineHandler(RouteOptions{
@@ -293,13 +275,9 @@ func TestUsePreHandler_GroupIsolation(t *testing.T) {
 	fctx1.Request.Read(bufio.NewReader(bytes.NewReader(rawReq1.Bytes())))
 	m.handleFastHTTP(&fctx1)
 
-	// Check Group 1 has both base and group prehandler
 	if string(fctx1.Response.Header.Peek("X-Base")) != "true" {
-		t.Error("Group 1 should have base prehandler")
+		t.Error("Group 1 should have base middleware")
 	}
-	// NOTE: Inject() only applies global pre-handlers, not group-scoped ones.
-	// Group-scoped pre-handler isolation is verified via full HTTP request routing.
-	// Therefore we cannot verify X-Group-1 is set here via Inject().
 
 	// Test Group 2 via handleFastHTTP
 	var fctx2 fasthttp.RequestCtx
@@ -309,21 +287,19 @@ func TestUsePreHandler_GroupIsolation(t *testing.T) {
 	m.handleFastHTTP(&fctx2)
 
 	if string(fctx2.Response.Header.Peek("X-Base")) != "true" {
-		t.Error("Group 2 should have base prehandler")
+		t.Error("Group 2 should have base middleware")
 	}
 	if string(fctx2.Response.Header.Peek("X-Group-1")) == "true" {
-		t.Error("Group 2 should NOT have group 1 prehandler (Leak detected!)")
+		t.Error("Group 2 should NOT have group 1 middleware (Leak detected!)")
 	}
 }
 
-func TestUsePreHandler_Inject(t *testing.T) {
+func TestUseMiddleware_Inject(t *testing.T) {
 	r := NewRouter()
 
-	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-		return func(c Context) error {
-			c.Writer().Header().Add("X-Injected", "true")
-			return next(c)
-		}
+	r.Use(func(c Context) error {
+		c.Writer().Header().Add("X-Injected", "true")
+		return c.Next()
 	})
 
 	handler := DefineHandler(RouteOptions{
@@ -343,34 +319,22 @@ func TestUsePreHandler_Inject(t *testing.T) {
 	}
 
 	if w.HeaderMap.Get("X-Injected") != "true" {
-		t.Error("Inject should execute global prehandlers")
+		t.Error("Inject should execute global middlewares")
 	}
 }
 
-func TestUsePreHandler_ExecutionOrder(t *testing.T) {
+func TestUseMiddleware_ExecutionOrder(t *testing.T) {
 	r := NewRouter()
 	var order []string
 
-	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-		return func(c Context) error {
-			order = append(order, "global-start")
-			err := next(c)
-			order = append(order, "global-end")
-			return err
-		}
+	r.Use(func(c Context) error {
+		order = append(order, "global-start")
+		err := c.Next()
+		order = append(order, "global-end")
+		return err
 	})
 
 	handler := DefineHandler(RouteOptions{
-		PreHandlers: []PreHandler{
-			func(next HandlerFunc) HandlerFunc {
-				return func(c Context) error {
-					order = append(order, "route-start")
-					err := next(c)
-					order = append(order, "route-end")
-					return err
-				}
-			},
-		},
 		Handler: func(c Context) error {
 			order = append(order, "handler")
 			return nil
@@ -388,7 +352,7 @@ func TestUsePreHandler_ExecutionOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := []string{"global-start", "route-start", "handler", "route-end", "global-end"}
+	expected := []string{"global-start", "handler", "global-end"}
 
 	if len(order) != len(expected) {
 		t.Fatalf("Expected order length %d, got %d: %v", len(expected), len(order), order)
@@ -401,13 +365,11 @@ func TestUsePreHandler_ExecutionOrder(t *testing.T) {
 	}
 }
 
-func TestUsePreHandler_ErrorShortCircuit(t *testing.T) {
+func TestUseMiddleware_ErrorShortCircuit(t *testing.T) {
 	r := NewRouter()
 
-	r.UsePreHandler(func(next HandlerFunc) HandlerFunc {
-		return func(c Context) error {
-			return errors.New("auth failed")
-		}
+	r.Use(func(c Context) error {
+		return errors.New("auth failed")
 	})
 
 	handler := DefineHandler(RouteOptions{

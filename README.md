@@ -221,24 +221,16 @@ r.Use(func(c gofi.Context) error {
 })
 ```
 
-### PreHandlers (Context-Aware Middleware)
+### Using net/http Middlewares
 
-Add global Gofi middleware using `UsePreHandler()` for logic that needs access to `gofi.Context`:
+If you have existing `net/http` compatible middlewares (e.g., from Chi, Gorilla, or third-party libraries), you can use `gofi.WrapMiddleware` to convert them:
 
 ```go
-r.UsePreHandler(func(next gofi.HandlerFunc) gofi.HandlerFunc {
-    return func(c gofi.Context) error {
-        // Access context methods
-        token := c.Header().Get("Authorization")
-        if token == "" {
-            return c.Send(401, map[string]string{"error": "Unauthorized"})
-        }
-        return next(c)
-    }
-})
-```
+import "github.com/rs/cors"
 
-For a detailed comparison between Standard Middleware and PreHandlers, see the [Middleware Guide](docs/middleware.md).
+corsHandler := cors.Default()
+r.Use(gofi.WrapMiddleware(corsHandler.Handler))
+```
 
 ### Route Groups
 
@@ -285,8 +277,6 @@ type RouteOptions struct {
     Schema any
     // Custom metadata accessible in handlers
     Meta any
-    // Route-specific middlewares
-    PreHandlers []gofi.PreHandler
     // The handler function
     Handler func(c gofi.Context) error
 }

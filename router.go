@@ -30,9 +30,6 @@ type Router interface {
 	// UseErrorHandler sets the general error handler for the router
 	UseErrorHandler(func(err error, c Context))
 
-	// UsePreHandler appends one or more pre-handler onto the router stack
-	UsePreHandler(h ...func(h HandlerFunc) HandlerFunc)
-
 	// Inject allows you to inject a request handler into the router and get a response.
 	Inject(opts InjectOptions) (*InjectResponse, error)
 

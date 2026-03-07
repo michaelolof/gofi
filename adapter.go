@@ -206,9 +206,9 @@ func (r *Request) ParseForm() error {
 	r.parsedForm = true
 	r.PostForm = make(url.Values)
 	// Parse POST args from fasthttp
-	r.ctx.PostArgs().VisitAll(func(key, value []byte) {
+	for key, value := range r.ctx.PostArgs().All() {
 		r.PostForm.Add(string(key), string(value))
-	})
+	}
 	return nil
 }
 

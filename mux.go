@@ -30,7 +30,6 @@ type serveMux struct {
 	middlewares       Middlewares
 	inlineMiddlewares Middlewares
 	prefix            string
-	preHandlers       []PreHandler
 	ctxPool           *sync.Pool
 	maxParams         uint8
 }
@@ -112,10 +111,6 @@ func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 	newMux.inlineMiddlewares = make(Middlewares, len(s.inlineMiddlewares), len(s.inlineMiddlewares)+len(middlewares))
 	copy(newMux.inlineMiddlewares, s.inlineMiddlewares)
 	newMux.inlineMiddlewares = append(newMux.inlineMiddlewares, middlewares...)
-
-	// Deep copy preHandlers for isolation
-	newMux.preHandlers = make([]PreHandler, len(s.preHandlers))
-	copy(newMux.preHandlers, s.preHandlers)
 
 	return &newMux
 }
@@ -230,10 +225,6 @@ func (s *serveMux) UseErrorHandler(handler func(err error, c Context)) {
 	if handler != nil {
 		s.opts.errHandler = handler
 	}
-}
-
-func (s *serveMux) UsePreHandler(h ...func(h HandlerFunc) HandlerFunc) {
-	s.preHandlers = append(s.preHandlers, h...)
 }
 
 func (s *serveMux) RegisterSpec(list ...CustomSpec) {
@@ -388,17 +379,10 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 	}
 	c.setContextSettings(newContextOptions(opts.Path, opts.Method), routeMeta, s.globalStore, s.opts)
 
-	// Build handler chain
-	allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(def.PreHandlers))
-	allPreHandlers = append(allPreHandlers, s.preHandlers...)
-	allPreHandlers = append(allPreHandlers, def.PreHandlers...)
-
-	handler := applyMiddleware(def.Handler, allPreHandlers)
-
-	// Build flat chain: middlewares + composed handler
+	// Build flat chain: middlewares + handler
 	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
 	allHandlers = append(allHandlers, s.middlewares...)
-	allHandlers = append(allHandlers, handler)
+	allHandlers = append(allHandlers, def.Handler)
 
 	c.handlers = allHandlers
 	c.handlerIdx = -1
@@ -479,17 +463,11 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 		s.routeMeta[path] = v
 	}
 
-	// Pre-compose all pre-handlers at registration time (not per-request)
-	allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(opts.PreHandlers))
-	allPreHandlers = append(allPreHandlers, s.preHandlers...)
-	allPreHandlers = append(allPreHandlers, opts.PreHandlers...)
-	composedHandler := applyMiddleware(opts.Handler, allPreHandlers)
-
-	// Build the flat handler chain: global MW + inline MW + composed handler
+	// Build the flat handler chain: global MW + inline MW + handler
 	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+len(s.inlineMiddlewares)+1)
 	allHandlers = append(allHandlers, s.middlewares...)
 	allHandlers = append(allHandlers, s.inlineMiddlewares...)
-	allHandlers = append(allHandlers, composedHandler)
+	allHandlers = append(allHandlers, opts.Handler)
 
 	// Register in the radix tree
 	if s.trees == nil {
@@ -540,7 +518,6 @@ func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, glo
 		globalStore:       globalStore,
 		middlewares:       m,
 		inlineMiddlewares: make(Middlewares, 0),
-		preHandlers:       make([]PreHandler, 0),
 		opts:              opts,
 		rOpts:             nil,
 		ctxPool: &sync.Pool{

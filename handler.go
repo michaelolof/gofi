@@ -13,8 +13,6 @@ type Middlewares []MiddlewareFunc
 
 type HandlerFunc = func(c Context) error
 
-type PreHandler = func(next HandlerFunc) HandlerFunc
-
 type RouteOptions struct {
 	// Provide additional information about your route
 	Info Info
@@ -22,21 +20,12 @@ type RouteOptions struct {
 	Schema any
 	// Attach meta information to your route handlers that can be accessed in using the Context or Router interface
 	Meta any
-	// Register middleware functions for your route
-	PreHandlers []PreHandler
 	// Define the handler for your route
 	Handler func(c Context) error
 }
 
 func DefineHandler(opts RouteOptions) RouteOptions {
 	return opts
-}
-
-func applyMiddleware(handler HandlerFunc, middleware []PreHandler) HandlerFunc {
-	for i := len(middleware) - 1; i >= 0; i-- {
-		handler = middleware[i](handler)
-	}
-	return handler
 }
 
 func defaultErrorHandler(err error, c Context) {
