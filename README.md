@@ -639,6 +639,10 @@ r.RegisterBodyParser(&MyXMLParser{})
 
 ## Benchmarks
 
-Gofi is benchmarked against [go-chi/chi](https://github.com/go-chi/chi) and [labstack/echo](https://github.com/labstack/echo) across micro-benchmarks, real-world API traversals, middleware scalability, and concurrency.
+Gofi has been heavily optimized around `fasthttp` to provide maximum throughput and zero-allocation critical paths where possible, dominating benchmark results across micro-benchmarks, real-world API traversals, middleware chains, and concurrency scaling.
 
-> Full benchmark suite and reproducible results: **[gofi-test-utils](https://github.com/michaelolof/gofi-test-utils)**
+### HTTP Load Test Results (`bombardier`, 125 concurrent connections, 5s)
+
+Gofi is benchmarked against [Chi](https://github.com/go-chi/chi), [Echo](https://github.com/labstack/echo), [Gin](https://github.com/gin-gonic/gin), and [Fiber](https://github.com/gofiber/fiber).
+
+> 📊 Full benchmark suite (including memory allocation profiles) and reproducible runner scripts are available at: **[gofi-test-utils](https://github.com/michaelolof/gofi-test-utils)**
