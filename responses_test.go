@@ -48,7 +48,7 @@ func TestSend(t *testing.T) {
 		}
 	}
 
-	mux := NewServeMux()
+	mux := NewRouter()
 
 	handler := RouteOptions{
 		Schema: &testSchema{},
@@ -86,7 +86,7 @@ func TestTypeAliasResponse(t *testing.T) {
 		}
 	}
 
-	mux := NewServeMux()
+	mux := NewRouter()
 	handler := RouteOptions{
 		Schema: &testSchema{},
 		Handler: func(c Context) error {
@@ -102,7 +102,7 @@ func TestTypeAliasResponse(t *testing.T) {
 		Handler: &handler,
 	})
 
-	assert.Equal(t, res.Body.String(), `{"hint":"good"}`)
+	assert.Equal(t, string(res.Body), `{"hint":"good"}`)
 	assert.Nil(t, err)
 }
 
@@ -116,7 +116,7 @@ func TestAnyValueResponse(t *testing.T) {
 		}
 	}
 
-	mux := NewServeMux()
+	mux := NewRouter()
 	handler := RouteOptions{
 		Schema: &testSchema{},
 		Handler: func(c Context) error {
@@ -132,6 +132,6 @@ func TestAnyValueResponse(t *testing.T) {
 		Handler: &handler,
 	})
 
-	assert.Equal(t, res.Body.String(), `{"value":"foo"}`)
+	assert.Equal(t, string(res.Body), `{"value":"foo"}`)
 	assert.Nil(t, err)
 }

@@ -135,34 +135,7 @@ var AdminRoute = gofi.DefineHandler(gofi.RouteOptions{
 })
 ```
 
-### 4. PreHandlers (`PreHandlers`)
-`PreHandlers` are middlewares specific to the route. They run *before* the main handler.
-
-```go
-var ProtectedRoute = gofi.DefineHandler(gofi.RouteOptions{
-    PreHandlers: []gofi.PreHandler{
-        CheckPreHandler,
-    },
-    Handler: func(c gofi.Context) error { ... },
-})
-```
-
-**Definition:**
-A `PreHandler` wraps a `HandlerFunc`.
-
-```go
-func CheckPreHandler(next gofi.HandlerFunc) gofi.HandlerFunc {
-    return func(c gofi.Context) error {
-        // ... pre-processing ...
-        if err := checkSomething(); err != nil {
-            return err
-        }
-        return next(c)
-    }
-}
-```
-
-### 5. Handler (`Handler`)
+### 4. Handler (`Handler`)
 The main business logic for the route.
 
 ```go
@@ -173,48 +146,68 @@ var MyHandler = gofi.DefineHandler(gofi.RouteOptions{
 })
 ```
 
-## Middleware vs PreHandler
+## Middleware
 
-Gofi supports two types of middleware, which operate at different stages of the request lifecycle.
-
-### 1. Router Middleware (`Use`, `With`)
-Router middlewares are standard Golang middlewares (similar to `go-chi` or `net/http`). They wrap the standard `http.Handler` and are executed **early** in the request lifecycle, before the Gofi `Context` is created.
-
-- **Interface**: `func(http.Handler) http.Handler`
-- **Use Case**: Logging, CORS, GZIP compression, Panic recovery.
-- **Scope**: Global (`Use`) or Group-specific (`With`).
+Gofi uses a unified middleware system based on `MiddlewareFunc`:
 
 ```go
-// Standard router middleware
-func Logger(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Println("Request started")
-        next.ServeHTTP(w, r)
-        log.Println("Request finished")
-    })
-}
-
-r.Use(Logger)
+type MiddlewareFunc = func(c gofi.Context) error
 ```
 
-### 2. PreHandlers (`RouteOptions.PreHandlers`)
-PreHandlers are Gofi-specific middlewares that run **after** the Gofi `Context` has been created but **before** your main handler.
+Middlewares call `c.Next()` to proceed to the next handler in the chain.
 
-- **Interface**: `func(gofi.HandlerFunc) gofi.HandlerFunc`
-- **Use Case**: Authentication, Authorization, Validation logic that needs access to the `Context` (stores, schema validation results, etc.).
-- **Scope**: Can be Global (using `UsePreHandler`), Group-specific (using `Group().UsePreHandler`), or Per-route (defined in `RouteOptions`).
+### Global Middleware (`Use`)
+
+Apply middleware to all routes on the router:
 
 ```go
-func AuthPreHandler(next gofi.HandlerFunc) gofi.HandlerFunc {
-    return func(c gofi.Context) error {
-        // Access Context methods
-        if c.Request().Header.Get("Authorization") == "" {
-             return c.SendString(401, "Unauthorized")
-        }
-        return next(c)
+r.Use(func(c gofi.Context) error {
+    log.Println("Request received:", c.Request().URL.Path)
+    return c.Next()
+})
+```
+
+### Inline Middleware (`With`)
+
+Apply middleware only to specific routes:
+
+```go
+auth := func(c gofi.Context) error {
+    if c.Request().Header.Get("Authorization") == "" {
+        return c.SendString(401, "Unauthorized")
     }
+    return c.Next()
 }
+
+r.With(auth).Get("/protected", ProtectedHandler)
 ```
-Anything that can be done in a Handler can be done in a PreHandler. If you ValidateAndBind in the PreHandler, 
-the binded object will be cached in your route context and available in your handler. If you subsequently call ValidateAndBind in your handler, 
-it will not re-validate the request, but instead return the cached object. This is useful for performance reasons, as it avoids re-validating the request.
+
+### Using net/http Middlewares
+
+If you have existing `net/http` compatible middlewares (e.g., from Chi, Gorilla, or third-party libraries), use `gofi.WrapMiddleware` to convert them:
+
+```go
+import "github.com/rs/cors"
+
+corsHandler := cors.Default()
+r.Use(gofi.WrapMiddleware(corsHandler.Handler))
+```
+
+### Middleware Execution Order
+
+Middlewares execute in registration order. If a middleware calls `c.Next()`, the subsequent middlewares and the handler run. Code after `c.Next()` runs on the way back.
+
+```go
+r.Use(func(c gofi.Context) error {
+    log.Println("Before handler")
+    err := c.Next()
+    log.Println("After handler")
+    return err
+})
+```
+
+If a middleware returns an error without calling `c.Next()`, the chain is short-circuited and the handler is never reached.
+
+### ValidateAndBind in Middleware
+
+If you call `gofi.ValidateAndBind[T]` in a middleware, the result is cached on the context. Subsequent calls in the handler return the cached result without re-validation, which is useful for performance.

@@ -36,9 +36,10 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 		bsMax = 32 << 20 // 32MB default for multipart
 	}
 
-	// ParseMultipartForm parses up to maxMemory, storing rest in temp files.
-	// It reads from req.Body.
-	if err := req.ParseMultipartForm(bsMax); err != nil {
+	// Get multipart form from fasthttp via the adapter
+	fctx := req.Context()
+	form, err := fctx.MultipartForm()
+	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
 
@@ -57,27 +58,25 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 		}
 		for key, rule := range opts.SchemaRules.properties {
 			// Check form values first
-			vals, ok := req.MultipartForm.Value[key]
+			vals, ok := form.Value[key]
 			// If not in values, check files
-			files, fileOk := req.MultipartForm.File[key]
+			files, fileOk := form.File[key]
 
 			// Check for nested fields
 			hasNested := false
 			if rule.kind == reflect.Slice || rule.kind == reflect.Array || rule.kind == reflect.Struct {
 				prefix := key + "."
-				if req.MultipartForm != nil {
-					for k := range req.MultipartForm.Value {
+				for k := range form.Value {
+					if strings.HasPrefix(k, prefix) {
+						hasNested = true
+						break
+					}
+				}
+				if !hasNested {
+					for k := range form.File {
 						if strings.HasPrefix(k, prefix) {
 							hasNested = true
 							break
-						}
-					}
-					if !hasNested {
-						for k := range req.MultipartForm.File {
-							if strings.HasPrefix(k, prefix) {
-								hasNested = true
-								break
-							}
 						}
 					}
 				}
@@ -147,19 +146,17 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 					for {
 						prefix := fmt.Sprintf("%s.%d.", key, i)
 						prefixFound := false
-						if req.MultipartForm != nil {
-							for k := range req.MultipartForm.Value {
+						for k := range form.Value {
+							if strings.HasPrefix(k, prefix) {
+								prefixFound = true
+								break
+							}
+						}
+						if !prefixFound {
+							for k := range form.File {
 								if strings.HasPrefix(k, prefix) {
 									prefixFound = true
 									break
-								}
-							}
-							if !prefixFound {
-								for k := range req.MultipartForm.File {
-									if strings.HasPrefix(k, prefix) {
-										prefixFound = true
-										break
-									}
 								}
 							}
 						}
@@ -169,11 +166,9 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 
 						istrct := reflect.New(sliceType.Elem()).Elem()
 						subForm := make(map[string][]string)
-						if req.MultipartForm != nil {
-							for k, v := range req.MultipartForm.Value {
-								if strings.HasPrefix(k, prefix) {
-									subForm[strings.TrimPrefix(k, prefix)] = v
-								}
+						for k, v := range form.Value {
+							if strings.HasPrefix(k, prefix) {
+								subForm[strings.TrimPrefix(k, prefix)] = v
 							}
 						}
 
@@ -219,11 +214,9 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 			} else if rule.kind == reflect.Struct {
 				subForm := make(map[string][]string)
 				prefix := key + "."
-				if req.MultipartForm != nil {
-					for k, v := range req.MultipartForm.Value {
-						if strings.HasPrefix(k, prefix) {
-							subForm[strings.TrimPrefix(k, prefix)] = v
-						}
+				for k, v := range form.Value {
+					if strings.HasPrefix(k, prefix) {
+						subForm[strings.TrimPrefix(k, prefix)] = v
 					}
 				}
 				if err := m.bindStruct(subForm, fieldVal, rule); err != nil {

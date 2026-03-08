@@ -12,7 +12,7 @@ import (
 	"github.com/valyala/fastjson"
 )
 
-var jsonparser fastjson.Parser
+var jsonParserPool fastjson.ParserPool
 
 type ParsedJson struct {
 	pv *fastjson.Value
@@ -32,7 +32,8 @@ func JsonParse(p fastjson.Parser, bs []byte) (*ParsedJson, error) {
 }
 
 func PoolJsonParse(bs []byte) (*ParsedJson, error) {
-	pv, err := jsonparser.ParseBytes(bs)
+	var p fastjson.Parser
+	pv, err := p.ParseBytes(bs)
 	if err != nil {
 		return nil, err
 	}

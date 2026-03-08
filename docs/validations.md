@@ -293,7 +293,7 @@ Register your custom validator with the router instance.
 
 ```go
 func main() {
-    r := gofi.NewServeMux()
+    r := gofi.NewRouter()
     
     // Register the custom validator
     r.RegisterValidator(&CoolValidator{})

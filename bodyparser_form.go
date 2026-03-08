@@ -1,11 +1,12 @@
 package gofi
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
-	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -26,20 +27,20 @@ func (f *FormBodyParser) Match(contentType string) bool {
 }
 
 func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestOptions) error {
-	req := opts.Context.Request()
-	if req == nil {
-		return errors.New("http request not found in context")
-	}
-
 	bsMax := f.MaxRequestSize
 	if bsMax == 0 {
 		bsMax = 10485760 // 10MB
 	}
 
-	// Enforce max bytes reader on body before parsing
-	req.Body = http.MaxBytesReader(opts.Context.Writer(), req.Body, bsMax)
+	// Read body and parse form values manually
+	limited := io.LimitReader(r, bsMax)
+	bodyBytes, err := io.ReadAll(limited)
+	if err != nil {
+		return newErrReport(RequestErr, schemaBody, "", "parser", err)
+	}
 
-	if err := req.ParseForm(); err != nil {
+	formValues, err := url.ParseQuery(string(bodyBytes))
+	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
 
@@ -57,13 +58,13 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 			bodyStruct = bodyStruct.Elem()
 		}
 		for key, rule := range opts.SchemaRules.properties {
-			vals, ok := req.PostForm[key]
+			vals, ok := formValues[key]
 
 			// Check if we have nested fields or the exact key
 			hasNested := false
 			if rule.kind == reflect.Slice || rule.kind == reflect.Array || rule.kind == reflect.Struct {
 				prefix := key + "."
-				for k := range req.PostForm {
+				for k := range formValues {
 					if strings.HasPrefix(k, prefix) {
 						hasNested = true
 						break
@@ -110,7 +111,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 					for {
 						prefix := fmt.Sprintf("%s.%d.", key, i)
 						prefixFound := false
-						for k := range req.PostForm {
+						for k := range formValues {
 							if strings.HasPrefix(k, prefix) {
 								prefixFound = true
 								break
@@ -122,7 +123,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 
 						istrct := reflect.New(sliceType.Elem()).Elem()
 						subForm := make(map[string][]string)
-						for k, v := range req.PostForm {
+						for k, v := range formValues {
 							if strings.HasPrefix(k, prefix) {
 								subForm[strings.TrimPrefix(k, prefix)] = v
 							}
@@ -173,7 +174,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				// Nested struct
 				subForm := make(map[string][]string)
 				prefix := key + "."
-				for k, v := range req.PostForm {
+				for k, v := range formValues {
 					if strings.HasPrefix(k, prefix) {
 						subForm[strings.TrimPrefix(k, prefix)] = v
 					}
@@ -361,3 +362,6 @@ func (f *FormBodyParser) getFieldStruct(strct reflect.Value, fieldname string) r
 	}
 	return strct.FieldByName(fieldname)
 }
+
+// Helper function to suppress unused import warning
+var _ = bytes.NewReader

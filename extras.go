@@ -2,11 +2,17 @@ package gofi
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 )
 
+type kv struct {
+	key string
+	val any
+}
+
 type gofiStore struct {
-	m map[string]any
+	items []kv
 }
 
 type ReadOnlyStore interface {
@@ -16,6 +22,8 @@ type ReadOnlyStore interface {
 	Get(key string) (any, bool)
 	// Returns the value set in the global store using the key passed. Panics if the value isn't found
 	TryGet(key string) any
+	// All returns an iterator over all keys and values in the store
+	All() iter.Seq2[string, any]
 }
 
 type GofiStore interface {
@@ -25,32 +33,57 @@ type GofiStore interface {
 }
 
 func NewGlobalStore() *gofiStore {
-	return &gofiStore{m: map[string]any{}}
+	return &gofiStore{items: make([]kv, 0, 8)}
 }
 
 func NewDataStore() *gofiStore {
-	return &gofiStore{m: map[string]any{}}
+	return &gofiStore{items: make([]kv, 0, 4)}
 }
 
 func (g *gofiStore) Has(key string) bool {
-	_, found := g.m[key]
-	return found
+	for i := range g.items {
+		if g.items[i].key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gofiStore) Set(key string, val any) {
-	g.m[key] = val
+	for i := range g.items {
+		if g.items[i].key == key {
+			g.items[i].val = val
+			return
+		}
+	}
+	g.items = append(g.items, kv{key: key, val: val})
 }
 
 func (g *gofiStore) Get(key string) (any, bool) {
-	v, found := g.m[key]
-	return v, found
+	for i := range g.items {
+		if g.items[i].key == key {
+			return g.items[i].val, true
+		}
+	}
+	return nil, false
 }
 
 func (g *gofiStore) TryGet(key string) any {
-	if v, found := g.m[key]; !found {
-		panic(fmt.Sprintf("global value with key %s doesn't exist on context object", key))
-	} else {
-		return v
+	for i := range g.items {
+		if g.items[i].key == key {
+			return g.items[i].val
+		}
+	}
+	panic(fmt.Sprintf("global value with key %s doesn't exist on context object", key))
+}
+
+func (g *gofiStore) All() iter.Seq2[string, any] {
+	return func(yield func(string, any) bool) {
+		for _, item := range g.items {
+			if !yield(item.key, item.val) {
+				return
+			}
+		}
 	}
 }
 
@@ -68,13 +101,15 @@ type RouterMeta interface {
 	Route(path, method string) (any, bool)
 	TryRoute(path, method string) any
 	All() map[string]map[string]any
+	AllSeq() iter.Seq[MetaMapInfo]
 	Filter(fn func(path, method string) bool) map[string]map[string]any
 	FilterAsSlice(fn func(path, method string) bool) []MetaMapInfo
+	FilterSeq(fn func(path, method string) bool) iter.Seq[MetaMapInfo]
 }
 
 // Gets current meta for the current url and true if found. Returns false if not found
 func (m *contextMeta) This() (any, bool) {
-	v, f := m.c.routeMeta[m.c.r.URL.String()][strings.ToLower(m.c.r.Method)]
+	v, f := m.c.routeMeta[m.c.opts.Pattern][strings.ToLower(m.c.opts.Method)]
 	return v, f
 }
 
@@ -126,4 +161,30 @@ func (m metaMap) FilterAsSlice(fn func(path, method string) bool) []MetaMapInfo 
 	}
 
 	return r
+}
+
+func (m metaMap) AllSeq() iter.Seq[MetaMapInfo] {
+	return func(yield func(MetaMapInfo) bool) {
+		for p, v := range m {
+			for mt, vp := range v {
+				if !yield(MetaMapInfo{Path: p, Method: mt, MetaValue: vp}) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (m metaMap) FilterSeq(fn func(path, method string) bool) iter.Seq[MetaMapInfo] {
+	return func(yield func(MetaMapInfo) bool) {
+		for p, v := range m {
+			for mt, vp := range v {
+				if fn(p, mt) {
+					if !yield(MetaMapInfo{Path: p, Method: mt, MetaValue: vp}) {
+						return
+					}
+				}
+			}
+		}
+	}
 }

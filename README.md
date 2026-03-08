@@ -6,13 +6,12 @@ Gofi is an openapi3 schema-based HTTP router for Golang.
 
 - **Schema-Based Routing**: Define routes with type-safe schemas using Go structs.
 - **Automatic Validation**: Request and response validation based on your schema definitions.
-- **Fast Performance**: Designed to be performant with `fastjson` and optimized reflection logic.
+- **Fast Performance**: Uses `valyala/fasthttp` for HTTP and `valyala/fastjson` for optimized JSON encoding.
 - **Developer Friendly**: Simple, intuitive API for defining routes and handlers.
 - **OpenAPI Documentation**: Automatic API documentation generation with support for multiple UI providers (StopLight, Swagger, RapidDoc, Redocly, Scalar).
 - **Customizable**: Add custom validators, body parsers, and type specifications.
 - **Error Handling**: Built-in error handling with customizable handlers.
-- **Error Handling**: Built-in error handling with customizable handlers.
-- **Middleware Support**: Easy integration with standard `http.Handler` middlewares.
+- **Middleware Support**: Context-aware middleware via `MiddlewareFunc`.
 
 
 ## Installation
@@ -59,7 +58,7 @@ type PingSchema struct {
 
 func main() {
 	// Initialize the router
-	r := gofi.NewServeMux()
+	r := gofi.NewRouter()
 
 	// Define the handler
 	pingHandler := gofi.DefineHandler(gofi.RouteOptions{
@@ -95,7 +94,7 @@ func main() {
 	})
 
 	log.Println("Server listening on :8080")
-	http.ListenAndServe(":8080", r)
+	r.Listen(":8080")
 }
 ```
 
@@ -106,7 +105,7 @@ func main() {
 Create a new router instance using `NewServeMux()`:
 
 ```go
-r := gofi.NewServeMux()
+r := gofi.NewRouter()
 ```
 
 ### Defining a Route Schema
@@ -216,32 +215,22 @@ gofi.DefineHandler(gofi.RouteOptions{
 Add global middlewares using `Use()`:
 
 ```go
-r.Use(func(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Println("Request received")
-        next.ServeHTTP(w, r)
-    })
+r.Use(func(c gofi.Context) error {
+    log.Println("Request received")
+    return c.Next()
 })
 ```
 
-### PreHandlers (Context-Aware Middleware)
+### Using net/http Middlewares
 
-Add global Gofi middleware using `UsePreHandler()` for logic that needs access to `gofi.Context`:
+If you have existing `net/http` compatible middlewares (e.g., from Chi, Gorilla, or third-party libraries), you can use `gofi.WrapMiddleware` to convert them:
 
 ```go
-r.UsePreHandler(func(next gofi.HandlerFunc) gofi.HandlerFunc {
-    return func(c gofi.Context) error {
-        // Access context methods
-        token := c.Header().Get("Authorization")
-        if token == "" {
-            return c.Send(401, map[string]string{"error": "Unauthorized"})
-        }
-        return next(c)
-    }
-})
-```
+import "github.com/rs/cors"
 
-For a detailed comparison between Standard Middleware and PreHandlers, see the [Middleware Guide](docs/middleware.md).
+corsHandler := cors.Default()
+r.Use(gofi.WrapMiddleware(corsHandler.Handler))
+```
 
 ### Route Groups
 
@@ -288,8 +277,6 @@ type RouteOptions struct {
     Schema any
     // Custom metadata accessible in handlers
     Meta any
-    // Route-specific middlewares
-    PreHandlers []gofi.PreHandler
     // The handler function
     Handler func(c gofi.Context) error
 }
@@ -386,10 +373,68 @@ func (m *MyCustomDocs) HTML(specPath string) []byte {
 gofi.ServeDocs(r, gofi.DocsOptions{
     Views: []gofi.DocsView{
         {
-            RoutePrefix: "/custom-docs",
+            RoutePrefix: "/docs",
             Template:    &MyCustomDocs{},
         },
     },
+})
+```
+
+### Exporting OpenAPI Specification
+
+If you need to programmatically access the OpenAPI specification to generate a static file for CI/CD, feed code generators (like `oapi-codegen`), or assert against it in tests, you can use `gofi.OpenAPISpec()`.
+
+This function extracts the `gofi.Docs` struct directly from your router without needing to start the server:
+
+```go
+func main() {
+    r := gofi.New()
+    // ... register all your routes and middlewares ...
+
+    // Extract the full OpenAPI 3.0.3 specification
+    opts := gofi.DocsOptions{
+        Info: gofi.DocsInfoOptions{Title: "My API", Version: "1.0"},
+    }
+    masterSpec := gofi.OpenAPISpec(r, opts)
+
+    // Marshal to JSON
+    bytes, _ := json.MarshalIndent(masterSpec, "", "  ")
+
+    // Write to file
+    os.WriteFile("openapi.json", bytes, 0644)
+}
+```
+
+#### Slicing Documentation (Filtering)
+
+When you have multiple documentation views configured via `gofi.DocsOptions.Views` (e.g. one for internal admin panels and one for public clients), you may want to export those restricted subsets to JSON as well. 
+
+The `gofi.Docs` type provides native filtering methods to extract slices:
+
+**Option 1: Extract by View Route Prefix (Recommended)**
+Extract the exact specification that `gofi.ServeDocs` would have served for a given view (automatically applies its `URLMatch` rules and component scoping).
+```go
+opts := gofi.DocsOptions{
+    Views: []gofi.DocsView{
+        { RoutePrefix: "/docs/admin", URLMatch: func(p string) bool { return strings.HasPrefix(p, "/admin") } },
+        { RoutePrefix: "/docs/public" },
+    },
+}
+masterSpec := gofi.OpenAPISpec(r, opts)
+
+// Pull out the spec dynamically bound to the /docs/admin view rules
+adminSpec := masterSpec.FilterByRoutePrefix("/docs/admin")
+```
+
+**Option 2: Filter by URL Prefix**
+```go
+publicSpec := masterSpec.FilterByURL("/public")
+```
+
+**Option 3: Custom Callback Filtering**
+```go
+customSpec := masterSpec.Filter(func(path string) bool {
+    return !strings.HasPrefix(path, "/legacy")
 })
 ```
 
@@ -442,14 +487,14 @@ Gofi provides a convenient way to unit test your handlers without starting a ful
 
 ### The `Inject` Method
 
-The `Inject` method allows you to simulate an HTTP request against your router and returns a standard `httptest.ResponseRecorder`.
+The `Inject` method allows you to simulate an HTTP request against your router and returns an `*InjectResponse`.
 
 It is designed to test handlers in isolation. You pass the `RouteOptions` directly to `Inject`, so you don't even need to register the route on the mux to test it.
 
 ```go
 func TestMyHandler(t *testing.T) {
     // Initialize a router to provide the environment (stores, validation engine)
-    r := gofi.NewServeMux()
+    r := gofi.NewRouter()
 
     // 1. Define your handler options
     myHandlerOpts := gofi.DefineHandler(gofi.RouteOptions{
@@ -460,8 +505,8 @@ func TestMyHandler(t *testing.T) {
     })
 
     // 2. Use Inject to test
-    // Returns *httptest.ResponseRecorder
-    w, err := r.Inject(gofi.InjectOptions{
+    // Returns *InjectResponse
+    resp, err := r.Inject(gofi.InjectOptions{
         Method: "GET",
         Path:   "/test-path",
         Handler: &myHandlerOpts, // Pass the RouteOptions directly (no need to register)
@@ -477,16 +522,32 @@ func TestMyHandler(t *testing.T) {
     }
 
     // 3. Assert results
-    if w.Code != 200 {
-        t.Errorf("Expected 200, got %d", w.Code)
-    }
-    if w.Body.String() != "\"success\"" {
-        t.Errorf("Unexpected body: %s", w.Body.String())
+    if resp.StatusCode != 200 {
+        t.Errorf("Expected 200, got %d", resp.StatusCode)
     }
 }
 ```
 
-### InjectOptions
+### Lightweight Testing with `Test()`
+
+For quick tests on registered routes, use the `Test()` shorthand:
+
+```go
+func TestPing(t *testing.T) {
+    r := gofi.NewRouter()
+    r.Get("/ping", gofi.RouteOptions{
+        Handler: func(c gofi.Context) error {
+            return c.SendString(200, "pong")
+        },
+    })
+
+    resp, err := r.Test("GET", "/ping")
+    assert.NoError(t, err)
+    assert.Equal(t, 200, resp.StatusCode)
+}
+```
+
+### InjectOptions & InjectResponse
 
 ```go
 type InjectOptions struct {
@@ -498,6 +559,12 @@ type InjectOptions struct {
     Cookies []http.Cookie       // Cookies
     Body    io.Reader           // Request Body
     Handler *RouteOptions       // The Handler definition to test
+}
+
+type InjectResponse struct {
+    StatusCode int
+    HeaderMap  http.Header
+    Body       []byte
 }
 ```
 
@@ -572,6 +639,10 @@ r.RegisterBodyParser(&MyXMLParser{})
 
 ## Benchmarks
 
-Gofi is benchmarked against [go-chi/chi](https://github.com/go-chi/chi) and [labstack/echo](https://github.com/labstack/echo) across micro-benchmarks, real-world API traversals, middleware scalability, and concurrency.
+Gofi has been heavily optimized around `fasthttp` to provide maximum throughput and zero-allocation critical paths where possible, dominating benchmark results across micro-benchmarks, real-world API traversals, middleware chains, and concurrency scaling.
 
-> Full benchmark suite and reproducible results: **[gofi-test-utils](https://github.com/michaelolof/gofi-test-utils)**
+### HTTP Load Test Results (`bombardier`, 125 concurrent connections, 5s)
+
+Gofi is benchmarked against [Chi](https://github.com/go-chi/chi), [Echo](https://github.com/labstack/echo), [Gin](https://github.com/gin-gonic/gin), and [Fiber](https://github.com/gofiber/fiber).
+
+> 📊 Full benchmark suite (including memory allocation profiles) and reproducible runner scripts are available at: **[gofi-test-utils](https://github.com/michaelolof/gofi-test-utils)**

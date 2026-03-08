@@ -1,12 +1,16 @@
 package gofi
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
-	"net/http/httptest"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 func TestOpenAPIGeneration(t *testing.T) {
@@ -28,7 +32,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{
 			OperationId: "getUser",
 			Summary:     "Get user detail",
@@ -101,7 +105,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{})
 		body := cs.specs.bodySchema
 
@@ -136,7 +140,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{})
 
 		assert.Contains(t, cs.specs.responsesSchema, "Ok")
@@ -164,7 +168,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 			}
 		}
 
-		r := newServeMux()
+		r := newRouter()
 		cs := r.compileSchema(&testSchema{}, Info{Method: "POST", Url: "/form"})
 		cs.specs.normalize("POST", "/form")
 
@@ -177,7 +181,7 @@ func TestOpenAPIGeneration(t *testing.T) {
 	})
 
 	t.Run("CustomSpecs", func(t *testing.T) {
-		r := newServeMux()
+		r := newRouter()
 		r.RegisterSpec(&vendorSpec{})
 
 		type testSchema struct {
@@ -207,7 +211,7 @@ func TestOpenAPIServing(t *testing.T) {
 		}
 	}
 
-	r := NewServeMux()
+	r := NewRouter()
 	r.Get("/users", RouteOptions{
 		Schema: &getUsersSchema{},
 		Handler: func(c Context) error {
@@ -225,20 +229,64 @@ func TestOpenAPIServing(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("OpenAPIJSON", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/docs/q/openapi", nil)
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
+		m := r.(*serveMux)
+		var fctx fasthttp.RequestCtx
+		var rawReq bytes.Buffer
+		rawReq.WriteString("GET /docs/q/openapi HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
+		m.handleFastHTTP(&fctx)
 
-		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+		assert.Equal(t, 200, fctx.Response.StatusCode())
+		assert.Equal(t, "application/json", string(fctx.Response.Header.Peek("Content-Type")))
 
 		var doc Docs
-		err := json.Unmarshal(w.Body.Bytes(), &doc)
+		err := json.Unmarshal(fctx.Response.Body(), &doc)
 		require.NoError(t, err)
 
 		assert.Equal(t, "3.0.3", doc.OpenApi)
 		assert.Contains(t, *doc.Paths, "/users")
 		assert.Contains(t, (*doc.Paths)["/users"], "get")
+	})
+
+	t.Run("OpenAPIJSON Cache Verification", func(t *testing.T) {
+		m := r.(*serveMux)
+
+		// First request (computes cache)
+		var fctx1 fasthttp.RequestCtx
+		var rawReq1 bytes.Buffer
+		rawReq1.WriteString("GET /docs/q/openapi HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		fctx1.Request.Read(bufio.NewReader(bytes.NewReader(rawReq1.Bytes())))
+		m.handleFastHTTP(&fctx1)
+		require.Equal(t, 200, fctx1.Response.StatusCode())
+		firstBody := fctx1.Response.Body()
+
+		// Second request (serves from cache)
+		var fctx2 fasthttp.RequestCtx
+		var rawReq2 bytes.Buffer
+		rawReq2.WriteString("GET /docs/q/openapi HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		fctx2.Request.Read(bufio.NewReader(bytes.NewReader(rawReq2.Bytes())))
+		m.handleFastHTTP(&fctx2)
+		require.Equal(t, 200, fctx2.Response.StatusCode())
+		secondBody := fctx2.Response.Body()
+
+		// Should be exact byte match
+		assert.Equal(t, firstBody, secondBody)
+	})
+
+	t.Run("OpenAPISpec Export Function", func(t *testing.T) {
+		opts := DocsOptions{
+			Info: DocsInfoOptions{
+				Title:   "Export API",
+				Version: "2.0",
+			},
+		}
+
+		doc := OpenAPISpec(r, opts)
+		assert.Equal(t, "3.0.3", doc.OpenApi)
+		assert.Equal(t, "Export API", doc.Info.Title)
+		assert.Equal(t, "2.0", doc.Info.Version)
+		require.NotNil(t, doc.Paths)
+		assert.Contains(t, *doc.Paths, "/users")
 	})
 
 	templates := []struct {
@@ -255,7 +303,7 @@ func TestOpenAPIServing(t *testing.T) {
 
 	for _, tt := range templates {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewServeMux()
+			r := NewRouter()
 			err := ServeDocs(r, DocsOptions{
 				Views: []DocsView{
 					{
@@ -266,13 +314,95 @@ func TestOpenAPIServing(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			req := httptest.NewRequest("GET", "/docs", nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+			m := r.(*serveMux)
+			var fctx fasthttp.RequestCtx
+			var rawReq bytes.Buffer
+			rawReq.WriteString("GET /docs HTTP/1.1\r\nHost: localhost\r\n\r\n")
+			fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
+			m.handleFastHTTP(&fctx)
 
-			assert.Equal(t, 200, w.Code)
-			assert.Equal(t, "text/html", w.Header().Get("Content-Type"))
-			assert.Contains(t, w.Body.String(), tt.contains)
+			assert.Equal(t, 200, fctx.Response.StatusCode())
+			assert.Equal(t, "text/html", string(fctx.Response.Header.Peek("Content-Type")))
+			assert.True(t, strings.Contains(string(fctx.Response.Body()), tt.contains),
+				fmt.Sprintf("Expected body to contain %q", tt.contains))
 		})
 	}
+}
+
+func TestDocsFiltering(t *testing.T) {
+	r := NewRouter()
+
+	type dummySchema struct {
+		Ok struct{}
+	}
+
+	r.Get("/public/users", RouteOptions{Schema: &dummySchema{}})
+	r.Get("/public/posts", RouteOptions{Schema: &dummySchema{}})
+	r.Post("/admin/users", RouteOptions{Schema: &dummySchema{}})
+	r.Delete("/admin/posts", RouteOptions{Schema: &dummySchema{}})
+
+	opts := DocsOptions{
+		Views: []DocsView{
+			{
+				RoutePrefix: "/docs/admin",
+				URLMatch: func(p string) bool {
+					return strings.HasPrefix(p, "/admin")
+				},
+			},
+			{
+				RoutePrefix: "/docs/public",
+			},
+		},
+	}
+
+	masterSpec := OpenAPISpec(r, opts)
+	require.NotNil(t, masterSpec.Paths)
+	require.Len(t, *masterSpec.Paths, 4)
+
+	t.Run("Filter", func(t *testing.T) {
+		filtered := masterSpec.Filter(func(p string) bool {
+			return strings.HasSuffix(p, "/users")
+		})
+
+		assert.Len(t, *filtered.Paths, 2)
+		assert.Contains(t, *filtered.Paths, "/public/users")
+		assert.Contains(t, *filtered.Paths, "/admin/users")
+
+		// Ensure original is unmodified
+		assert.Len(t, *masterSpec.Paths, 4)
+	})
+
+	t.Run("FilterByURL", func(t *testing.T) {
+		filtered := masterSpec.FilterByURL("/public")
+
+		assert.Len(t, *filtered.Paths, 2)
+		assert.Contains(t, *filtered.Paths, "/public/users")
+		assert.Contains(t, *filtered.Paths, "/public/posts")
+
+		// Ensure original is unmodified
+		assert.Len(t, *masterSpec.Paths, 4)
+	})
+
+	t.Run("FilterByRoutePrefix (with URLMatch)", func(t *testing.T) {
+		filtered := masterSpec.FilterByRoutePrefix("/docs/admin")
+
+		assert.Len(t, *filtered.Paths, 2)
+		assert.Contains(t, *filtered.Paths, "/admin/users")
+		assert.Contains(t, *filtered.Paths, "/admin/posts")
+	})
+
+	t.Run("FilterByRoutePrefix (without URLMatch fallback)", func(t *testing.T) {
+		filtered := masterSpec.FilterByRoutePrefix("/docs/public")
+
+		// Since views without URLMatch serve everything in ServeDocs,
+		// the filter should return the full set.
+		assert.Len(t, *filtered.Paths, 4)
+	})
+
+	t.Run("FilterByRoutePrefix (not found)", func(t *testing.T) {
+		filtered := masterSpec.FilterByRoutePrefix("/docs/unknown")
+
+		// Should return the original unmodified docs
+		assert.Len(t, *filtered.Paths, 4)
+	})
 }

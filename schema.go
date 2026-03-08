@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/michaelolof/gofi/cont"
 )
@@ -235,17 +236,17 @@ type Info struct {
 type schemaField string
 
 const (
-	schemaOperationId schemaField = "OperationId"
-	schemaSummary     schemaField = "Summary"
-	schemaHttpMethod  schemaField = "Method"
-	schemaUrl         schemaField = "Url"
-	schemaDeprecated  schemaField = "Deprecated"
-	schemaReq         schemaField = "Request"
-	schemaHeaders     schemaField = "Header"
-	schemaCookies     schemaField = "Cookie"
-	schemaQuery       schemaField = "Query"
-	schemaPath        schemaField = "Path"
-	schemaBody        schemaField = "Body"
+	// schemaOperationId schemaField = "OperationId"
+	// schemaSummary     schemaField = "Summary"
+	// schemaHttpMethod  schemaField = "Method"
+	// schemaUrl         schemaField = "Url"
+	// schemaDeprecated  schemaField = "Deprecated"
+	schemaReq     schemaField = "Request"
+	schemaHeaders schemaField = "Header"
+	schemaCookies schemaField = "Cookie"
+	schemaQuery   schemaField = "Query"
+	schemaPath    schemaField = "Path"
+	schemaBody    schemaField = "Body"
 )
 
 func (s schemaField) reqSchemaIn() string {
@@ -276,6 +277,23 @@ func runValidation(val any, typ errorType, schema schemaField, keypath string, r
 	for _, rule := range rules {
 		if err := rule.dator(val); err != nil {
 			errs = append(errs, newErrReport(typ, schema, keypath, rule.rule, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// runValidationLazy is like runValidation but defers building the dot-joined keypath
+// until a failure is detected — zero allocation on the happy path.
+func runValidationLazy(val any, typ errorType, schema schemaField, keys []string, rules []ruleOpts) error {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	var errs []error
+	for _, rule := range rules {
+		if err := rule.dator(val); err != nil {
+			errs = append(errs, newErrReport(typ, schema, strings.Join(keys, "."), rule.rule, err))
 		}
 	}
 

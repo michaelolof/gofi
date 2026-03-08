@@ -1,18 +1,27 @@
 package gofi
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/michaelolof/gofi/validators/rules"
+	"github.com/valyala/fasthttp"
 )
 
+// b2s converts []byte to string without allocation.
+// The resulting string MUST NOT be retained beyond the lifetime of the []byte.
+func b2s(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
 type serveMux struct {
-	sm                *http.ServeMux
+	trees             map[string]*node
 	rOpts             *RouteOptions
 	opts              *muxOptions
 	paths             docsPaths
@@ -21,13 +30,12 @@ type serveMux struct {
 	middlewares       Middlewares
 	inlineMiddlewares Middlewares
 	prefix            string
-	preHandlers       []PreHandler
-	chainedHandler    http.Handler
 	ctxPool           *sync.Pool
+	maxParams         uint8
 }
 
-func NewServeMux() Router {
-	return newServeMux()
+func NewRouter() Router {
+	return newRouter()
 }
 
 func (s *serveMux) Method(method string, path string, opts RouteOptions) {
@@ -85,9 +93,7 @@ func (s *serveMux) Route(pattern string, fn func(r Router)) Router {
 	return im
 }
 
-// Group creates a new inline-Mux with a copy of middleware stack. It's useful
-// for a group of handlers along the same routing path that use an additional
-// set of middlewares.
+// Group creates a new inline-Mux with a copy of middleware stack.
 func (s *serveMux) Group(fn func(r Router)) Router {
 	im := s.With()
 	if fn != nil {
@@ -96,49 +102,110 @@ func (s *serveMux) Group(fn func(r Router)) Router {
 	return im
 }
 
-func (s *serveMux) Use(middlewares ...func(http.Handler) http.Handler) {
+func (s *serveMux) Use(middlewares ...MiddlewareFunc) {
 	s.middlewares = append(s.middlewares, middlewares...)
-	s.buildChain()
 }
 
-// buildChain pre-builds the middleware chain so ServeHTTP doesn't
-// have to reconstruct it on every request.
-func (s *serveMux) buildChain() {
-	var h http.Handler = s.sm
-	for i := len(s.middlewares) - 1; i >= 0; i-- {
-		h = s.middlewares[i](h)
-	}
-	s.chainedHandler = h
-}
-
-func (s *serveMux) With(middlewares ...func(http.Handler) http.Handler) Router {
+func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 	newMux := *s
 	newMux.inlineMiddlewares = make(Middlewares, len(s.inlineMiddlewares), len(s.inlineMiddlewares)+len(middlewares))
 	copy(newMux.inlineMiddlewares, s.inlineMiddlewares)
 	newMux.inlineMiddlewares = append(newMux.inlineMiddlewares, middlewares...)
 
-	// Deep copy preHandlers for isolation
-	newMux.preHandlers = make([]PreHandler, len(s.preHandlers))
-	copy(newMux.preHandlers, s.preHandlers)
-
 	return &newMux
 }
 
-func (s *serveMux) Handle(pattern string, handler http.Handler) {
-	s.sm.Handle(pattern, handler)
+// handleFastHTTP is the main fasthttp request handler.
+// Called by fasthttp.Server for each incoming connection.
+func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
+	method := b2s(ctx.Method())
+	path := b2s(ctx.Path())
+
+	if root := s.trees[method]; root != nil {
+		c := s.acquireContext(ctx)
+
+		routeData, tsr := root.getValue(path, func() *Params {
+			if cap(c.params) < int(s.maxParams) {
+				c.params = make(Params, 0, s.maxParams)
+			}
+			return &c.params
+		})
+
+		if routeData != nil {
+			c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+			c.handlers = routeData.handlers
+			c.handlerIdx = -1
+
+			// Start the middleware/handler chain
+			if err := c.Next(); err != nil {
+				s.opts.errHandler(err, c)
+			}
+
+			// Sync any headers set via the adapter writer to fasthttp response
+			if c.rw != nil {
+				c.rw.syncHeaders()
+			}
+
+			s.releaseContext(c)
+			return
+		} else if method != http.MethodConnect && path != "/" {
+			if tsr {
+				code := http.StatusMovedPermanently
+				if method != http.MethodGet {
+					code = http.StatusPermanentRedirect
+				}
+				redirectPath := path
+				if len(redirectPath) > 1 && redirectPath[len(redirectPath)-1] == '/' {
+					redirectPath = redirectPath[:len(redirectPath)-1]
+				} else {
+					redirectPath = redirectPath + "/"
+				}
+				ctx.Redirect(redirectPath, code)
+				s.releaseContext(c)
+				return
+			}
+		}
+
+		s.releaseContext(c)
+	}
+
+	// 404
+	ctx.SetStatusCode(http.StatusNotFound)
+	ctx.SetBodyString("404 page not found\n")
 }
 
-func (s *serveMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
-	s.sm.HandleFunc(pattern, handler)
+// dummyLogger implements fasthttp.Logger
+type dummyLogger struct{}
+
+func (d *dummyLogger) Printf(format string, args ...interface{}) {}
+
+// Test dispatches a request through the full route tree and returns an InjectResponse.
+func (s *serveMux) Test(method, path string) *InjectResponse {
+	var fctx fasthttp.RequestCtx
+	fctx.Init2(nil, &dummyLogger{}, false)
+	fctx.Request.Header.SetMethod(method)
+	fctx.Request.SetRequestURI(path)
+	fctx.Request.Header.SetHost("localhost")
+
+	s.handleFastHTTP(&fctx)
+
+	// Collect response headers
+	headerMap := make(http.Header)
+	for key, val := range fctx.Response.Header.All() {
+		headerMap.Add(string(key), string(val))
+	}
+
+	return &InjectResponse{
+		StatusCode: fctx.Response.StatusCode(),
+		HeaderMap:  headerMap,
+		Body:       fctx.Response.Body(),
+	}
 }
 
-func (s *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.chainedHandler.ServeHTTP(w, r)
-}
-
-func (s *serveMux) acquireContext(w http.ResponseWriter, r *http.Request) *context {
+func (s *serveMux) acquireContext(ctx *fasthttp.RequestCtx) *context {
 	c := s.ctxPool.Get().(*context)
-	c.reset(w, r)
+	c.reset(ctx)
+	c.params = c.params[:0]
 	return c
 }
 
@@ -158,10 +225,6 @@ func (s *serveMux) UseErrorHandler(handler func(err error, c Context)) {
 	if handler != nil {
 		s.opts.errHandler = handler
 	}
-}
-
-func (s *serveMux) UsePreHandler(h ...func(h HandlerFunc) HandlerFunc) {
-	s.preHandlers = append(s.preHandlers, h...)
 }
 
 func (s *serveMux) RegisterSpec(list ...CustomSpec) {
@@ -190,7 +253,35 @@ func (s *serveMux) Static(prefix, root string) {
 
 	fs := http.FileServer(http.Dir(root))
 	handler := http.StripPrefix(prefix, fs)
-	s.Handle(prefix, handler)
+
+	s.method("GET", prefix+"*filepath", RouteOptions{
+		Handler: func(c Context) error {
+			// Bridge to net/http file server via adapter
+			w := c.Writer()
+			rw, ok := w.(http.ResponseWriter)
+			if !ok {
+				rw = newHTTPResponseWriterShim(c)
+			}
+			r := convertFasthttpToHTTPRequest(c)
+			handler.ServeHTTP(rw, r)
+			return nil
+		},
+	})
+}
+
+// Listen starts the server on the given address using fasthttp.
+func (s *serveMux) Listen(addr string) error {
+	srv := &FasthttpServer{
+		mux: s,
+		server: &fasthttp.Server{
+			Handler:            s.handleFastHTTP,
+			Name:               "gofi",
+			DisableKeepalive:   false,
+			ReduceMemoryUsage:  false,
+			MaxRequestBodySize: 4 * 1024 * 1024,
+		},
+	}
+	return srv.Listen(listenAddr(addr))
 }
 
 type ValidatorContext = rules.ValidatorContext
@@ -212,59 +303,72 @@ type InjectOptions struct {
 	Handler *RouteOptions
 }
 
-func (s *serveMux) Inject(opts InjectOptions) (rec *httptest.ResponseRecorder, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic recovered in Inject: %v", r)
-			if rec == nil {
-				rec = httptest.NewRecorder()
-			}
-			rec.WriteHeader(http.StatusInternalServerError)
-		}
-	}()
-
-	r, err := http.NewRequest(opts.Method, opts.Path, opts.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(opts.Query) > 0 {
-		qParams := r.URL.Query()
-		for name, value := range opts.Query {
-			qParams.Add(name, value)
-		}
-		r.URL.RawQuery = qParams.Encode()
-	}
-
-	for name, value := range opts.Paths {
-		r.SetPathValue(name, value)
-	}
-
-	for _, cookie := range opts.Cookies {
-		r.AddCookie(&cookie)
-	}
-
-	for name, value := range opts.Headers {
-		r.Header.Add(name, value)
-	}
-
+func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) {
 	def := opts.Handler
 	if def == nil {
 		return nil, fmt.Errorf("gofi controller not defined for the given method '%s' and path '%s'", opts.Method, opts.Path)
 	}
 
-	w := httptest.NewRecorder()
-	c := s.acquireContext(w, r)
+	// Build a synthetic fasthttp.RequestCtx for testing
+	var reqBody []byte
+	if opts.Body != nil {
+		var err error
+		reqBody, err = io.ReadAll(opts.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read inject body: %w", err)
+		}
+	}
+
+	// Build the raw HTTP request string
+	var rawReq bytes.Buffer
+	path := opts.Path
+	if len(opts.Query) > 0 {
+		qParts := make([]string, 0, len(opts.Query))
+		for k, v := range opts.Query {
+			qParts = append(qParts, k+"="+v)
+		}
+		path += "?" + strings.Join(qParts, "&")
+	}
+
+	rawReq.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", opts.Method, path))
+	rawReq.WriteString("Host: localhost\r\n")
+
+	for name, value := range opts.Headers {
+		rawReq.WriteString(fmt.Sprintf("%s: %s\r\n", name, value))
+	}
+
+	for _, cookie := range opts.Cookies {
+		rawReq.WriteString(fmt.Sprintf("Cookie: %s=%s\r\n", cookie.Name, cookie.Value))
+	}
+
+	if len(reqBody) > 0 {
+		rawReq.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(reqBody)))
+	}
+
+	rawReq.WriteString("\r\n")
+
+	if len(reqBody) > 0 {
+		rawReq.Write(reqBody)
+	}
+
+	// Create fasthttp context from raw request
+	var fctx fasthttp.RequestCtx
+	fctx.Init2(nil, &dummyLogger{}, false)
+	fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
+
+	c := s.acquireContext(&fctx)
 	defer s.releaseContext(c)
 
-	setupInjectContext := func(path, method string, ropts *RouteOptions, meta metaMap) {
-		if ropts.Schema != nil {
-			rules := s.compileSchema(ropts.Schema, ropts.Info)
-			rules.specs.normalize(method, path)
-			s.opts.schemaRules.SetRules(path, method, &rules.rules)
-		}
+	// Set path params
+	for name, value := range opts.Paths {
+		c.params = append(c.params, Param{Key: name, Value: value})
+	}
 
-		c.setContextSettings(newContextOptions(path, method), meta, s.globalStore, s.opts)
+	// Compile schema if present
+	if def.Schema != nil {
+		rules := s.compileSchema(def.Schema, def.Info)
+		rules.specs.normalize(opts.Method, opts.Path)
+		s.opts.schemaRules.SetRules(opts.Path, opts.Method, &rules.rules)
 	}
 
 	var routeMeta metaMap
@@ -273,25 +377,56 @@ func (s *serveMux) Inject(opts InjectOptions) (rec *httptest.ResponseRecorder, e
 		s.routeMeta[opts.Path] = v
 		routeMeta = s.routeMeta
 	}
-	setupInjectContext(opts.Path, opts.Method, opts.Handler, routeMeta)
+	c.setContextSettings(newContextOptions(opts.Path, opts.Method), routeMeta, s.globalStore, s.opts)
 
-	// Combine global and route-specific pre-handlers
-	allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(def.PreHandlers))
-	allPreHandlers = append(allPreHandlers, s.preHandlers...)
-	allPreHandlers = append(allPreHandlers, def.PreHandlers...)
+	// Build flat chain: middlewares + handler
+	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
+	allHandlers = append(allHandlers, s.middlewares...)
+	allHandlers = append(allHandlers, def.Handler)
 
-	handler := applyMiddleware(def.Handler, allPreHandlers)
-	err = handler(c)
-	if err != nil {
-		s.opts.errHandler(err, c)
-		return w, nil
+	c.handlers = allHandlers
+	c.handlerIdx = -1
+
+	// Execute handler chain with explicit panic recovery
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic recovered in Inject: %v", r)
+				fctx.Response.SetStatusCode(500)
+			}
+		}()
+		if handlerErr := c.Next(); handlerErr != nil {
+			s.opts.errHandler(handlerErr, c)
+		}
+	}()
+
+	// Build InjectResponse from fctx
+	respHeaders := make(http.Header)
+	fctx.Response.Header.VisitAll(func(key, value []byte) {
+		respHeaders.Add(string(key), string(value))
+	})
+
+	// Also sync any headers that were set via the adapter
+	if c.rw != nil {
+		for k, vals := range c.rw.header {
+			for _, v := range vals {
+				respHeaders.Add(k, v)
+			}
+		}
 	}
 
-	return w, nil
+	resp = &InjectResponse{
+		StatusCode: fctx.Response.StatusCode(),
+		HeaderMap:  respHeaders,
+		Body:       fctx.Response.Body(),
+	}
+
+	return resp, err
 }
 
-func ListenAndServe(addr string, handler http.Handler) error {
-	return http.ListenAndServe(addr, handler)
+// ListenAndServe starts a fasthttp server with the given router.
+func ListenAndServe(addr string, r Router) error {
+	return r.Listen(addr)
 }
 
 func (s *serveMux) method(method string, path string, opts RouteOptions) {
@@ -328,39 +463,45 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 		s.routeMeta[path] = v
 	}
 
-	// Pre-compose all pre-handlers at registration time (not per-request)
-	allPreHandlers := make([]PreHandler, 0, len(s.preHandlers)+len(opts.PreHandlers))
-	allPreHandlers = append(allPreHandlers, s.preHandlers...)
-	allPreHandlers = append(allPreHandlers, opts.PreHandlers...)
-	composedHandler := applyMiddleware(opts.Handler, allPreHandlers)
+	// Build the flat handler chain: global MW + inline MW + handler
+	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+len(s.inlineMiddlewares)+1)
+	allHandlers = append(allHandlers, s.middlewares...)
+	allHandlers = append(allHandlers, s.inlineMiddlewares...)
+	allHandlers = append(allHandlers, opts.Handler)
 
-	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := s.acquireContext(w, r)
-		defer s.releaseContext(c)
-
-		c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
-
-		err := composedHandler(c)
-		if err != nil {
-			s.opts.errHandler(err, c)
-		}
-	})
-
-	middlewares := s.inlineMiddlewares
-	if len(middlewares) > 0 {
-		h = middlewares[len(middlewares)-1](h)
-		for i := len(middlewares) - 2; i >= 0; i-- {
-			h = middlewares[i](h)
-		}
+	// Register in the radix tree
+	if s.trees == nil {
+		s.trees = make(map[string]*node)
+	}
+	root := s.trees[method]
+	if root == nil {
+		root = new(node)
+		s.trees[method] = root
 	}
 
-	s.sm.Handle(method+" "+path, h)
+	data := &routeData{
+		handlers: allHandlers,
+		meta:     opts.Meta,
+	}
+
+	// Add schema rules to the node data directly
+	if opts.Schema != nil {
+		rules := s.opts.schemaRules.GetRules(path, method)
+		data.rules = rules
+	}
+
+	root.addRoute(path, data)
+
+	// Update maxParams
+	if root.maxParams > s.maxParams {
+		s.maxParams = root.maxParams
+	}
 }
 
-func newServeMux() *serveMux {
+func newRouter() *serveMux {
 	middlewares := make(Middlewares, 0, 15)
-	return serveMuxBuilder(
-		http.NewServeMux(),
+	return serveRouterBuilder(
+		make(map[string]*node),
 		map[string]map[string]openapiOperationObject{},
 		map[string]map[string]any{},
 		NewGlobalStore(),
@@ -369,28 +510,55 @@ func newServeMux() *serveMux {
 	)
 }
 
-func serveMuxBuilder(sm *http.ServeMux, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
-	return &serveMux{
-		sm:                sm,
+func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {
+	s := &serveMux{
+		trees:             trees,
 		paths:             paths,
 		routeMeta:         rm,
 		globalStore:       globalStore,
 		middlewares:       m,
 		inlineMiddlewares: make(Middlewares, 0),
-		preHandlers:       make([]PreHandler, 0),
 		opts:              opts,
 		rOpts:             nil,
-		chainedHandler:    sm, // Default: no middlewares, dispatch directly
 		ctxPool: &sync.Pool{
 			New: func() interface{} {
-				// Allocate a new context, but don't set ephemeral fields yet
 				return &context{
 					routeMeta:         map[string]map[string]any{},
-					globalStore:       globalStore, // Shared global store reference
-					serverOpts:        opts,        // Shared options reference
+					globalStore:       globalStore,
+					serverOpts:        opts,
 					bindedCacheResult: bindedResult{bound: false},
+					params:            make(Params, 0, 10),
 				}
 			},
 		},
 	}
+	return s
+}
+
+// newHTTPResponseWriterShim creates a simple http.ResponseWriter for bridging to net/http handlers.
+type httpResponseWriterShim struct {
+	c Context
+}
+
+func newHTTPResponseWriterShim(c Context) *httpResponseWriterShim {
+	return &httpResponseWriterShim{c: c}
+}
+
+func (w *httpResponseWriterShim) Header() http.Header {
+	return w.c.Writer().Header()
+}
+
+func (w *httpResponseWriterShim) Write(b []byte) (int, error) {
+	return w.c.Writer().Write(b)
+}
+
+func (w *httpResponseWriterShim) WriteHeader(statusCode int) {
+	w.c.Writer().WriteHeader(statusCode)
+}
+
+// convertFasthttpToHTTPRequest builds a *http.Request from the context for net/http bridge usage.
+func convertFasthttpToHTTPRequest(c Context) *http.Request {
+	req := c.Request()
+	r, _ := http.NewRequest(req.Method, req.URL.String(), req.Body)
+	return r
 }

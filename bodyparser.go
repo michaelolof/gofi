@@ -2,13 +2,11 @@ package gofi
 
 import (
 	"io"
-	"net/http"
 	"reflect"
 )
 
 type RequestOptions struct {
-	// SchemaField schemaField // Needed for error reporting
-	SchemaRules *RuleDef // Needed for recursion
+	SchemaRules *RuleDef
 	ShouldBind  bool
 	Context     ParserContext
 	SchemaPtr   any
@@ -17,7 +15,7 @@ type RequestOptions struct {
 
 type ResponseOptions struct {
 	Context     ParserContext
-	SchemaRules *RuleDef // Needed for validation
+	SchemaRules *RuleDef
 	Body        reflect.Value
 }
 
@@ -27,9 +25,10 @@ type BodyParser interface {
 	ValidateAndEncodeResponse(s any, opts ResponseOptions) ([]byte, error)
 }
 
+// ParserContext provides access to request/response context for body parsers.
 type ParserContext interface {
-	Writer() http.ResponseWriter
-	Request() *http.Request
+	Writer() ResponseWriter
+	Request() *Request
 	CustomSpecs() CustomSpecs
 }
 
@@ -37,11 +36,11 @@ type parserContext struct {
 	c *context
 }
 
-func (p *parserContext) Writer() http.ResponseWriter {
+func (p *parserContext) Writer() ResponseWriter {
 	return p.c.Writer()
 }
 
-func (p *parserContext) Request() *http.Request {
+func (p *parserContext) Request() *Request {
 	return p.c.Request()
 }
 

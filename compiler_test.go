@@ -23,7 +23,7 @@ func TestOpenAPISpecsMethod(t *testing.T) {
 		}
 	}
 
-	r := newServeMux()
+	r := newRouter()
 	r.RegisterSpec(&vendorSpec{})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
@@ -41,7 +41,7 @@ func TestCompilerTags(t *testing.T) {
 		}
 	}
 
-	r := newServeMux()
+	r := newRouter()
 	cs := r.compileSchema(&testSchema{}, Info{
 		Tags: []string{"User", "Profile"},
 	})
@@ -61,7 +61,7 @@ func TestCompilerHooksOpenAPISpecs(t *testing.T) {
 		}
 	}
 
-	r := newServeMux()
+	r := newRouter()
 	r.RegisterSpec(&vendorSpec{})
 	cs := r.compileSchema(&testSchema{}, Info{})
 
@@ -96,7 +96,7 @@ func TestCompilerHooksBindedRequest(t *testing.T) {
 		},
 	}
 
-	r := newServeMux()
+	r := newRouter()
 	r.RegisterSpec(&vendorSpec{})
 	r.Inject(InjectOptions{
 		Path:   "/test/:primitive/:custom",
@@ -135,7 +135,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 		},
 	}
 
-	r := newServeMux()
+	r := newRouter()
 	r.RegisterSpec(&vendorSpec{})
 	resp, err := r.Inject(InjectOptions{
 		Path:    "/test/:primitive/:custom",
@@ -147,7 +147,7 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	}
 
 	var data testSchemaBody
-	err = json.Unmarshal(resp.Body.Bytes(), &data)
+	err = json.Unmarshal(resp.Body, &data)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -167,7 +167,7 @@ func TestDynamicStructTags(t *testing.T) {
 		}
 	}
 
-	r := newServeMux()
+	r := newRouter()
 	r.RegisterSpec(&vendorSpec{id: "dynamic"})
 	cs := r.compileSchema(&testSchema{}, Info{})
 

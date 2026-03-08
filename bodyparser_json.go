@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net/http"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/michaelolof/gofi/cont"
@@ -22,6 +22,12 @@ type JSONBodyParser struct {
 	MaxRequestSize int64
 	MaxDepth       int
 	MaintainOrder  bool
+}
+
+var jsonBodyPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
 }
 
 func (j *JSONBodyParser) Match(contentType string) bool {
@@ -39,8 +45,17 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		bsMax = 1048576 // defaultReqSize
 	}
 
-	body = http.MaxBytesReader(opts.Context.Writer(), body, bsMax)
-	bs, err := io.ReadAll(body)
+	// Limit body size without depending on net/http
+	limitedBody := io.NopCloser(io.LimitReader(body, bsMax))
+	body = limitedBody
+
+	buf := jsonBodyPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer jsonBodyPool.Put(buf)
+
+	_, err := buf.ReadFrom(body)
+	bs := buf.Bytes()
+
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "reader", err)
 	} else if len(bs) == 0 && opts.SchemaRules != nil && opts.SchemaRules.required {
@@ -120,13 +135,18 @@ func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 		return nil, newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
 	}
 
-	var buff bytes.Buffer
-	buff.Reset()
-	if err := j.encodeFieldValue(opts.Context, &buff, opts.Body, opts.SchemaRules, nil); err != nil {
+	buf := jsonBodyPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if err := j.encodeFieldValue(opts.Context, buf, opts.Body, opts.SchemaRules, nil); err != nil {
+		jsonBodyPool.Put(buf)
 		return nil, newErrReport(ResponseErr, schemaBody, "", "encoder", err)
 	}
 
-	return buff.Bytes(), nil
+	// Copy result before returning buffer to pool
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	jsonBodyPool.Put(buf)
+	return result, nil
 }
 
 func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
@@ -137,10 +157,9 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "depth", errors.New("max recursion depth exceeded"))
 	}
 
-	kp := strings.Join(keys, ".")
 	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
 	if err != nil {
-		return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
+		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 	}
 
 	if (val == nil || val == cont.EOF) && opts.SchemaRules.defVal != nil {
@@ -158,14 +177,14 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 	}
 
 	if opts.SchemaRules.format == utils.TimeObjectFormat || opts.SchemaRules.format == utils.CookieObjectFormat {
-		if err := runValidation(val, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(val, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
 			err = j.decodeFieldValue(opts.Body, val)
 			if err != nil {
-				newErrReport(RequestErr, schemaField, kp, "encoder", err)
+				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
 			}
 		}
 
@@ -174,7 +193,20 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 
 	switch opts.SchemaRules.kind {
 	case reflect.Struct:
-		if j.MaintainOrder && opts.SchemaRules.typ != nil {
+		// Fast path: use pre-ordered props slice when available
+		if len(opts.SchemaRules.orderedProps) > 0 {
+			for _, childDef := range opts.SchemaRules.orderedProps {
+				var childStruct reflect.Value
+				if opts.ShouldBind && opts.Body != nil {
+					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
+				}
+				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
+				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childDef.field))
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else if j.MaintainOrder && opts.SchemaRules.typ != nil {
 			for _, field := range reflect.VisibleFields(opts.SchemaRules.typ) {
 				jsonTags := strings.Split(field.Tag.Get("json"), ",")
 				var name string
@@ -183,17 +215,14 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				} else {
 					name = field.Name
 				}
-
 				childDef, ok := opts.SchemaRules.properties[name]
 				if !ok {
 					continue
 				}
-
 				var childStruct reflect.Value
 				if opts.ShouldBind && opts.Body != nil {
 					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
 				}
-
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
 				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, name))
 				if err != nil {
@@ -206,7 +235,6 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				if opts.ShouldBind && opts.Body != nil {
 					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
 				}
-
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
 				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childKey))
 				if err != nil {
@@ -224,7 +252,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 
 		obj, err := pv.GetRawObject(keys)
 		if err != nil {
-			return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
+			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
@@ -271,19 +299,19 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 			// Handle array of primitive values
 			arr, err := pv.GetPrimitiveArrVals(rules.item.kind, rules.format, keys, size)
 			if rules.max != nil && len(arr) > int(*rules.max) {
-				return nil, newErrReport(RequestErr, schemaField, kp, "max", errors.New("array size too large"))
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "max", errors.New("array size too large"))
 			} else if err != nil {
-				return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 			}
 
-			if err := runValidation(arr, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
+			if err := runValidationLazy(arr, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
 			if opts.ShouldBind && opts.Body != nil {
 				err = j.decodeFieldValue(opts.Body, arr)
 				if err != nil {
-					newErrReport(RequestErr, schemaField, kp, "encoder", err)
+					newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
 				}
 			}
 
@@ -302,7 +330,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 			}
 
 			for {
-				_keys := append(keys, fmt.Sprintf("%d", i))
+				_keys := append(keys, strconv.Itoa(i))
 				_kp := strings.Join(_keys, ".")
 				if !pv.Exist(_keys...) {
 					if rules.required && i == 0 {
@@ -324,7 +352,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				}
 
 				fopts := j.getFieldOptions(opts, &istrct, rules.item)
-				_, err := j.walkStruct(pv, schemaBody, fopts, append(keys, fmt.Sprintf("%d", i)))
+				_, err := j.walkStruct(pv, schemaBody, fopts, append(keys, strconv.Itoa(i)))
 				if err != nil {
 					return nil, err
 				}
@@ -341,9 +369,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 			if opts.ShouldBind && opts.Body != nil {
 				sliceVal = nslice.Interface()
 			}
-			// Note: validation of slice itself (e.g. min items) is tricky if logic above handles items individually.
-			// But original code validates slice here:
-			if err := runValidation(sliceVal, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
+			if err := runValidationLazy(sliceVal, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
@@ -361,31 +387,31 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 	case reflect.Interface:
 		v, err := pv.GetAnyValue(keys)
 		if err != nil {
-			return nil, newErrReport(RequestErr, schemaField, kp, "parser", err)
+			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 		}
 
-		if err := runValidation(v, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(v, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
 			err = j.decodeFieldValue(opts.Body, v)
 			if err != nil {
-				newErrReport(RequestErr, schemaField, kp, "encoder", err)
+				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
 			}
 		}
 
 		return &walkFinished, nil
 
 	default:
-		if err := runValidation(val, RequestErr, schemaField, kp, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(val, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
 			err = j.decodeFieldValue(opts.Body, val)
 			if err != nil {
-				newErrReport(RequestErr, schemaField, kp, "encoder", err)
+				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
 			}
 		}
 
@@ -607,10 +633,40 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 
 	var encodeStruct func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
 	encodeStruct = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
-		buf.WriteString("{")
+		buf.WriteByte('{')
 		first := true
 
-		if j.MaintainOrder && rules != nil {
+		// Fast path: schema rules are pre-compiled
+		if rules != nil && len(rules.orderedProps) > 0 {
+			for _, frules := range rules.orderedProps {
+				var fieldValue reflect.Value
+				if len(frules.accessor.index) > 0 {
+					fieldValue = val.FieldByIndex(frules.accessor.index)
+				} else {
+					fieldValue = val.FieldByName(frules.fieldName)
+				}
+
+				if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
+					continue
+				}
+
+				if !first {
+					buf.WriteByte(',')
+				}
+				first = false
+
+				if len(frules.jsonKeyBytes) > 0 {
+					buf.Write(frules.jsonKeyBytes)
+				} else {
+					buf.WriteString(`"` + frules.field + `":`)
+				}
+
+				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, frules.field)); err != nil {
+					return err
+				}
+			}
+		} else {
+			// Slow path: arbitrary struct without predefined schema
 			typ := val.Type()
 			for _, field := range reflect.VisibleFields(typ) {
 				jsonTags := strings.Split(field.Tag.Get("json"), ",")
@@ -621,46 +677,24 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 					name = field.Name
 				}
 
-				frules, ok := rules.properties[name]
-				if !ok {
+				if slices.Contains(jsonTags, "-") || (slices.Contains(jsonTags, "omitempty") && isEmptyValue(val.FieldByName(field.Name))) {
 					continue
 				}
 
+				if !first {
+					buf.WriteByte(',')
+				}
+				first = false
+
+				buf.WriteString(`"` + name + `":`)
 				fieldValue := val.FieldByName(field.Name)
-				if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
-					continue
-				}
-
-				if !first {
-					buf.WriteString(",")
-				}
-				first = false
-
-				buf.WriteString(fmt.Sprintf(`"%s":`, name))
-				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, name)); err != nil {
-					return err
-				}
-			}
-		} else if rules != nil {
-			for field, frules := range rules.properties {
-				fieldValue := val.FieldByName(frules.fieldName)
-				if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
-					continue
-				}
-
-				if !first {
-					buf.WriteString(",")
-				}
-				first = false
-
-				buf.WriteString(fmt.Sprintf(`"%s":`, field))
-				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, field)); err != nil {
+				if err := j.encodeFieldValue(c, buf, fieldValue, nil, append(kp, name)); err != nil {
 					return err
 				}
 			}
 		}
 
-		buf.WriteString("}")
+		buf.WriteByte('}')
 		return nil
 	}
 
@@ -732,29 +766,20 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 		encodeString(buf, val.String())
 		return nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		_, err := buf.WriteString(fmt.Sprintf("%v", val.Int()))
-		if err != nil {
-			return err
-		}
+		b := strconv.AppendInt(buf.AvailableBuffer(), val.Int(), 10)
+		buf.Write(b)
 		return nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		_, err := buf.WriteString(fmt.Sprintf("%v", val.Uint()))
-		if err != nil {
-			return err
-		}
+		b := strconv.AppendUint(buf.AvailableBuffer(), val.Uint(), 10)
+		buf.Write(b)
 		return nil
 	case reflect.Float32, reflect.Float64:
-		_, err := buf.WriteString(fmt.Sprintf("%v", val.Float()))
-		if err != nil {
-			return err
-		}
+		b := strconv.AppendFloat(buf.AvailableBuffer(), val.Float(), 'f', -1, 64)
+		buf.Write(b)
 		return nil
-
 	case reflect.Bool:
-		_, err := buf.WriteString(fmt.Sprintf("%t", val.Bool()))
-		if err != nil {
-			return err
-		}
+		b := strconv.AppendBool(buf.AvailableBuffer(), val.Bool())
+		buf.Write(b)
 		return nil
 	case reflect.Slice, reflect.Array:
 		return encodeArr(buf, val, rules, kp)
