@@ -3,6 +3,8 @@ package gofi
 import (
 	"io"
 	"reflect"
+
+	"github.com/valyala/fastjson"
 )
 
 type RequestOptions struct {
@@ -30,6 +32,7 @@ type ParserContext interface {
 	Writer() ResponseWriter
 	Request() *Request
 	CustomSpecs() CustomSpecs
+	getParser() *fastjson.Parser
 }
 
 type parserContext struct {
@@ -46,4 +49,8 @@ func (p *parserContext) Request() *Request {
 
 func (p *parserContext) CustomSpecs() CustomSpecs {
 	return p.c.serverOpts.customSpecs
+}
+
+func (p *parserContext) getParser() *fastjson.Parser {
+	return p.c.getParser()
 }

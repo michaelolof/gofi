@@ -98,7 +98,9 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 	}
 
 	// Handle non primitives with FastJSON
-	pv, err := cont.PoolJsonParse(bs)
+	p := opts.Context.getParser()
+
+	pv, err := p.ParseBytes(bs)
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
@@ -109,7 +111,7 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 	}
 
 	strctOpts := j.getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
-	status, err := j.walkStruct(pv.GetRawValue(), schemaBody, strctOpts, nil)
+	status, err := j.walkStruct(pv, schemaBody, strctOpts, nil)
 	if err != nil {
 		return err
 	}

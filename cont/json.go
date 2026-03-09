@@ -12,8 +12,6 @@ import (
 	"github.com/valyala/fastjson"
 )
 
-var jsonParserPool fastjson.ParserPool
-
 type ParsedJson struct {
 	pv *fastjson.Value
 }

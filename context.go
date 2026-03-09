@@ -7,6 +7,7 @@ import (
 
 	"github.com/michaelolof/gofi/utils"
 	"github.com/valyala/fasthttp"
+	"github.com/valyala/fastjson"
 )
 
 // Pre-allocated content-type byte slices for zero-alloc header setting
@@ -58,6 +59,8 @@ type Context interface {
 	QueryBytes(name string) []byte
 	// SetBodyStreamWriter sets a chunked stream writer for the response body
 	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
+	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
+	getParser() *fastjson.Parser
 	// SendStream simplifies SSE. Sets necessary headers and takes over the connection.
 	SendStream(sw func(w *bufio.Writer) error) error
 	// Copy creates a deep copy of the Context that is safe to use in a background goroutine.
@@ -84,8 +87,9 @@ type context struct {
 	params            Params
 	handlers          []HandlerFunc
 	handlerIdx        int
-	rw                *responseWriter // cached response writer adapter
-	req               *Request        // cached request adapter
+	rw                *responseWriter  // cached response writer adapter
+	req               *Request         // cached request adapter
+	jsonParser        *fastjson.Parser // request-bound fastjson parser
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
@@ -142,6 +146,14 @@ func (c *context) DataStore() GofiStore {
 
 func (c *context) Meta() ContextMeta {
 	return &contextMeta{c: c}
+}
+
+func (c *context) getParser() *fastjson.Parser {
+	if c.jsonParser == nil {
+		var p fastjson.Parser
+		c.jsonParser = &p
+	}
+	return c.jsonParser
 }
 
 func (c *context) Copy() Context {
