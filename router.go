@@ -1,5 +1,11 @@
 package gofi
 
+import (
+	stdcontext "context"
+
+	"github.com/valyala/fasthttp"
+)
+
 type Router interface {
 	Connect(pattern string, o RouteOptions)
 	Delete(pattern string, o RouteOptions)
@@ -40,6 +46,22 @@ type Router interface {
 
 	// Listen starts the server on the given address
 	Listen(addr string) error
+
+	// ListenTLS starts an HTTPS server on the given address using the provided certificate and key files
+	ListenTLS(addr, certFile, keyFile string) error
+
+	// ListenTLSMutual starts an HTTPS server providing mutual TLS (mTLS) authentication
+	ListenTLSMutual(addr, certFile, keyFile, clientCertFile string) error
+
+	// Shutdown gracefully shuts down the server, waiting for active connections to finish.
+	Shutdown() error
+
+	// ShutdownWithContext gracefully shuts down the server, forcefully closing after context is canceled.
+	ShutdownWithContext(ctx stdcontext.Context) error
+
+	// Handler returns the underlying fasthttp.RequestHandler, allowing the router to be
+	// embedded within custom fasthttp.Server configurations natively.
+	Handler() fasthttp.RequestHandler
 
 	GlobalStore() GofiStore
 	Meta() RouterMeta

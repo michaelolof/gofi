@@ -9,6 +9,9 @@ Gofi is an openapi3 schema-based HTTP router for Golang.
 - **Fast Performance**: Uses `valyala/fasthttp` for HTTP and `valyala/fastjson` for optimized JSON encoding.
 - **Developer Friendly**: Simple, intuitive API for defining routes and handlers.
 - **OpenAPI Documentation**: Automatic API documentation generation with support for multiple UI providers (StopLight, Swagger, RapidDoc, Redocly, Scalar).
+- **Graceful Shutdown**: Native support for zero-downtime deployments.
+- **WebSockets & Streaming**: Built-in high-performance wrappers for `fasthttp/websocket` and Server-Sent Events (SSE).
+- **mTLS Support**: Define mutual-TLS authentication out of the box.
 - **Customizable**: Add custom validators, body parsers, and type specifications.
 - **Error Handling**: Built-in error handling with customizable handlers.
 - **Middleware Support**: Context-aware middleware via `MiddlewareFunc`.
@@ -479,6 +482,99 @@ You can serve static files from a directory using the `Static` method:
 // Serves files from "./public" directory at "/assets" route
 // e.g. GET /assets/style.css -> ./public/style.css
 r.Static("/assets", "./public")
+```
+
+## Graceful Shutdown
+
+Gofi seamlessly integrates with `valyala/fasthttp`'s shutdown primitives, ensuring active network connections finish processing before terminating the server.
+
+```go
+func main() {
+    r := gofi.NewRouter()
+    
+    // Start server in a background goroutine
+    go func() {
+        if err := r.Listen(":8080"); err != nil {
+            log.Fatalf("Server error: %v", err)
+        }
+    }()
+
+    // Wait for interrupt signal to gracefully shutdown the server
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+    <-quit
+    log.Println("Shutting down server...")
+
+    // The shutdown blocks until all active requests have completed
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    
+    if err := r.ShutdownWithContext(ctx); err != nil {
+        log.Fatalf("Server forced to shutdown: %v", err)
+    }
+
+    log.Println("Server exiting")
+}
+```
+
+## Streaming (Server-Sent Events)
+
+Gofi provides an ergonomic `SendStream` helper that injects required `text/event-stream` headers and securely propagates network disconnects up to the global HTTP error handler. 
+
+```go
+r.GET("/stream", gofi.DefineHandler(gofi.RouteOptions{
+    Handler: func(c gofi.Context) error {
+        // SendStream automatically sets SSE headers and manages the stream
+        return c.SendStream(func(w *bufio.Writer) error {
+            for i := 0; i < 5; i++ {
+                // Write data chunks
+                if _, err := fmt.Fprintf(w, "data: Message %d\n\n", i); err != nil {
+                    return err // Propagates to Gofi Error Handler
+                }
+                
+                // Flush the buffer to the network
+                if err := w.Flush(); err != nil {
+                    return err // Gracefully halts if client disconnects
+                }
+                
+                time.Sleep(1 * time.Second)
+            }
+            return nil
+        })
+    },
+}))
+```
+
+## WebSockets
+
+Gofi features a native bridging adapter (`websocket.New()`) wrapping the highly optimized `fasthttp/websocket` library. The adapter safely hijacks the underlying TCP connection without destroying context memory pools prematurely.
+
+```go
+import (
+    "github.com/michaelolof/gofi/websocket"
+)
+
+// WebSockets natively support middleware before connection upgrade
+r.GET("/ws/:room_id", gofi.DefineHandler(gofi.RouteOptions{
+    Handler: websocket.New(func(c *websocket.Conn) error {
+        // Infinite read/write loop
+        for {
+            mt, msg, err := c.ReadMessage()
+            if err != nil {
+                // Disconnect or read error. Returning sets off global error logs if critical.
+                log.Println("client disconnected:", err)
+                return err 
+            }
+            
+            log.Printf("Received: %s", msg)
+            
+            // Echo message back
+            if err = c.WriteMessage(mt, msg); err != nil {
+                return err 
+            }
+        }
+    }),
+}))
 ```
 
 ## Unit Testing

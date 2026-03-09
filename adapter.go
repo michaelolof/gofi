@@ -198,6 +198,12 @@ func (r *Request) Context() *fasthttp.RequestCtx {
 	return r.ctx
 }
 
+// FastHTTPContext returns the underlying fasthttp.RequestCtx explicitely.
+// Useful for accessing advanced, low-level server primitives natively.
+func (r *Request) FastHTTPContext() *fasthttp.RequestCtx {
+	return r.ctx
+}
+
 // ParseForm parses the URL query parameters and POST body as form data.
 func (r *Request) ParseForm() error {
 	if r.parsedForm {

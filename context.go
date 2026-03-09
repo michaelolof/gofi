@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"bufio"
 	"net/http"
 	"reflect"
 
@@ -53,6 +54,10 @@ type Context interface {
 	Method() string
 	// QueryBytes returns the query parameter value as raw bytes (zero-copy from fasthttp)
 	QueryBytes(name string) []byte
+	// SetBodyStreamWriter sets a chunked stream writer for the response body
+	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
+	// SendStream simplifies SSE. Sets necessary headers and takes over the connection.
+	SendStream(sw func(w *bufio.Writer) error) error
 }
 
 type contextOptions struct {
@@ -145,6 +150,26 @@ func (c *context) SendString(code int, s string) error {
 	c.fctx.Response.SetStatusCode(code)
 	c.fctx.Response.SetBodyString(s)
 	return nil
+}
+
+func (c *context) SetBodyStreamWriter(sw func(w *bufio.Writer) error) error {
+	// We use channels to propagate any errors from the separated writer goroutine
+	// managed internally by fasthttp back to the caller synchronosly.
+	errCh := make(chan error, 1)
+
+	c.fctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		errCh <- sw(w)
+		close(errCh)
+	})
+
+	return <-errCh
+}
+
+func (c *context) SendStream(sw func(w *bufio.Writer) error) error {
+	c.fctx.Response.Header.Set("Content-Type", "text/event-stream")
+	c.fctx.Response.Header.Set("Cache-Control", "no-cache")
+	c.fctx.Response.Header.Set("Connection", "keep-alive")
+	return c.SetBodyStreamWriter(sw)
 }
 
 func (c *context) SendBytes(code int, b []byte) error {

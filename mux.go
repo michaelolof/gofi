@@ -3,6 +3,7 @@ package gofi
 import (
 	"bufio"
 	"bytes"
+	stdcontext "context"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,9 @@ type serveMux struct {
 	prefix            string
 	ctxPool           *sync.Pool
 	maxParams         uint8
+
+	activeServer *FasthttpServer
+	serverMu     sync.Mutex
 }
 
 func NewRouter() Router {
@@ -146,7 +150,9 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 				c.rw.syncHeaders()
 			}
 
-			s.releaseContext(c)
+			if !ctx.Hijacked() {
+				s.releaseContext(c)
+			}
 			return
 		} else if method != http.MethodConnect && path != "/" {
 			if tsr {
@@ -161,12 +167,16 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 					redirectPath = redirectPath + "/"
 				}
 				ctx.Redirect(redirectPath, code)
-				s.releaseContext(c)
+				if !ctx.Hijacked() {
+					s.releaseContext(c)
+				}
 				return
 			}
 		}
 
-		s.releaseContext(c)
+		if !ctx.Hijacked() {
+			s.releaseContext(c)
+		}
 	}
 
 	// 404
@@ -281,7 +291,77 @@ func (s *serveMux) Listen(addr string) error {
 			MaxRequestBodySize: 4 * 1024 * 1024,
 		},
 	}
+
+	s.serverMu.Lock()
+	s.activeServer = srv
+	s.serverMu.Unlock()
+
 	return srv.Listen(listenAddr(addr))
+}
+
+// ListenTLS starts an HTTPS server on the given address.
+func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
+	srv := &FasthttpServer{
+		mux: s,
+		server: &fasthttp.Server{
+			Handler:            s.handleFastHTTP,
+			Name:               "gofi",
+			DisableKeepalive:   false,
+			ReduceMemoryUsage:  false,
+			MaxRequestBodySize: 4 * 1024 * 1024,
+		},
+	}
+
+	s.serverMu.Lock()
+	s.activeServer = srv
+	s.serverMu.Unlock()
+
+	return srv.ListenTLS(addr, certFile, keyFile)
+}
+
+// ListenTLSMutual starts an HTTPS server providing mutual TLS (mTLS) authentication.
+func (s *serveMux) ListenTLSMutual(addr, certFile, keyFile, clientCertFile string) error {
+	srv := &FasthttpServer{
+		mux: s,
+		server: &fasthttp.Server{
+			Handler:            s.handleFastHTTP,
+			Name:               "gofi",
+			DisableKeepalive:   false,
+			ReduceMemoryUsage:  false,
+			MaxRequestBodySize: 4 * 1024 * 1024,
+		},
+	}
+
+	s.serverMu.Lock()
+	s.activeServer = srv
+	s.serverMu.Unlock()
+
+	return srv.ListenTLSMutual(addr, certFile, keyFile, clientCertFile)
+}
+
+// Shutdown gracefully shuts down the server.
+func (s *serveMux) Shutdown() error {
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
+	if s.activeServer != nil {
+		return s.activeServer.Shutdown()
+	}
+	return nil
+}
+
+// ShutdownWithContext gracefully shuts down the server with a timeout context.
+func (s *serveMux) ShutdownWithContext(ctx stdcontext.Context) error {
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
+	if s.activeServer != nil {
+		return s.activeServer.ShutdownWithContext(ctx)
+	}
+	return nil
+}
+
+// Handler returns the raw fasthttp.RequestHandler for this router.
+func (s *serveMux) Handler() fasthttp.RequestHandler {
+	return s.handleFastHTTP
 }
 
 type ValidatorContext = rules.ValidatorContext
