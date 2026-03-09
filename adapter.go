@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/michaelolof/gofi/utils"
 	"github.com/valyala/fasthttp"
 )
 
@@ -74,10 +75,20 @@ func (w *responseWriter) syncHeaders() {
 // Request wraps a fasthttp.RequestCtx to provide *http.Request-like access for backward compatibility.
 type Request struct {
 	ctx             *fasthttp.RequestCtx
-	Header          requestHeader
 	Method          string
 	URL             *requestURL
+	Proto           string
+	ProtoMajor      int
+	ProtoMinor      int
+	Header          requestHeader
 	Body            io.ReadCloser
+	ContentLength   int64
+	Host            string
+	RemoteAddr      string
+	RequestURI      string
+	Pattern         string
+	Close           bool
+	Form            url.Values
 	PostForm        url.Values
 	MultipartForm   *multipart.Form
 	parsedForm      bool
@@ -107,11 +118,11 @@ func (h requestHeader) Del(key string) {
 
 func (h requestHeader) Values(key string) []string {
 	var vals []string
-	h.ctx.Request.Header.VisitAll(func(k, v []byte) {
+	for k, v := range h.ctx.Request.Header.All() {
 		if strings.EqualFold(string(k), key) {
 			vals = append(vals, string(v))
 		}
-	})
+	}
 	return vals
 }
 
@@ -121,15 +132,23 @@ type requestURL struct {
 }
 
 func (u *requestURL) String() string {
-	return string(u.ctx.RequestURI())
+	return utils.BytesToString(u.ctx.RequestURI())
+}
+
+func (u *requestURL) Scheme() string {
+	return utils.BytesToString(u.ctx.URI().Scheme())
+}
+
+func (u *requestURL) Host() string {
+	return utils.BytesToString(u.ctx.URI().Host())
 }
 
 func (u *requestURL) Path() string {
-	return string(u.ctx.Path())
+	return utils.BytesToString(u.ctx.Path())
 }
 
 func (u *requestURL) RawQuery() string {
-	return string(u.ctx.QueryArgs().QueryString())
+	return utils.BytesToString(u.ctx.QueryArgs().QueryString())
 }
 
 func (u *requestURL) Query() requestQuery {
@@ -142,7 +161,7 @@ type requestQuery struct {
 }
 
 func (q requestQuery) Get(key string) string {
-	return string(q.ctx.QueryArgs().Peek(key))
+	return utils.BytesToString(q.ctx.QueryArgs().Peek(key))
 }
 
 func (q requestQuery) Has(key string) bool {
@@ -150,13 +169,39 @@ func (q requestQuery) Has(key string) bool {
 }
 
 // newRequest creates a Request adapter from a fasthttp.RequestCtx.
-func newRequest(ctx *fasthttp.RequestCtx) *Request {
+func newRequest(ctx *fasthttp.RequestCtx, pattern string) *Request {
+	var remoteAddr string
+	if ip := ctx.RemoteIP(); ip != nil {
+		remoteAddr = ip.String()
+	}
+
+	var proto string
+	var protoMajor, protoMinor int
+	if ctx.IsTLS() {
+		proto = "HTTP/2.0"
+		protoMajor = 2
+		protoMinor = 0
+	} else {
+		proto = "HTTP/1.1"
+		protoMajor = 1
+		protoMinor = 1
+	}
+
 	return &Request{
-		ctx:    ctx,
-		Header: requestHeader{ctx: ctx},
-		Method: string(ctx.Method()),
-		URL:    &requestURL{ctx: ctx},
-		Body:   io.NopCloser(&bodyReader{ctx: ctx}),
+		ctx:           ctx,
+		Header:        requestHeader{ctx: ctx},
+		Method:        utils.BytesToString(ctx.Method()),
+		URL:           &requestURL{ctx: ctx},
+		Proto:         proto,
+		ProtoMajor:    protoMajor,
+		ProtoMinor:    protoMinor,
+		Body:          io.NopCloser(&bodyReader{ctx: ctx}),
+		ContentLength: int64(ctx.Request.Header.ContentLength()),
+		Host:          utils.BytesToString(ctx.Host()),
+		RemoteAddr:    remoteAddr,
+		RequestURI:    utils.BytesToString(ctx.RequestURI()),
+		Pattern:       pattern,
+		Close:         ctx.Request.Header.ConnectionClose(),
 	}
 }
 
@@ -211,11 +256,44 @@ func (r *Request) ParseForm() error {
 	}
 	r.parsedForm = true
 	r.PostForm = make(url.Values)
-	// Parse POST args from fasthttp
+	r.Form = make(url.Values)
+
+	// Parse Query args into Form
+	for key, value := range r.ctx.QueryArgs().All() {
+		ks, vs := utils.BytesToString(key), utils.BytesToString(value)
+		r.Form.Add(ks, vs)
+	}
+
+	// Parse POST args into PostForm and Form
 	for key, value := range r.ctx.PostArgs().All() {
-		r.PostForm.Add(string(key), string(value))
+		ks, vs := utils.BytesToString(key), utils.BytesToString(value)
+		r.PostForm.Add(ks, vs)
+		r.Form.Add(ks, vs)
 	}
 	return nil
+}
+
+// FormValue returns the first value for the named component of the query.
+// POST and PUT body parameters take precedence over URL query string values.
+func (r *Request) FormValue(key string) string {
+	if r.Form == nil {
+		r.ParseMultipartForm(10 << 20) // 10 MB
+	}
+	if vs := r.Form[key]; len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
+}
+
+// PostFormValue returns the first value for the named component of the POST, PATCH, or PUT request body.
+func (r *Request) PostFormValue(key string) string {
+	if r.PostForm == nil {
+		r.ParseMultipartForm(10 << 20) // 10 MB
+	}
+	if vs := r.PostForm[key]; len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
 }
 
 // ParseMultipartForm parses the multipart form data from the request body.

@@ -50,6 +50,8 @@ type Context interface {
 	Body() []byte
 	// Path returns the request URL path
 	Path() string
+	// Pattern returns the registered route pattern that matched the request
+	Pattern() string
 	// Method returns the HTTP method
 	Method() string
 	// QueryBytes returns the query parameter value as raw bytes (zero-copy from fasthttp)
@@ -120,7 +122,7 @@ func (c *context) Writer() ResponseWriter {
 
 func (c *context) Request() *Request {
 	if c.req == nil {
-		c.req = newRequest(c.fctx)
+		c.req = newRequest(c.fctx, c.opts.Pattern)
 	}
 	return c.req
 }
@@ -212,6 +214,10 @@ func (c *context) HeaderBytes(name string) []byte {
 
 func (c *context) Path() string {
 	return string(c.fctx.Path())
+}
+
+func (c *context) Pattern() string {
+	return c.opts.Pattern
 }
 
 func (c *context) Method() string {

@@ -482,9 +482,9 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 
 	// Build InjectResponse from fctx
 	respHeaders := make(http.Header)
-	fctx.Response.Header.VisitAll(func(key, value []byte) {
+	for key, value := range fctx.Response.Header.All() {
 		respHeaders.Add(string(key), string(value))
-	})
+	}
 
 	// Also sync any headers that were set via the adapter
 	if c.rw != nil {
