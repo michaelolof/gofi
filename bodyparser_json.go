@@ -109,7 +109,7 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 	}
 
 	strctOpts := j.getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
-	status, err := j.walkStruct(pv, schemaBody, strctOpts, nil)
+	status, err := j.walkStruct(pv.GetRawValue(), schemaBody, strctOpts, nil)
 	if err != nil {
 		return err
 	}
@@ -149,7 +149,7 @@ func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 	return result, nil
 }
 
-func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
+func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
 	if j.MaxDepth == 0 {
 		j.MaxDepth = 100
 	}
@@ -157,7 +157,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "depth", errors.New("max recursion depth exceeded"))
 	}
 
-	val, err := pv.GetByKind(opts.SchemaRules.kind, opts.SchemaRules.format, keys...)
+	val, err := cont.GetNodeByKind(node, opts.SchemaRules.kind, opts.SchemaRules.format)
 	if err != nil {
 		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 	}
@@ -201,7 +201,8 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
 				}
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childDef.field))
+				childNode := node.Get(childDef.field)
+				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, childDef.field))
 				if err != nil {
 					return nil, err
 				}
@@ -224,7 +225,8 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
 				}
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, name))
+				childNode := node.Get(name)
+				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, name))
 				if err != nil {
 					return nil, err
 				}
@@ -236,7 +238,8 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
 				}
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				_, err := j.walkStruct(pv, schemaBody, childOpts, append(keys, childKey))
+				childNode := node.Get(childKey)
+				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, childKey))
 				if err != nil {
 					return nil, err
 				}
@@ -250,7 +253,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 			return &walkFinished, nil
 		}
 
-		obj, err := pv.GetRawObject(keys)
+		obj, err := node.Object()
 		if err != nil {
 			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 		}
@@ -268,7 +271,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 
 			ckey := string(key)
 			copts := j.getFieldOptions(opts, &cstrct, opts.SchemaRules.additionalProperties)
-			_, err := j.walkStruct(pv, schemaBody, copts, append(keys, ckey))
+			_, err := j.walkStruct(v, schemaBody, copts, append(keys, ckey))
 			if err != nil {
 				mapErr = err
 				return
@@ -297,7 +300,11 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 		switch true {
 		case utils.IsPrimitiveKind(opts.SchemaRules.item.kind):
 			// Handle array of primitive values
-			arr, err := pv.GetPrimitiveArrVals(rules.item.kind, rules.format, keys, size)
+			arrNodes, err := node.Array()
+			if err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+			}
+			arr, err := cont.GetPrimitiveArrValsFromNode(arrNodes, rules.item.kind, rules.format, size)
 			if rules.max != nil && len(arr) > int(*rules.max) {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "max", errors.New("array size too large"))
 			} else if err != nil {
@@ -319,7 +326,6 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 
 		case utils.NotPrimitiveKind(opts.SchemaRules.item.kind):
 			// Handle array of Non primitives
-			i := 0
 			var nslice reflect.Value
 			if opts.ShouldBind && opts.Body != nil {
 				sliceType := opts.Body.Type()
@@ -329,19 +335,20 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				nslice = reflect.MakeSlice(sliceType, 0, size)
 			}
 
-			for {
-				_keys := append(keys, strconv.Itoa(i))
-				_kp := strings.Join(_keys, ".")
-				if !pv.Exist(_keys...) {
-					if rules.required && i == 0 {
-						return nil, newErrReport(RequestErr, schemaField, _kp, "required", errors.New("value must not be empty"))
-					} else {
-						break
-					}
-				} else if rules.max != nil && i > int(*rules.max) {
-					return nil, newErrReport(RequestErr, schemaField, _kp, "max", fmt.Errorf("array length must not be greater than %f", *rules.max))
-				}
+			arrNodes, err := node.Array()
+			if err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+			}
 
+			if len(arrNodes) == 0 && rules.required {
+				_keys := append(keys, "0")
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(_keys, "."), "required", errors.New("value must not be empty"))
+			} else if rules.max != nil && len(arrNodes) > int(*rules.max) {
+				_keys := append(keys, strconv.Itoa(len(arrNodes)))
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(_keys, "."), "max", fmt.Errorf("array length must not be greater than %f", *rules.max))
+			}
+
+			for i, childNode := range arrNodes {
 				var istrct reflect.Value
 				if opts.ShouldBind && opts.Body != nil {
 					sliceType := opts.Body.Type()
@@ -352,7 +359,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				}
 
 				fopts := j.getFieldOptions(opts, &istrct, rules.item)
-				_, err := j.walkStruct(pv, schemaBody, fopts, append(keys, strconv.Itoa(i)))
+				_, err := j.walkStruct(childNode, schemaBody, fopts, append(keys, strconv.Itoa(i)))
 				if err != nil {
 					return nil, err
 				}
@@ -360,8 +367,6 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 				if opts.ShouldBind && opts.Body != nil {
 					nslice = reflect.Append(nslice, istrct)
 				}
-
-				i++
 			}
 
 			// Slice Validation
@@ -385,7 +390,7 @@ func (j *JSONBodyParser) walkStruct(pv *cont.ParsedJson, schemaField schemaField
 		}
 
 	case reflect.Interface:
-		v, err := pv.GetAnyValue(keys)
+		v, err := cont.GetAnyValueFromNode(node)
 		if err != nil {
 			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 		}

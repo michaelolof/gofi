@@ -169,6 +169,119 @@ func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, ke
 	}
 }
 
+// GetNodeByKind extracts and casts directly from a fastjson.Value node rather than looking up by path.
+func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectFormats) (any, error) {
+	if node == nil || node.Type() == fastjson.TypeNull {
+		return EOF, nil
+	}
+
+	switch kind {
+	case reflect.String:
+		v, err := node.StringBytes()
+		if err != nil {
+			return nil, err
+		}
+		return string(v), nil
+	case reflect.Int:
+		v, err := node.Int()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case reflect.Int8:
+		v, err := node.Int()
+		if err != nil {
+			return nil, err
+		}
+		return int8(v), nil
+	case reflect.Int16:
+		v, err := node.Int()
+		if err != nil {
+			return nil, err
+		}
+		return int16(v), nil
+	case reflect.Int32:
+		v, err := node.Int()
+		if err != nil {
+			return nil, err
+		}
+		return int32(v), nil
+	case reflect.Int64:
+		v, err := node.Int64()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case reflect.Uint:
+		v, err := node.Uint()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case reflect.Uint8:
+		v, err := node.Uint()
+		if err != nil {
+			return nil, err
+		}
+		return uint8(v), nil
+	case reflect.Uint16:
+		v, err := node.Uint()
+		if err != nil {
+			return nil, err
+		}
+		return uint16(v), nil
+	case reflect.Uint32:
+		v, err := node.Uint()
+		if err != nil {
+			return nil, err
+		}
+		return uint32(v), nil
+	case reflect.Uint64:
+		v, err := node.Uint64()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case reflect.Float32:
+		v, err := node.Float64()
+		if err != nil {
+			return nil, err
+		}
+		return float32(v), nil
+	case reflect.Float64:
+		v, err := node.Float64()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case reflect.Bool:
+		v, err := node.Bool()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case reflect.Array, reflect.Slice:
+		return ArrayDefinition, nil
+	case reflect.Struct:
+		switch format {
+		case utils.TimeObjectFormat:
+			v, err := node.StringBytes()
+			if err != nil {
+				return nil, err
+			}
+			return string(v), nil
+		default:
+			return ObjectDefinition, nil
+		}
+	case reflect.Map:
+		return MapDefinition, nil
+	case reflect.Interface:
+		return InterfaceDefinition, nil
+	default:
+		panic(fmt.Sprintf("unsupported kind '%s' passed in GetNodeByKind(...)", kind.String()))
+	}
+}
+
 func (p *ParsedJson) Exist(keys ...string) bool {
 	return p.pv.Exists(keys...)
 }
@@ -210,9 +323,32 @@ func (p *ParsedJson) GetPrimitiveArrVals(kind reflect.Kind, format utils.ObjectF
 	return arr, nil
 }
 
+// GetPrimitiveArrValsFromNode extracts primitive array values directly from a *fastjson.Value array block.
+func GetPrimitiveArrValsFromNode(nodes []*fastjson.Value, kind reflect.Kind, format utils.ObjectFormats, size int) ([]any, error) {
+	arr := make([]any, 0, len(nodes))
+
+	for _, node := range nodes {
+		v, err := GetNodeByKind(node, kind, format)
+		if err != nil {
+			return nil, err
+		} else if v == EOF {
+			// Fastjson nodes array usually won't contain literal missing EOF instances but skips mapped nils,
+			// if it does we skip or break based on reqs.
+			continue
+		}
+		arr = append(arr, v)
+	}
+
+	return arr, nil
+}
+
 func (p *ParsedJson) GetRawObject(keys []string) (*fastjson.Object, error) {
 	obj := p.pv.Get(keys...)
 	return obj.Object()
+}
+
+func (p *ParsedJson) GetRawValue() *fastjson.Value {
+	return p.pv
 }
 
 func (p *ParsedJson) GetAnyValue(keys []string) (any, error) {
@@ -259,6 +395,48 @@ func (p *ParsedJson) GetAnyValue(keys []string) (any, error) {
 	}
 
 	return nil, errors.New("unknown value passed")
+}
+
+// GetAnyValueFromNode resolves an arbitrary type dynamically straight from a specific *fastjson.Value node.
+func GetAnyValueFromNode(node *fastjson.Value) (any, error) {
+	if node == nil {
+		return nil, errors.New("error getting any value string from node")
+	}
+
+	switch node.Type() {
+	case fastjson.TypeString:
+		s := node.String()
+		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+			return strconv.Unquote(s)
+		}
+		return s, nil
+	case fastjson.TypeTrue:
+		return true, nil
+	case fastjson.TypeFalse:
+		return false, nil
+	case fastjson.TypeNull:
+		return nil, nil
+	case fastjson.TypeArray, fastjson.TypeObject:
+		var vany any
+		if err := json.Unmarshal(node.GetStringBytes(), &vany); err != nil {
+			return nil, err
+		}
+		return vany, nil
+	case fastjson.TypeNumber:
+		iv, err := node.Int()
+		if err == nil {
+			return iv, nil
+		}
+
+		fv, err := node.Float64()
+		if err != nil {
+			return nil, err
+		}
+
+		return fv, nil
+	}
+
+	return nil, errors.New("unknown value passed to GetAnyValueFromNode")
 }
 
 type arrayItem struct {
