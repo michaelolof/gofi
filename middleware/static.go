@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"path"
 	"strings"
 
 	"github.com/michaelolof/gofi"
@@ -69,7 +70,8 @@ func Static(config ...StaticConfig) gofi.MiddlewareFunc {
 			return c.Next()
 		}
 
-		path := c.Path()
+		// Explicit path traversal sanitization before prefix matching
+		path := pathClean(c.Path())
 
 		// If a Prefix is configured, only serve files if the path starts with it
 		if cfg.Prefix != "" {
@@ -107,4 +109,20 @@ func Static(config ...StaticConfig) gofi.MiddlewareFunc {
 
 		return nil
 	}
+}
+
+// pathClean cleans the path, eliminating traversal anomalies.
+// Adapted from standard library path.Clean
+func pathClean(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	cp := path.Clean(p)
+	if cp == "." {
+		return "/"
+	}
+	return cp
 }
