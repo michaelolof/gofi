@@ -14,6 +14,7 @@ type muxOptions struct {
 	customSpecs      CustomSpecs
 	bodyParsers      []BodyParser
 	schemaRules      SchemaRulesMap
+	bodyLimit        int // MaxRequestBodySize
 }
 
 func defaultMuxOptions() *muxOptions {
@@ -26,6 +27,7 @@ func defaultMuxOptions() *muxOptions {
 		customSpecs:      make(CustomSpecs),
 		bodyParsers:      bp,
 		schemaRules:      make(SchemaRulesMap),
+		bodyLimit:        4 * 1024 * 1024, // 4 MB default
 	}
 }
 

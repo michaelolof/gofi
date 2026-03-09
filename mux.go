@@ -288,7 +288,7 @@ func (s *serveMux) Listen(addr string) error {
 			Name:               "gofi",
 			DisableKeepalive:   false,
 			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: 4 * 1024 * 1024,
+			MaxRequestBodySize: s.opts.bodyLimit,
 		},
 	}
 
@@ -308,7 +308,7 @@ func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
 			Name:               "gofi",
 			DisableKeepalive:   false,
 			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: 4 * 1024 * 1024,
+			MaxRequestBodySize: s.opts.bodyLimit,
 		},
 	}
 
@@ -328,7 +328,7 @@ func (s *serveMux) ListenTLSMutual(addr, certFile, keyFile, clientCertFile strin
 			Name:               "gofi",
 			DisableKeepalive:   false,
 			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: 4 * 1024 * 1024,
+			MaxRequestBodySize: s.opts.bodyLimit,
 		},
 	}
 
@@ -588,6 +588,12 @@ func newRouter() *serveMux {
 		middlewares,
 		defaultMuxOptions(),
 	)
+}
+
+func (s *serveMux) Configure(config Config) {
+	if config.BodyLimit > 0 {
+		s.opts.bodyLimit = config.BodyLimit
+	}
 }
 
 func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, globalStore GofiStore, m Middlewares, opts *muxOptions) *serveMux {

@@ -213,6 +213,52 @@ gofi.DefineHandler(gofi.RouteOptions{
 })
 ```
 
+### Goroutines and Concurrency
+
+Gofi heavily utilizes `sync.Pool` under the hood to ensure zero-allocation routing. Because of this, the `gofi.Context` object is **immediately recycled** back to the framework as soon as your HTTP handler returns. 
+
+If you are passing `gofi.Context` to other functions where you **cannot strictly guarantee** they won't spawn background goroutines or outlive the handler scope, you **cannot** pass the original context to them. Doing so will result in a data race and memory corruption when a subsequent request overwrites your context memory pools.
+
+Instead, you should proactively use `c.Copy()` to safely detach and clone the necessary request paths, parameters, datastores, and headers:
+
+```go
+r.GET("/process", gofi.DefineHandler(gofi.RouteOptions{
+    Handler: func(c gofi.Context) error {
+        // Clone the context safely before leaving the handler chain
+        detachedCtx := c.Copy()
+
+        go func(cc gofi.Context) {
+            // Safe to access path, method, headers, and datastore
+            log.Printf("Background processing for: %s", cc.Path())
+        }(detachedCtx)
+
+        return c.SendString(202, "Processing in background")
+    },
+}))
+```
+
+#### Standard Library context.Context
+
+In many cases, your background job simply needs the standard library `context.Context` interfaces to pass to external libraries (e.g. database drivers, external API clients, or timeouts).
+If you do not need access to Gofi-specific properties (route parameters, headers, or framework datastores), you can extract the standard library context directly from the request object itself:
+
+```go
+func(c gofi.Context) error {
+    stdCtx := c.Request().Context()
+    
+    // You can now safely pass stdCtx to generic Go functions
+    // and wrap it in timeouts without worrying about Gofi's sync.Pool.
+    backgroundCtx, cancel := context.WithTimeout(stdCtx, 5*time.Second)
+    defer cancel()
+    
+    go func(ctx context.Context) {
+        myDatabase.QueryContext(ctx, "...")
+    }(backgroundCtx)
+    
+    return c.SendString(200, "Job started")
+}
+```
+
 ### Middleware
 
 Add global middlewares using `Use()`:

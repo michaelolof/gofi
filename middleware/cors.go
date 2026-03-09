@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/michaelolof/gofi"
@@ -122,7 +123,7 @@ func CORS(config ...CORSConfig) gofi.MiddlewareFunc {
 
 			// Access-Control-Max-Age
 			if cfg.MaxAge > 0 {
-				c.Writer().Header().Set("Access-Control-Max-Age", string(rune(cfg.MaxAge))) // strconv is slower, but MaxAge is usually done via fmt or strconv.Itoa, doing it right next
+				c.Writer().Header().Set("Access-Control-Max-Age", strconv.Itoa(cfg.MaxAge))
 			}
 
 			return c.SendString(204, "")

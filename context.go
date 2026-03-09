@@ -60,6 +60,8 @@ type Context interface {
 	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
 	// SendStream simplifies SSE. Sets necessary headers and takes over the connection.
 	SendStream(sw func(w *bufio.Writer) error) error
+	// Copy creates a deep copy of the Context that is safe to use in a background goroutine.
+	Copy() Context
 }
 
 type contextOptions struct {
@@ -140,6 +142,41 @@ func (c *context) DataStore() GofiStore {
 
 func (c *context) Meta() ContextMeta {
 	return &contextMeta{c: c}
+}
+
+func (c *context) Copy() Context {
+	// Deep copy to prevent data races when this is used in background goroutines
+	cc := &context{
+		opts:              c.opts,
+		routeMeta:         c.routeMeta,
+		globalStore:       c.globalStore,
+		serverOpts:        c.serverOpts,
+		bindedCacheResult: c.bindedCacheResult, // Be careful here if caching pointers, but mostly it's fine for simple flags
+		handlerIdx:        c.handlerIdx,
+		fctx:              new(fasthttp.RequestCtx),
+	}
+
+	// Copy path parameters
+	if len(c.params) > 0 {
+		cc.params = make(Params, len(c.params))
+		copy(cc.params, c.params)
+	}
+
+	// RequestCtx cloning logic (to detach from the sync.Pool lifecycle)
+	// We only copy essential information that a background task might need
+	// like Method, URI, and Request Headers.
+	c.fctx.Request.CopyTo(&cc.fctx.Request)
+
+	// Copy datastore if initialized already
+	if c.dataStore != nil {
+		cc.dataStore = NewDataStore()
+		if len(c.dataStore.items) > 0 {
+			cc.dataStore.items = make([]kv, len(c.dataStore.items))
+			copy(cc.dataStore.items, c.dataStore.items)
+		}
+	}
+
+	return cc
 }
 
 func (c *context) GetSchemaRules(pattern, method string) any {

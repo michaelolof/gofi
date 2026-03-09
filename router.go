@@ -70,4 +70,14 @@ type Router interface {
 	RegisterSpec(l ...CustomSpec)
 	RegisterBodyParser(l ...BodyParser)
 	Static(prefix, root string)
+
+	// Configure sets router-level configurations (e.g. MaxRequestBodySize)
+	Configure(config Config)
+}
+
+// Config defines the configuration options for a GoFi Router instance.
+type Config struct {
+	// BodyLimit sets the maximum allowed size for a request body (in bytes).
+	// Default: 4 * 1024 * 1024 (4MB) if zero or not provided.
+	BodyLimit int
 }
