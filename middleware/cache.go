@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,17 +22,45 @@ type CacheConfig struct {
 	CacheHeader bool
 
 	// KeyGenerator creates a unique key per request
-	// Optional. Default: request URL path
+	// Optional. Default: method + path + normalized query
 	KeyGenerator func(c gofi.Context) string
 
 	// Methods allowed to be cached (comma separated string)
 	// Optional. Default: "GET, HEAD"
 	Methods string
+
+	// MaxEntries bounds number of cache keys retained.
+	// Set <= 0 to disable entry-count cap.
+	// Optional. Default: 4096
+	MaxEntries int
+
+	// MaxBytes bounds total cached response bytes (body + content-type + key length).
+	// Set <= 0 to disable byte-size cap.
+	// Optional. Default: 64MB
+	MaxBytes int64
+
+	// AllowPrivateResponses enables caching requests that carry Authorization/Cookie headers.
+	// Optional. Default: false
+	AllowPrivateResponses bool
 }
 
-// defaultKeyGenerator uses the request URL path as the cache key
+// defaultKeyGenerator uses method + path + normalized query for safer cache isolation.
 func defaultKeyGenerator(c gofi.Context) string {
-	return c.Path()
+	rawQuery := string(c.Request().Context().QueryArgs().QueryString())
+	q := normalizeQuery(rawQuery)
+	if q == "" {
+		return c.Method() + " " + c.Path()
+	}
+	return c.Method() + " " + c.Path() + "?" + q
+}
+
+func normalizeQuery(q string) string {
+	if q == "" || !strings.Contains(q, "&") {
+		return q
+	}
+	parts := strings.Split(q, "&")
+	sort.Strings(parts)
+	return strings.Join(parts, "&")
 }
 
 // CacheConfigDefault is the default config
@@ -40,6 +69,8 @@ var CacheConfigDefault = CacheConfig{
 	CacheHeader:  false,
 	KeyGenerator: defaultKeyGenerator,
 	Methods:      "GET, HEAD",
+	MaxEntries:   4096,
+	MaxBytes:     64 << 20,
 }
 
 type cacheEntry struct {
@@ -47,6 +78,7 @@ type cacheEntry struct {
 	contentType []byte
 	statusCode  int
 	exp         int64
+	size        int64
 }
 
 // Cache creates a new middleware handler
@@ -66,6 +98,12 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 		if cfg.Methods == "" {
 			cfg.Methods = CacheConfigDefault.Methods
 		}
+		if cfg.MaxEntries == 0 {
+			cfg.MaxEntries = CacheConfigDefault.MaxEntries
+		}
+		if cfg.MaxBytes == 0 {
+			cfg.MaxBytes = CacheConfigDefault.MaxBytes
+		}
 	}
 
 	methods := strings.Split(cfg.Methods, ",")
@@ -77,6 +115,33 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 	// Simple in-memory thread-safe cache
 	var mu sync.RWMutex
 	store := make(map[string]cacheEntry)
+	var totalBytes int64
+
+	evictOne := func(now int64) bool {
+		// Prefer removing expired entries first.
+		for k, v := range store {
+			if v.exp > 0 && v.exp < now {
+				delete(store, k)
+				totalBytes -= v.size
+				if totalBytes < 0 {
+					totalBytes = 0
+				}
+				return true
+			}
+		}
+
+		// Fallback to deleting any one key to keep O(1) expected eviction overhead.
+		for k, v := range store {
+			delete(store, k)
+			totalBytes -= v.size
+			if totalBytes < 0 {
+				totalBytes = 0
+			}
+			return true
+		}
+
+		return false
+	}
 
 	// Background ticker to cleanup expired entries
 	go func() {
@@ -87,6 +152,10 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 			for k, v := range store {
 				if v.exp > 0 && v.exp < now {
 					delete(store, k)
+					totalBytes -= v.size
+					if totalBytes < 0 {
+						totalBytes = 0
+					}
 				}
 			}
 			mu.Unlock()
@@ -97,6 +166,12 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 		// Only cache allowed methods
 		if !allowedMethods[c.Method()] {
 			return c.Next()
+		}
+
+		if !cfg.AllowPrivateResponses {
+			if c.HeaderVal("Authorization") != "" || c.HeaderVal("Cookie") != "" {
+				return c.Next()
+			}
 		}
 
 		key := cfg.KeyGenerator(c)
@@ -120,6 +195,18 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 			return c.SendBytes(entry.statusCode, entry.body)
 		}
 
+		if found && entry.exp > 0 && entry.exp <= now {
+			mu.Lock()
+			if stale, ok := store[key]; ok && stale.exp <= now {
+				delete(store, key)
+				totalBytes -= stale.size
+				if totalBytes < 0 {
+					totalBytes = 0
+				}
+			}
+			mu.Unlock()
+		}
+
 		// 2. Cache miss, continue request down the chain
 		err := c.Next()
 
@@ -140,13 +227,30 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 			ctCopy := make([]byte, len(contentType))
 			copy(ctCopy, contentType)
 
+			size := int64(len(bodyCopy) + len(ctCopy) + len(key))
+
 			mu.Lock()
+			if prev, ok := store[key]; ok {
+				totalBytes -= prev.size
+				if totalBytes < 0 {
+					totalBytes = 0
+				}
+			}
+
+			for (cfg.MaxEntries > 0 && len(store) >= cfg.MaxEntries) || (cfg.MaxBytes > 0 && totalBytes+size > cfg.MaxBytes) {
+				if !evictOne(now) {
+					break
+				}
+			}
+
 			store[key] = cacheEntry{
 				body:        bodyCopy,
 				contentType: ctCopy,
 				statusCode:  statusCode,
 				exp:         now + cfg.Expiration.Nanoseconds(),
+				size:        size,
 			}
+			totalBytes += size
 			mu.Unlock()
 
 			if cfg.CacheHeader {

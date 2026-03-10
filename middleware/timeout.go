@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/michaelolof/gofi"
@@ -44,29 +45,34 @@ func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 	}
 
 	return func(c gofi.Context) error {
-		// Create a channel to wait for the handler
-		ch := make(chan error, 1)
+		// Execute downstream handlers on a copied context so that if timeout fires,
+		// no goroutine continues operating on pooled request state.
+		cc := c.Copy()
 
-		// Run the handler in a goroutine
+		type runResult struct {
+			err error
+		}
+		ch := make(chan runResult, 1)
+
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					// We just swallow the panic here and let the server's global recover handle it
-					// normally, or you could push an error. But to unblock the timeout:
-					ch <- nil
+					ch <- runResult{err: fmt.Errorf("panic in timeout middleware: %v", r)}
 				}
 			}()
-			ch <- c.Next()
+
+			ch <- runResult{err: cc.Next()}
 		}()
 
-		// Wait for the handler to complete or timeout to trigger
 		select {
-		case err := <-ch:
-			return err
+		case result := <-ch:
+			// Chain finished before timeout, copy generated response back.
+			origCtx := c.Request().Context()
+			copyCtx := cc.Request().Context()
+			copyCtx.Response.CopyTo(&origCtx.Response)
+			return result.err
 		case <-time.After(cfg.Timeout):
-			// We cannot easily cancel the already running goroutine cleanly unless
-			// we pass a specific context through standard library context.Context
-			// But since gofi relies on fasthttp, we can only return early and close the client connection
+			// Timeout response is written on the foreground request context only.
 			return cfg.ErrorHandler(c)
 		}
 	}
