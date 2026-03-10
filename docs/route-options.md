@@ -146,6 +146,25 @@ var MyHandler = gofi.DefineHandler(gofi.RouteOptions{
 })
 ```
 
+### Selective Validation and Binding
+
+You can now specify which components to validate or bind using `Validate` and `ValidateAndBind`. This is useful for optimizing performance and focusing on specific parts of the request.
+
+```go
+// Validate only Headers and Query
+if err := gofi.Validate(c, gofi.Headers, gofi.Query); err != nil {
+    return err
+}
+
+// Bind only Body and Cookies
+s, err := gofi.ValidateAndBind[UserSchema](c, gofi.Body, gofi.Cookies)
+if err != nil {
+    return err
+}
+```
+
+Selective processing skips unnecessary components, reducing overhead.
+
 ## Middleware
 
 Gofi uses a unified middleware system based on `MiddlewareFunc`:

@@ -34,6 +34,30 @@ func(c gofi.Context) error {
 }
 ```
 
+## Selective Validation
+
+Selective validation allows you to validate specific components of the request (e.g., Header, Query, Path) without processing the entire request. This is useful for performance optimization.
+
+```go
+// Validate only Headers and Query
+if err := gofi.Validate(c, gofi.Header, gofi.Query); err != nil {
+    return err
+}
+```
+
+## Selective Validation and Binding
+
+Selective validation and binding enables you to validate and bind only specific components of the request to your schema.
+
+```go
+// Validate and Bind only Body and Cookies
+s, err := gofi.ValidateAndBind[UserSchema](c, gofi.Body, gofi.Cookie)
+if err != nil {
+    return err
+}
+```
+
+Selective validation and binding maintain backward compatibility while improving performance.
 
 ## Supported Validators
 

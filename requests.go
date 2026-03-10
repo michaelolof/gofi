@@ -12,13 +12,69 @@ import (
 	"github.com/michaelolof/gofi/utils"
 )
 
-func Validate(c Context) error {
+// RequestSchema defines supported request segments for selective validation/binding.
+type RequestSchema string
+
+const (
+	Header RequestSchema = "request.header"
+	Path   RequestSchema = "request.path"
+	Query  RequestSchema = "request.query"
+	Cookie RequestSchema = "request.cookie"
+	Body   RequestSchema = "request.body"
+)
+
+type requestPartMask uint8
+
+const (
+	partHeader requestPartMask = 1 << iota
+	partPath
+	partQuery
+	partCookie
+	partBody
+)
+
+const partAll = partHeader | partPath | partQuery | partCookie | partBody
+
+func buildRequestPartMask(selectors []RequestSchema) (requestPartMask, error) {
+	if len(selectors) == 0 {
+		return partAll, nil
+	}
+
+	var mask requestPartMask
+	for _, selector := range selectors {
+		switch selector {
+		case Header:
+			mask |= partHeader
+		case Path:
+			mask |= partPath
+		case Query:
+			mask |= partQuery
+		case Cookie:
+			mask |= partCookie
+		case Body:
+			mask |= partBody
+		default:
+			return 0, newErrReport(RequestErr, schemaReq, string(selector), "invalid_selector", errors.New("unsupported request schema selector"))
+		}
+	}
+
+	return mask, nil
+}
+
+func Validate(c Context, s ...RequestSchema) error {
 	ctx, ok := c.(*context)
 	if !ok {
 		return errors.New("unknown context object passed")
 	}
 
-	if ctx.bindedCacheResult.bound {
+	mask, err := buildRequestPartMask(s)
+	if err != nil {
+		return err
+	}
+
+	useCache := mask == partAll
+
+	if useCache && ctx.bindedCacheResult.bound {
 		if ctx.bindedCacheResult.err != nil {
 			return ctx.bindedCacheResult.err
 		} else {
@@ -26,22 +82,35 @@ func Validate(c Context) error {
 		}
 	}
 
-	_, err := validateAndOrBindRequest[any](ctx, false)
+	_, err = validateAndOrBindRequest[any](ctx, false, mask)
 	if err != nil {
-		ctx.bindedCacheResult = bindedResult{bound: true, err: err}
+		if useCache {
+			ctx.bindedCacheResult = bindedResult{bound: true, err: err}
+		}
 		return err
+	}
+
+	if useCache {
+		ctx.bindedCacheResult = bindedResult{bound: true}
 	}
 
 	return nil
 }
 
-func ValidateAndBind[T any](c Context) (*T, error) {
+func ValidateAndBind[T any](c Context, s ...RequestSchema) (*T, error) {
 	ctx, ok := c.(*context)
 	if !ok {
 		return nil, errors.New("unknown context object passed")
 	}
 
-	if ctx.bindedCacheResult.bound {
+	mask, err := buildRequestPartMask(s)
+	if err != nil {
+		return nil, err
+	}
+
+	useCache := mask == partAll
+
+	if useCache && ctx.bindedCacheResult.bound {
 		if ctx.bindedCacheResult.err != nil {
 			return nil, ctx.bindedCacheResult.err
 		} else if v, ok := ctx.bindedCacheResult.val.(*T); ok {
@@ -49,17 +118,21 @@ func ValidateAndBind[T any](c Context) (*T, error) {
 		}
 	}
 
-	s, err := validateAndOrBindRequest[T](ctx, true)
+	schema, err := validateAndOrBindRequest[T](ctx, true, mask)
 	if err != nil {
-		ctx.bindedCacheResult = bindedResult{bound: true, err: err}
+		if useCache {
+			ctx.bindedCacheResult = bindedResult{bound: true, err: err}
+		}
 		return nil, err
 	}
 
-	ctx.bindedCacheResult = bindedResult{bound: true, val: s}
-	return s, nil
+	if useCache {
+		ctx.bindedCacheResult = bindedResult{bound: true, val: schema}
+	}
+	return schema, nil
 }
 
-func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
+func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPartMask) (*T, error) {
 	var schemaPtr *T
 
 	if c.rules() == nil {
@@ -87,106 +160,118 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool) (*T, error) {
 	var errs []error
 
 	// Handle Headers
-	if pdef := c.rules().getReqRules(schemaHeaders); pdef != nil && len(pdef.properties) > 0 {
-		for _, def := range pdef.properties {
-			hv := c.headerGet(def.field)
-			if err := doValidateStrAndBind(c, schemaHeaders, hv, def, shouldBind, reqStruct); err != nil {
-				errs = append(errs, err)
+	if mask&partHeader != 0 {
+		if pdef := c.rules().getReqRules(schemaHeaders); pdef != nil && len(pdef.properties) > 0 {
+			for _, def := range pdef.properties {
+				hv := c.headerGet(def.field)
+				if err := doValidateStrAndBind(c, schemaHeaders, hv, def, shouldBind, reqStruct); err != nil {
+					errs = append(errs, err)
+				}
 			}
-		}
-		if len(errs) > 0 {
-			return nil, errors.Join(errs...)
+			if len(errs) > 0 {
+				return nil, errors.Join(errs...)
+			}
 		}
 	}
 
 	// Handle queries
-	if pdef := c.rules().getReqRules(schemaQuery); pdef != nil && len(pdef.properties) > 0 {
-		for _, def := range pdef.properties {
-			qv := c.queryGet(def.field)
-			if err := doValidateStrAndBind(c, schemaQuery, qv, def, shouldBind, reqStruct); err != nil {
-				errs = append(errs, err)
+	if mask&partQuery != 0 {
+		if pdef := c.rules().getReqRules(schemaQuery); pdef != nil && len(pdef.properties) > 0 {
+			for _, def := range pdef.properties {
+				qv := c.queryGet(def.field)
+				if err := doValidateStrAndBind(c, schemaQuery, qv, def, shouldBind, reqStruct); err != nil {
+					errs = append(errs, err)
+				}
 			}
-		}
-		if len(errs) > 0 {
-			return nil, errors.Join(errs...)
+			if len(errs) > 0 {
+				return nil, errors.Join(errs...)
+			}
 		}
 	}
 
 	// Handle Paths
-	if pdef := c.rules().getReqRules(schemaPath); pdef != nil && len(pdef.properties) > 0 {
-		for _, def := range pdef.properties {
-			pv := c.params.Get(def.field)
-			if err := doValidateStrAndBind(c, schemaPath, pv, def, shouldBind, reqStruct); err != nil {
-				errs = append(errs, err)
+	if mask&partPath != 0 {
+		if pdef := c.rules().getReqRules(schemaPath); pdef != nil && len(pdef.properties) > 0 {
+			for _, def := range pdef.properties {
+				pv := c.params.Get(def.field)
+				if err := doValidateStrAndBind(c, schemaPath, pv, def, shouldBind, reqStruct); err != nil {
+					errs = append(errs, err)
+				}
 			}
-		}
-		if len(errs) > 0 {
-			return nil, errors.Join(errs...)
+			if len(errs) > 0 {
+				return nil, errors.Join(errs...)
+			}
 		}
 	}
 
 	// Handle Cookies
-	if pdef := c.rules().getReqRules(schemaCookies); pdef != nil && len(pdef.properties) > 0 {
-		for _, def := range pdef.properties {
-			cv, err := c.cookieGet(def.field)
-			if def.required && err == http.ErrNoCookie {
-				errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "required", err))
-				continue
-			} else if !def.required && cv == nil {
-				continue
-			} else if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-
-			switch def.format {
-			case utils.CookieObjectFormat:
-				err := runValidation(cv.Value, RequestErr, schemaCookies, def.field, def.rules)
-				if err != nil {
+	if mask&partCookie != 0 {
+		if pdef := c.rules().getReqRules(schemaCookies); pdef != nil && len(pdef.properties) > 0 {
+			for _, def := range pdef.properties {
+				cv, err := c.cookieGet(def.field)
+				if def.required && err == http.ErrNoCookie {
+					errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "required", err))
+					continue
+				} else if !def.required && cv == nil {
+					continue
+				} else if err != nil {
 					errs = append(errs, err)
 					continue
 				}
 
-				if shouldBind {
-					sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
-					if sf.Kind() == reflect.Pointer {
-						sf.Set(reflect.ValueOf(cv).Convert(sf.Type()))
-					} else if cv != nil {
-						sf.Set(reflect.ValueOf(*cv).Convert(sf.Type()))
+				switch def.format {
+				case utils.CookieObjectFormat:
+					err := runValidation(cv.Value, RequestErr, schemaCookies, def.field, def.rules)
+					if err != nil {
+						errs = append(errs, err)
+						continue
+					}
+
+					if shouldBind {
+						sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
+						if sf.Kind() == reflect.Pointer {
+							sf.Set(reflect.ValueOf(cv).Convert(sf.Type()))
+						} else if cv != nil {
+							sf.Set(reflect.ValueOf(*cv).Convert(sf.Type()))
+						}
+					}
+
+				default:
+					cvs, err := utils.PrimitiveFromStr(def.kind, cv.Value)
+					if err != nil {
+						errs = append(errs, err)
+						continue
+					}
+
+					if utils.NotPrimitive(cvs) {
+						errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "invalid_type", errors.New("only primitives and http.Cookie types are supported")))
+						continue
+					}
+
+					err = runValidation(cvs, RequestErr, schemaCookies, def.field, def.rules)
+					if err != nil {
+						errs = append(errs, err)
+						continue
+					}
+
+					if shouldBind {
+						sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
+						if sf.Kind() == reflect.Pointer {
+							sf.Elem().Set(reflect.ValueOf(cvs).Convert(sf.Elem().Type()))
+						} else {
+							sf.Set(reflect.ValueOf(cvs).Convert(sf.Type()))
+						}
 					}
 				}
-
-			default:
-				cvs, err := utils.PrimitiveFromStr(def.kind, cv.Value)
-				if err != nil {
-					errs = append(errs, err)
-					continue
-				}
-
-				if utils.NotPrimitive(cvs) {
-					errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "invalid_type", errors.New("only primitives and http.Cookie types are supported")))
-					continue
-				}
-
-				err = runValidation(cvs, RequestErr, schemaCookies, def.field, def.rules)
-				if err != nil {
-					errs = append(errs, err)
-					continue
-				}
-
-				if shouldBind {
-					sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
-					if sf.Kind() == reflect.Pointer {
-						sf.Elem().Set(reflect.ValueOf(cvs).Convert(sf.Elem().Type()))
-					} else {
-						sf.Set(reflect.ValueOf(cvs).Convert(sf.Type()))
-					}
-				}
+			}
+			if len(errs) > 0 {
+				return nil, errors.Join(errs...)
 			}
 		}
-		if len(errs) > 0 {
-			return nil, errors.Join(errs...)
-		}
+	}
+
+	if mask&partBody == 0 {
+		return schemaPtr, nil
 	}
 
 	// Handle Body
