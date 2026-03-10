@@ -168,6 +168,12 @@ func (c *context) Copy() Context {
 		fctx:              new(fasthttp.RequestCtx),
 	}
 
+	// Preserve handler chain state so copied contexts can continue middleware flow.
+	if len(c.handlers) > 0 {
+		cc.handlers = make([]HandlerFunc, len(c.handlers))
+		copy(cc.handlers, c.handlers)
+	}
+
 	// Copy path parameters
 	if len(c.params) > 0 {
 		cc.params = make(Params, len(c.params))

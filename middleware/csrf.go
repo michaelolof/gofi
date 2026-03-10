@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
@@ -59,6 +61,14 @@ type CSRFConfig struct {
 	// ErrorHandler is executed when an extracted CSRF token is invalid.
 	// Optional. Default: returns 403 Forbidden.
 	ErrorHandler gofi.HandlerFunc
+
+	// SignTokens enables signed CSRF tokens using HMAC-SHA256.
+	// Optional. Default: false
+	SignTokens bool
+
+	// SigningKey is used to sign/verify CSRF tokens when SignTokens is enabled.
+	// If empty and SignTokens is true, an ephemeral key is generated at startup.
+	SigningKey []byte
 }
 
 // DefaultCSRFGenerator generates a random 32-byte hex string
@@ -66,6 +76,38 @@ func DefaultCSRFGenerator() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func defaultCSRFSigningKey() []byte {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return b
+}
+
+func signCSRFToken(raw string, key []byte) string {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(raw))
+	sig := mac.Sum(nil)
+	return raw + "." + hex.EncodeToString(sig)
+}
+
+func verifySignedCSRFToken(signed string, key []byte) bool {
+	idx := strings.LastIndexByte(signed, '.')
+	if idx <= 0 || idx == len(signed)-1 {
+		return false
+	}
+
+	raw := signed[:idx]
+	sigHex := signed[idx+1:]
+	sig, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return false
+	}
+
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(raw))
+	expected := mac.Sum(nil)
+	return subtle.ConstantTimeCompare(sig, expected) == 1
 }
 
 // CSRFConfigDefault is the default config
@@ -109,6 +151,10 @@ func CSRF(config ...CSRFConfig) gofi.MiddlewareFunc {
 		}
 	}
 
+	if cfg.SignTokens && len(cfg.SigningKey) == 0 {
+		cfg.SigningKey = defaultCSRFSigningKey()
+	}
+
 	// Parse KeyLookup
 	source := "header"
 	key := "X-CSRF-Token"
@@ -141,19 +187,39 @@ func CSRF(config ...CSRFConfig) gofi.MiddlewareFunc {
 
 		// 1. Check if the token already exists in the cookie
 		var token string
+		cookieValid := false
 		cookie, err := c.Request().Cookie(cfg.CookieName)
 		if err == nil && cookie != nil && cookie.Value != "" {
 			token = cookie.Value
+			if cfg.SignTokens {
+				cookieValid = verifySignedCSRFToken(token, cfg.SigningKey)
+			} else {
+				cookieValid = true
+			}
 		}
 
-		// 2. Generate a new token if not present
-		if token == "" {
-			token = cfg.KeyGenerator()
+		// 2. Generate a new token if missing/invalid
+		if token == "" || !cookieValid {
+			raw := cfg.KeyGenerator()
+			if cfg.SignTokens {
+				token = signCSRFToken(raw, cfg.SigningKey)
+			} else {
+				token = raw
+			}
 		}
 
 		// 3. For state-changing methods, validate the token against the extracted client token
 		if !isSafe {
 			clientToken := extractToken(c)
+
+			if cfg.SignTokens {
+				if !cookieValid {
+					return cfg.ErrorHandler(c)
+				}
+				if clientToken == "" || !verifySignedCSRFToken(clientToken, cfg.SigningKey) {
+					return cfg.ErrorHandler(c)
+				}
+			}
 
 			// Constant time comparison to prevent timing attacks
 			if clientToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(clientToken)) != 1 {
@@ -181,7 +247,8 @@ func CSRF(config ...CSRFConfig) gofi.MiddlewareFunc {
 		if cfg.CookieHTTPOnly {
 			cookieHeader += "; HttpOnly"
 		}
-		if cfg.CookieSecure {
+		secureCookie := cfg.CookieSecure || c.Request().Context().IsTLS()
+		if secureCookie {
 			cookieHeader += "; Secure"
 		}
 		cookieHeader += "; SameSite=" + cfg.CookieSameSite

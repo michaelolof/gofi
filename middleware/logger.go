@@ -3,6 +3,7 @@ package middleware
 import (
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/michaelolof/gofi"
@@ -50,9 +51,8 @@ func Logger(config ...LoggerConfig) gofi.MiddlewareFunc {
 
 		latency := time.Since(start).String()
 
-		// If no status is set yet, standard is 200
-		statusCode := c.Writer().Header().Get("Status")
-		if statusCode == "" {
+		statusCode := strconv.Itoa(c.Request().Context().Response.StatusCode())
+		if statusCode == "0" {
 			statusCode = "200"
 		}
 
@@ -60,8 +60,9 @@ func Logger(config ...LoggerConfig) gofi.MiddlewareFunc {
 		if ip == "" {
 			ip = "unknown"
 		}
-		method := c.Method()
-		path := c.Path()
+		ip = sanitizeLogField(ip)
+		method := sanitizeLogField(c.Method())
+		path := sanitizeLogField(c.Path())
 		timestr := time.Now().Format("2006/01/02 - 15:04:05")
 
 		// Super simple format string replacement for performance instead of regex
@@ -71,4 +72,21 @@ func Logger(config ...LoggerConfig) gofi.MiddlewareFunc {
 
 		return err
 	}
+}
+
+func sanitizeLogField(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			buf := make([]byte, len(s))
+			copy(buf, s)
+			for j := i; j < len(buf); j++ {
+				if buf[j] < 0x20 || buf[j] == 0x7f {
+					buf[j] = ' '
+				}
+			}
+			return string(buf)
+		}
+	}
+
+	return s
 }
