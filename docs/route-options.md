@@ -11,18 +11,31 @@ type HandlerFunc func(c gofi.Context) error
 ```
 
 ### The Context Interface
+
 The `Context` interface provides methods to interact with the HTTP request and response, access stores, and utilities.
 
-| Method | Description |
-| :--- | :--- |
-| **`Writer() http.ResponseWriter`** | Returns the underlying `http.ResponseWriter`. |
-| **`Request() *http.Request`** | Returns the underlying `*http.Request`. |
-| **`Send(code int, obj any) error`** | Sends a response based on the defined schema for the given status code. |
-| **`SendString(code int, s string) error`** | Helper to send a plain text response. |
-| **`SendBytes(code int, b []byte) error`** | Helper to send a raw byte response. |
-| **`GlobalStore() ReadOnlyStore`** | Access the global, thread-safe key-value store defined on the main router. |
-| **`DataStore() GofiStore`** | Access variables stored for the lifetime of the request (e.g. by middlewares). |
-| **`Meta() ContextMeta`** | Access static meta information defined on the route. |
+- **Writer() ResponseWriter**: Returns a `ResponseWriter` for backward compatibility.
+- **Request() \*Request**: Returns a `Request` adapter for backward compatibility.
+- **GlobalStore() ReadOnlyStore**: Access the global store defined on the server router instance.
+- **DataStore() GofiStore**: Access the route context data store for passing and retrieving data during a request lifetime.
+- **Meta() ContextMeta**: Access static meta information defined on the route.
+- **GetSchemaRules(pattern, method string) any**: Retrieves schema rules for a given pattern and method.
+- **Next() error**: Calls the next handler in the middleware chain.
+- **Param(name string) string**: Returns the named path parameter value.
+- **Query(name string) string**: Returns the query parameter value.
+- **HeaderVal(name string) string**: Returns the request header value.
+- **HeaderBytes(name string) []byte**: Returns the request header value as raw bytes.
+- **Body() []byte**: Returns the raw request body bytes.
+- **Path() string**: Returns the request URL path.
+- **Pattern() string**: Returns the registered route pattern that matched the request.
+- **Method() string**: Returns the HTTP method.
+- **QueryBytes(name string) []byte**: Returns the query parameter value as raw bytes.
+- **Copy() Context**: Creates a deep copy of the `Context` that is safe to use in a background goroutine.
+- **Send(code int, obj any) error**: Sends a schema response object for the given status code.
+- **SendString(code int, s string) error**: Sends a string response.
+- **SendBytes(code int, b []byte) error**: Sends a byte slice response.
+- **SendStream(code int, obj any, sw func(w \*bufio.Writer) error) error**: SendStream simplifies SSE. Sets headers based on schema definition and takes over the connection.
+- **SetBodyStreamWriter(sw func(w \*bufio.Writer) error) error**: Sets a chunked stream writer for the response body.
 
 ## Handler Incoming Requests and Outgoing Responses
 

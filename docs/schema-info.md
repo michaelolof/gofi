@@ -74,7 +74,7 @@ Responses are defined by fields that match supported HTTP status codes. Each fie
 Ok struct {
     // Headers
     Header struct {
-        ContentTypw string `json:"content-type" default:"application/json"`
+        ContentType string `json:"content-type" default:"application/json"`
     }
 
     // Cookies
@@ -148,7 +148,7 @@ You can use any of the following fields in your root schema struct to define a r
 - **`UnsupportedMediaType`**: `415 Unsupported Media Type`
 - **`RangeNotSatisfiable`**: `416 Range Not Satisfiable`
 - **`ExpectiationFailed`**: `417 Expectation Failed`
-- **`ImTeamPot`**: `418 I'm a teapot`
+- **`ImTeaPot`**: `418 I'm a teapot`
 - **`MisdirectedRequest`**: `421 Misdirected Request`
 - **`UnprocessableContent`**: `422 Unprocessable Content`
 - **`Locked`**: `423 Locked`

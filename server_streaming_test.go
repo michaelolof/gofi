@@ -1,21 +1,34 @@
 package gofi
 
 import (
-"bufio"
-"fmt"
-"io"
-"net/http"
-"testing"
-"time"
+	"bufio"
+	"fmt"
+	"io"
+	"net/http"
+	"testing"
+	"time"
 )
 
-func TestSendStream(t *testing.T) {
+func TestStream(t *testing.T) {
 	mux := NewRouter()
 
+	type streamSchema struct {
+		Ok struct {
+			Header struct {
+				ContentType  string `json:"content-type" validate:"required" default:"text/event-stream"`
+				Connection   string `json:"connection" default:"keep-alive"`
+				CacheControl string `json:"cache-control" default:"no-cache"`
+			}
+			Body string `validate:"required"`
+		}
+	}
+
 	mux.Get("/events", RouteOptions{
-Handler: func(c Context) error {
-return c.SendStream(func(w *bufio.Writer) error {
-for i := 0; i < 3; i++ {
+		Schema: &streamSchema{},
+		Handler: func(c Context) error {
+			var s streamSchema
+			return c.SendStream(200, s.Ok, func(w *bufio.Writer) error {
+				for i := 0; i < 3; i++ {
 					if _, err := fmt.Fprintf(w, "data: event %d\n\n", i); err != nil {
 						return err
 					}
@@ -60,6 +73,6 @@ for i := 0; i < 3; i++ {
 	if string(body) != expected {
 		t.Errorf("Expected body '%s', got '%s'", expected, string(body))
 	}
-	
+
 	_ = mux.Shutdown()
 }

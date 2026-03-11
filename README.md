@@ -565,24 +565,31 @@ func main() {
 
 ## Streaming (Server-Sent Events)
 
-Gofi provides an ergonomic `SendStream` helper that injects required `text/event-stream` headers and securely propagates network disconnects up to the global HTTP error handler. 
+Gofi provides an ergonomic `SendStream` helper that takes the status code, schema definition and securely propagates network disconnects up to the global HTTP error handler.
 
 ```go
+// Define the schema for the streaming response
+type streamSchema struct {
+    Ok struct {
+        Header struct {
+            ContentType string `json:"content-type" default:"text/event-stream"`
+        }
+        Body string `validate:"required" pattern:"event-stream"`
+    }
+}
+
 r.GET("/stream", gofi.DefineHandler(gofi.RouteOptions{
+    Schema: &streamSchema{},
     Handler: func(c gofi.Context) error {
-        // SendStream automatically sets SSE headers and manages the stream
-        return c.SendStream(func(w *bufio.Writer) error {
-            for i := 0; i < 5; i++ {
-                // Write data chunks
-                if _, err := fmt.Fprintf(w, "data: Message %d\n\n", i); err != nil {
-                    return err // Propagates to Gofi Error Handler
+        var s streamSchema
+        return c.SendStream(200, s, func(w *bufio.Writer) error {
+            for i := 0; i < 10; i++ {
+                if _, err := fmt.Fprintf(w, "data: Chunk %d\n\n", i+1); err != nil {
+                    return err
                 }
-                
-                // Flush the buffer to the network
                 if err := w.Flush(); err != nil {
-                    return err // Gracefully halts if client disconnects
+                    return err
                 }
-                
                 time.Sleep(1 * time.Second)
             }
             return nil
@@ -590,6 +597,8 @@ r.GET("/stream", gofi.DefineHandler(gofi.RouteOptions{
     },
 }))
 ```
+
+This ensures the status code and schema are set before streaming begins. By default, if you do not set a status code, the default (usually 200 OK) is used.
 
 ## WebSockets
 

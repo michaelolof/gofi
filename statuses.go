@@ -64,7 +64,7 @@ var statuses = map[string][]statusInfo{
 	"UnsupportedMediaType":          {{Code: "415", Description: "Unsupported Media Type Error"}},
 	"RangeNotSatisfiable":           {{Code: "416", Description: "Range Not Satisfiable Error"}},
 	"ExpectiationFailed":            {{Code: "417", Description: "Expectation Failed Error"}},
-	"ImTeamPot":                     {{Code: "418", Description: "I'm a teapot Error"}},
+	"ImTeaPot":                      {{Code: "418", Description: "I'm a teapot Error"}},
 	"MisdirectedRequest":            {{Code: "421", Description: "Misdirected Request Error"}},
 	"UnprocessableContent":          {{Code: "422", Description: "Unprocessable Content Error"}},
 	"Locked":                        {{Code: "423", Description: "Locked Error"}},

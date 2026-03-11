@@ -36,6 +36,12 @@ type Context interface {
 	Send(code int, obj any) error
 	SendString(code int, s string) error
 	SendBytes(code int, b []byte) error
+
+	// SetBodyStreamWriter sets a chunked stream writer for the response body
+	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
+	// SendStream simplifies SSE. Sets headers based on schema definition and takes over the connection.
+	SendStream(code int, s any, sw func(w *bufio.Writer) error) error
+
 	GetSchemaRules(pattern, method string) any
 	// Next calls the next handler in the middleware chain
 	Next() error
@@ -57,12 +63,9 @@ type Context interface {
 	Method() string
 	// QueryBytes returns the query parameter value as raw bytes (zero-copy from fasthttp)
 	QueryBytes(name string) []byte
-	// SetBodyStreamWriter sets a chunked stream writer for the response body
-	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
-	// SendStream simplifies SSE. Sets necessary headers and takes over the connection.
-	SendStream(sw func(w *bufio.Writer) error) error
+
 	// Copy creates a deep copy of the Context that is safe to use in a background goroutine.
 	Copy() Context
 }
@@ -207,26 +210,6 @@ func (c *context) SendString(code int, s string) error {
 	c.fctx.Response.SetStatusCode(code)
 	c.fctx.Response.SetBodyString(s)
 	return nil
-}
-
-func (c *context) SetBodyStreamWriter(sw func(w *bufio.Writer) error) error {
-	// We use channels to propagate any errors from the separated writer goroutine
-	// managed internally by fasthttp back to the caller synchronosly.
-	errCh := make(chan error, 1)
-
-	c.fctx.SetBodyStreamWriter(func(w *bufio.Writer) {
-		errCh <- sw(w)
-		close(errCh)
-	})
-
-	return <-errCh
-}
-
-func (c *context) SendStream(sw func(w *bufio.Writer) error) error {
-	c.fctx.Response.Header.Set("Content-Type", "text/event-stream")
-	c.fctx.Response.Header.Set("Cache-Control", "no-cache")
-	c.fctx.Response.Header.Set("Connection", "keep-alive")
-	return c.SetBodyStreamWriter(sw)
 }
 
 func (c *context) SendBytes(code int, b []byte) error {
