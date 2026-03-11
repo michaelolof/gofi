@@ -271,6 +271,9 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 	}
 
 	if mask&partBody == 0 {
+		if shouldBind {
+			bindRequestBodyWithoutValidation(c, schemaPtr, reqStruct)
+		}
 		return schemaPtr, nil
 	}
 
@@ -309,6 +312,68 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 
 	return schemaPtr, nil
 
+}
+
+func bindRequestBodyWithoutValidation[T any](c *context, schemaPtr *T, reqStruct reflect.Value) {
+	pdef := c.rules().getReqRules(schemaBody)
+	if pdef == nil || pdef.kind == reflect.Invalid {
+		return
+	}
+
+	bodyBytes := c.Body()
+	if len(bodyBytes) == 0 {
+		return
+	}
+
+	body := io.NopCloser(bytes.NewReader(bodyBytes))
+	contentType := c.rules().reqContent()
+	sz, err := c.serverOpts.getSerializer(contentType)
+	if err != nil {
+		return
+	}
+
+	_ = sz.ValidateAndDecodeRequest(body, RequestOptions{
+		ShouldBind:  true,
+		Context:     &parserContext{c: c},
+		SchemaPtr:   schemaPtr,
+		Body:        &reqStruct,
+		SchemaRules: stripValidationRules(pdef),
+	})
+}
+
+func stripValidationRules(rule *RuleDef) *RuleDef {
+	if rule == nil {
+		return nil
+	}
+
+	clone := *rule
+	clone.required = false
+	clone.max = nil
+	clone.rules = nil
+
+	if rule.item != nil {
+		clone.item = stripValidationRules(rule.item)
+	}
+
+	if rule.additionalProperties != nil {
+		clone.additionalProperties = stripValidationRules(rule.additionalProperties)
+	}
+
+	if rule.properties != nil {
+		clone.properties = make(map[string]*RuleDef, len(rule.properties))
+		for key, child := range rule.properties {
+			clone.properties[key] = stripValidationRules(child)
+		}
+	}
+
+	if rule.orderedProps != nil {
+		clone.orderedProps = make([]*RuleDef, 0, len(rule.orderedProps))
+		for _, child := range rule.orderedProps {
+			clone.orderedProps = append(clone.orderedProps, stripValidationRules(child))
+		}
+	}
+
+	return &clone
 }
 
 // doValidateStrAndBind validates a string value against rules and optionally binds to a struct field.

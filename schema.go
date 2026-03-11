@@ -8,6 +8,7 @@ import (
 )
 
 type openapiSchema struct {
+	Title                string                   `json:"title,omitempty"`
 	Format               string                   `json:"format,omitempty"`
 	Type                 string                   `json:"type,omitempty"`
 	Pattern              string                   `json:"pattern,omitempty"`
@@ -15,6 +16,8 @@ type openapiSchema struct {
 	Minimum              *float64                 `json:"minimum,omitempty"`
 	Maximum              *float64                 `json:"maximum,omitempty"`
 	Enum                 []any                    `json:"enum,omitempty"`
+	OneOf                []openapiSchema          `json:"oneOf,omitempty"`
+	Discriminator        *openapiDiscriminator    `json:"discriminator,omitempty"`
 	Items                *openapiSchema           `json:"items,omitempty"`
 	AdditionalProperties *openapiSchema           `json:"additionalProperties,omitempty"`
 	Properties           map[string]openapiSchema `json:"properties,omitempty"`
@@ -24,6 +27,11 @@ type openapiSchema struct {
 	Example              any                      `json:"example,omitempty"`
 
 	ParentRequired bool `json:"-"`
+}
+
+type openapiDiscriminator struct {
+	PropertyName string            `json:"propertyName,omitempty"`
+	Mapping      map[string]string `json:"mapping,omitempty"`
 }
 
 func newOpenapiSchema(format string, typ string, pattn string, deflt any, min *float64, max *float64, enum []any, items *openapiSchema, addprops *openapiSchema, properties map[string]openapiSchema, required []string, deprecated *bool, describe string, example any, pRequired bool) openapiSchema {
@@ -122,6 +130,7 @@ type openapiOperationObject struct {
 	urlPath             string
 	method              string
 	bodySchema          openapiSchema
+	websocketSchema     openapiSchema
 	responsesParameters map[string]openapiParameters
 	responsesSchema     map[string]openapiSchema
 }
@@ -218,6 +227,22 @@ func (o *openapiOperationObject) normalize(method string, path string) {
 		}
 	}
 
+	if !o.websocketSchema.IsEmpty() {
+		if o.Responses == nil {
+			o.Responses = make(map[string]openapiResponseObject)
+		}
+
+		response := o.Responses["101"]
+		response.Description = "Switching Protocols Response. The schema below documents the post-upgrade websocket protocol."
+		response.Required = o.websocketSchema.ParentRequired
+		response.Content = map[string]openapiMediaObject{
+			string(cont.ApplicationJson): {
+				Schema: o.websocketSchema,
+			},
+		}
+		o.Responses["101"] = response
+	}
+
 }
 
 type Info struct {
@@ -241,12 +266,13 @@ const (
 	// schemaHttpMethod  schemaField = "Method"
 	// schemaUrl         schemaField = "Url"
 	// schemaDeprecated  schemaField = "Deprecated"
-	schemaReq     schemaField = "Request"
-	schemaHeaders schemaField = "Header"
-	schemaCookies schemaField = "Cookie"
-	schemaQuery   schemaField = "Query"
-	schemaPath    schemaField = "Path"
-	schemaBody    schemaField = "Body"
+	schemaReq       schemaField = "Request"
+	schemaHeaders   schemaField = "Header"
+	schemaCookies   schemaField = "Cookie"
+	schemaQuery     schemaField = "Query"
+	schemaPath      schemaField = "Path"
+	schemaBody      schemaField = "Body"
+	schemaWebSocket schemaField = "WebSocket"
 )
 
 func (s schemaField) reqSchemaIn() string {

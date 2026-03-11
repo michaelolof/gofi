@@ -567,6 +567,13 @@ func main() {
 
 Gofi provides an ergonomic `SendStream` helper that takes the status code, schema definition and securely propagates network disconnects up to the global HTTP error handler.
 
+Use streaming when:
+
+- the server is pushing updates in one direction
+- the client does not need to send live frames back
+- SSE semantics are sufficient
+- you want a simpler HTTP-native real-time transport
+
 ```go
 // Define the schema for the streaming response
 type streamSchema struct {
@@ -600,37 +607,106 @@ r.GET("/stream", gofi.DefineHandler(gofi.RouteOptions{
 
 This ensures the status code and schema are set before streaming begins. By default, if you do not set a status code, the default (usually 200 OK) is used.
 
+Operational notes:
+
+- `SendStream` validates response headers and cookies before the stream body starts.
+- The stream writer is responsible for writing event frames and calling `Flush()`.
+- Write and disconnect errors should be returned from the callback so the caller can observe stream failure.
+- For SSE, the response schema should normally declare `content-type: text/event-stream`.
+
+Recommended build order for a streaming route:
+
+- define the streaming response schema for the status code you plan to send
+- set `content-type: text/event-stream` on the response schema when building SSE
+- call `SendStream(code, schemaValue, callback)` from the handler
+- write valid SSE frames such as `data: ...\n\n`
+- flush after each event or batch that should reach the client immediately
+- return callback errors so disconnects and write failures are visible
+
 ## WebSockets
 
-Gofi features a native bridging adapter (`websocket.New()`) wrapping the highly optimized `fasthttp/websocket` library. The adapter safely hijacks the underlying TCP connection without destroying context memory pools prematurely.
+Gofi provides context-aware websocket handlers, handshake validation, JSON message helpers, lifecycle hooks, and active-session draining for production workloads.
+
+If you are new to WebSockets or want the full explanation of how they fit into Gofi's router model, read the dedicated guide: [WebSockets Guide](docs/websockets.md).
+
+That guide covers:
+
+- When to use WebSockets instead of HTTP or SSE
+- How upgrade requests work in Gofi
+- How to define websocket routes with `websocket.DefineWebSocket(...)`
+- What `Session`, `Options`, `Hooks`, and `SessionRegistry` do
+- How handshake validation, message validation, and graceful shutdown work
+- How browser clients connect and exchange messages
+
+There is also a runnable companion example in the examples repository at `gofi-test-utils/cmd/examples/websockets/main.go`.
+
+Recommended build order for a websocket route:
+
+- define handshake input in `Schema.Request`
+- define message contracts in `Schema.WebSocket`
+- choose `HandshakeAuto`, `HandshakeSelective`, or `HandshakeOff`
+- implement the session using `ReadJSON`, `WriteJSON`, and `WriteError` when the protocol is JSON-based
+- add limits, timeouts, hooks, and optionally a `SessionRegistry` before shipping to production
 
 ```go
 import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/michaelolof/gofi"
     "github.com/michaelolof/gofi/websocket"
 )
 
-// WebSockets natively support middleware before connection upgrade
-r.GET("/ws/:room_id", gofi.DefineHandler(gofi.RouteOptions{
-    Handler: websocket.New(func(c *websocket.Conn) error {
-        // Infinite read/write loop
+registry := websocket.NewSessionRegistry()
+
+r.Get("/ws/:room_id", websocket.DefineWebSocket(websocket.WebSocketOptions{
+    Handshake: websocket.HandshakePolicy{Mode: websocket.HandshakeAuto},
+    Handler: func(s *websocket.Session) error {
+        roomID := s.Context().Param("room_id")
         for {
-            mt, msg, err := c.ReadMessage()
+            mt, msg, err := s.ReadMessage()
             if err != nil {
-                // Disconnect or read error. Returning sets off global error logs if critical.
-                log.Println("client disconnected:", err)
-                return err 
+                return nil
             }
-            
-            log.Printf("Received: %s", msg)
-            
-            // Echo message back
-            if err = c.WriteMessage(mt, msg); err != nil {
-                return err 
+            if err := s.WriteMessage(mt, []byte("["+roomID+"] "+string(msg))); err != nil {
+                return err
             }
         }
-    }),
+    },
+    Runtime: websocket.RuntimeOptions{
+        Registry:        registry,
+        MaxMessageBytes: 1 << 20,
+        ReadTimeout:     30 * time.Second,
+        WriteTimeout:    10 * time.Second,
+        Hooks: websocket.Hooks{
+            OnUpgradeError: func(ctx gofi.Context, err error) {
+                log.Printf("upgrade failed path=%s err=%v", ctx.Path(), err)
+            },
+            OnSessionError: func(ctx gofi.Context, err error) {
+                log.Printf("session error room=%s err=%v", ctx.Param("room_id"), err)
+            },
+        },
+    },
 }))
+
+// On shutdown, drain active sessions before router shutdown.
+drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+_ = registry.DrainContext(drainCtx)
+_ = r.Shutdown()
 ```
+
+Handshake validation is configured at the route layer with `websocket.HandshakePolicy{Mode: websocket.HandshakeAuto}` or `websocket.HandshakePolicy{Mode: websocket.HandshakeSelective, Selectors: ...}`.
+
+`websocket.DefineWebSocket(...)` is the documented public way to define websocket route options. For the full walkthrough, API reference, and production guidance, see [docs/websockets.md](docs/websockets.md).
+
+Use WebSockets when the client and server must both send messages at any time. If the server is only pushing one-way updates, Gofi streaming is often a simpler fit.
+
+At a high level:
+
+- use streaming for outbound event feeds and SSE
+- use WebSockets for bidirectional session protocols
 
 ## Unit Testing
 

@@ -96,6 +96,11 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					sRules.setReq(sf.Name, ruleDefs)
 				}
 			}
+		} else if sf.Name == string(schemaWebSocket) {
+			if protocol, ok := ExtractWebSocketSchema(schema); ok {
+				optsObj.websocketSchema = s.compileWebSocketSchema(protocol)
+				sRules.websocket = compileWebSocketContract(protocol)
+			}
 		} else if _, ok := statuses[sf.Name]; ok {
 			for _, rqf := range reflect.VisibleFields(sf.Type) {
 				rqn := schemaField(rqf.Name)

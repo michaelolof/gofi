@@ -214,6 +214,7 @@ type ruleDefMap map[string]RuleDef
 type schemaRules struct {
 	req        map[string]RuleDef
 	responses  map[string]map[string]RuleDef
+	websocket  *compiledWebSocketContract
 	schemaPool *sync.Pool
 	schemaType reflect.Type
 }

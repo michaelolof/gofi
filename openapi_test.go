@@ -197,6 +197,88 @@ func TestOpenAPIGeneration(t *testing.T) {
 		assert.Equal(t, "string", param.Schema.Type)
 		assert.Equal(t, "string", param.Schema.Format)
 	})
+
+	t.Run("WebSocketContracts", func(t *testing.T) {
+		type joinRoomPayload struct {
+			Nickname string `json:"nickname" validate:"required"`
+		}
+
+		type sendMessagePayload struct {
+			Text string `json:"text" validate:"required"`
+		}
+
+		type roomJoinedPayload struct {
+			RoomID string `json:"room_id" validate:"required"`
+		}
+
+		type validationErrorPayload struct {
+			Message string `json:"message" validate:"required"`
+		}
+
+		type testSchema struct {
+			Request struct {
+				Header struct {
+					Authorization string `json:"Authorization" validate:"required"`
+				}
+			}
+			SwitchingProtocols struct {
+				Header struct {
+					Upgrade string `json:"Upgrade" default:"websocket"`
+				}
+			}
+			WebSocket WebSocketSchema
+		}
+
+		schema := &testSchema{
+			WebSocket: WebSocketSchema{
+				Inbound: WebSocketMessageFamily{
+					Variants: []WebSocketMessage{
+						{Type: "join_room", Schema: joinRoomPayload{}},
+						{Type: "send_message", Schema: sendMessagePayload{}},
+					},
+				},
+				Outbound: WebSocketMessageFamily{
+					Variants: []WebSocketMessage{
+						{Type: "room_joined", Schema: roomJoinedPayload{}},
+					},
+				},
+				Error: WebSocketMessageFamily{
+					Variants: []WebSocketMessage{
+						{Type: "validation_error", Schema: validationErrorPayload{}},
+					},
+				},
+			},
+		}
+
+		r := newRouter()
+		cs := r.compileSchema(schema, Info{Method: "GET", Url: "/ws"})
+		cs.specs.normalize("GET", "/ws")
+
+		response, ok := cs.specs.Responses["101"]
+		require.True(t, ok)
+		assert.Contains(t, response.Headers, "Upgrade")
+		assert.Contains(t, response.Content, "application/json")
+
+		protocol := response.Content["application/json"].Schema
+		assert.Equal(t, "object", protocol.Type)
+		assert.Equal(t, []string{"inbound", "outbound", "error"}, protocol.Required)
+
+		inbound := protocol.Properties["inbound"]
+		require.NotNil(t, inbound.Discriminator)
+		assert.Equal(t, "type", inbound.Discriminator.PropertyName)
+		require.Len(t, inbound.OneOf, 2)
+		assert.Equal(t, []any{"join_room"}, inbound.OneOf[0].Properties["type"].Enum)
+		assert.Equal(t, "object", inbound.OneOf[0].Properties["payload"].Type)
+		assert.Contains(t, inbound.OneOf[0].Properties["payload"].Required, "nickname")
+
+		outbound := protocol.Properties["outbound"]
+		require.Len(t, outbound.OneOf, 1)
+		assert.Equal(t, []any{"room_joined"}, outbound.OneOf[0].Properties["type"].Enum)
+
+		errorSchema := protocol.Properties["error"]
+		require.Len(t, errorSchema.OneOf, 1)
+		assert.Equal(t, []any{"validation_error"}, errorSchema.OneOf[0].Properties["type"].Enum)
+	})
 }
 
 func TestOpenAPIServing(t *testing.T) {
