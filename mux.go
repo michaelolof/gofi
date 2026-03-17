@@ -189,29 +189,6 @@ type dummyLogger struct{}
 
 func (d *dummyLogger) Printf(format string, args ...interface{}) {}
 
-// Test dispatches a request through the full route tree and returns an InjectResponse.
-func (s *serveMux) Test(method, path string) *InjectResponse {
-	var fctx fasthttp.RequestCtx
-	fctx.Init2(nil, &dummyLogger{}, false)
-	fctx.Request.Header.SetMethod(method)
-	fctx.Request.SetRequestURI(path)
-	fctx.Request.Header.SetHost("localhost")
-
-	s.handleFastHTTP(&fctx)
-
-	// Collect response headers
-	headerMap := make(http.Header)
-	for key, val := range fctx.Response.Header.All() {
-		headerMap.Add(string(key), string(val))
-	}
-
-	return &InjectResponse{
-		StatusCode: fctx.Response.StatusCode(),
-		HeaderMap:  headerMap,
-		Body:       fctx.Response.Body(),
-	}
-}
-
 func (s *serveMux) acquireContext(ctx *fasthttp.RequestCtx) *context {
 	c := s.ctxPool.Get().(*context)
 	c.reset(ctx)
@@ -370,6 +347,113 @@ func (s *serveMux) RegisterValidator(list ...Validator) {
 	for _, v := range list {
 		s.opts.customValidators[v.Name()] = v.Rule
 	}
+}
+
+type TestOptions struct {
+	Path    string
+	Method  string
+	Query   map[string]string
+	Paths   map[string]string
+	Headers map[string]string
+	Cookies []http.Cookie
+	Body    io.Reader
+}
+
+func resolveTestPath(path string, paths map[string]string) string {
+	if len(paths) == 0 {
+		return path
+	}
+
+	resolved := path
+	for key, value := range paths {
+		resolved = strings.ReplaceAll(resolved, "{"+key+"}", value)
+		resolved = strings.ReplaceAll(resolved, ":"+key, value)
+		resolved = strings.ReplaceAll(resolved, "*"+key, value)
+	}
+
+	return resolved
+}
+
+// Test dispatches a request through the full route tree and returns an InjectResponse.
+func (s *serveMux) Test(opts TestOptions) (resp *InjectResponse, err error) {
+	if opts.Method == "" {
+		return nil, fmt.Errorf("gofi.Test: Method is required")
+	}
+	if opts.Path == "" {
+		return nil, fmt.Errorf("gofi.Test: Path is required")
+	}
+
+	var reqBody []byte
+	if opts.Body != nil {
+		reqBody, err = io.ReadAll(opts.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read test body: %w", err)
+		}
+	}
+
+	var rawReq bytes.Buffer
+	path := resolveTestPath(opts.Path, opts.Paths)
+	if len(opts.Query) > 0 {
+		qParts := make([]string, 0, len(opts.Query))
+		for key, value := range opts.Query {
+			qParts = append(qParts, key+"="+value)
+		}
+		path += "?" + strings.Join(qParts, "&")
+	}
+
+	rawReq.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", opts.Method, path))
+	rawReq.WriteString("Host: localhost\r\n")
+
+	for name, value := range opts.Headers {
+		rawReq.WriteString(fmt.Sprintf("%s: %s\r\n", name, value))
+	}
+
+	for _, cookie := range opts.Cookies {
+		rawReq.WriteString(fmt.Sprintf("Cookie: %s=%s\r\n", cookie.Name, cookie.Value))
+	}
+
+	if len(reqBody) > 0 {
+		rawReq.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(reqBody)))
+	}
+
+	rawReq.WriteString("\r\n")
+
+	if len(reqBody) > 0 {
+		rawReq.Write(reqBody)
+	}
+
+	var fctx fasthttp.RequestCtx
+	fctx.Init2(nil, &dummyLogger{}, false)
+	if err := fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes()))); err != nil {
+		return nil, fmt.Errorf("failed to build test request: %w", err)
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = NewHTTPError(500, fmt.Sprintf("panic recovered in Test: %v", r))
+				c := s.acquireContext(&fctx)
+				defer s.releaseContext(c)
+				c.setContextSettings(newContextOptions(path, opts.Method), s.routeMeta, s.globalStore, s.opts)
+				s.opts.errHandler(err, c)
+			}
+		}()
+
+		s.handleFastHTTP(&fctx)
+	}()
+
+	headerMap := make(http.Header)
+	for key, val := range fctx.Response.Header.All() {
+		headerMap.Add(string(key), string(val))
+	}
+
+	resp = &InjectResponse{
+		StatusCode: fctx.Response.StatusCode(),
+		HeaderMap:  headerMap,
+		Body:       fctx.Response.Body(),
+	}
+
+	return resp, err
 }
 
 type InjectOptions struct {

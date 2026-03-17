@@ -56,7 +56,10 @@ func TestMiddleware(t *testing.T) {
 		})
 		r.With(mw).Get("/test-1", handler1)
 
-		w := r.Test("GET", "/test-1")
+		w, err := r.Test(TestOptions{Method: "GET", Path: "/test-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if w.HeaderMap.Get("X-Test-1") != "1" {
 			t.Errorf("Expected x-test-1 header to be 1, got %s", w.HeaderMap.Get("X-Test-1"))
 		}

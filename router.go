@@ -42,7 +42,7 @@ type Router interface {
 	// Test dispatches a request through the full route tree (including middleware,
 	// pre-handlers, and 404 handling) and returns the response. This is the
 	// primary way to test routing behavior from external packages.
-	Test(method, path string) *InjectResponse
+	Test(opts TestOptions) (*InjectResponse, error)
 
 	// Listen starts the server on the given address
 	Listen(addr string) error

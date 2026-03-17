@@ -349,6 +349,14 @@ func (r *InjectResponse) Result() *InjectResponse {
 	return r
 }
 
+func (r *InjectResponse) BodyString() string {
+	panic("Not implemented yet...")
+}
+
+func (r *InjectResponse) BindBody(v any) error {
+	panic("Not implemented yet...")
+}
+
 // Cookies parses the Set-Cookie headers and returns the cookies.
 func (r *InjectResponse) Cookies() []*http.Cookie {
 	var cookies []*http.Cookie

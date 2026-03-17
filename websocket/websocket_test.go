@@ -35,7 +35,10 @@ func TestWebSocketUpgradeRequired(t *testing.T) {
 		}),
 	})
 
-	resp := mux.Test("GET", "/ws")
+	resp, err := mux.Test(gofi.TestOptions{Method: "GET", Path: "/ws"})
+	if err != nil {
+		t.Fatalf("test request failed: %v", err)
+	}
 	if resp.StatusCode != 426 {
 		t.Fatalf("expected status 426, got %d", resp.StatusCode)
 	}
