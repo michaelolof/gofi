@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"bufio"
+	stdcontext "context"
 	"net/http"
 	"reflect"
 
@@ -67,6 +68,11 @@ type Context interface {
 	// set — either by a middleware writing directly to the fasthttp response or via c.Writer().
 	// Useful for middleware idempotency checks where a header may have been set upstream.
 	HasResponseHeader(key string) bool
+	// Context returns a standard library context.Context that is safe for both synchronous and
+	// asynchronous use. On the original (live) context it is backed by the fasthttp connection
+	// context so cancellation signals propagate naturally. On a Copy()-ed context it is a
+	// detached context.Background(), keeping the copy independent from the connection lifetime.
+	Context() stdcontext.Context
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
 
@@ -85,6 +91,7 @@ func newContextOptions(patt, method string) contextOptions {
 
 type context struct {
 	fctx              *fasthttp.RequestCtx
+	stdCtx            stdcontext.Context // explicitly managed Go context; nil on live contexts (lazily read from fctx), non-nil on Copy()-ed contexts
 	opts              contextOptions
 	routeMeta         metaMap
 	globalStore       ReadOnlyStore
@@ -109,6 +116,7 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	}
 
 	c.fctx = fctx
+	c.stdCtx = nil // cleared on each request; live context reads from fctx lazily
 	c.opts = contextOptions{}
 	c.routeMeta = nil
 	c.dataStore = nil // Lazy: only allocate on first DataStore() access
@@ -192,6 +200,12 @@ func (c *context) Copy() Context {
 	// like Method, URI, and Request Headers.
 	c.fctx.Request.CopyTo(&cc.fctx.Request)
 
+	// Detach the Go context from the connection lifecycle. The copied context
+	// must not share the original connection's Done channel — the connection
+	// may close (and cancel the original context) while async work is still
+	// running. context.Background() is safe and non-nil for all consumers.
+	cc.stdCtx = stdcontext.Background()
+
 	// Copy datastore if initialized already
 	if c.dataStore != nil {
 		cc.dataStore = NewDataStore()
@@ -252,6 +266,16 @@ func (c *context) QueryBytes(name string) []byte {
 
 func (c *context) HasResponseHeader(key string) bool {
 	return c.headerAlreadyWritten(key)
+}
+
+func (c *context) Context() stdcontext.Context {
+	// For Copy()-ed contexts stdCtx is pre-set to context.Background().
+	if c.stdCtx != nil {
+		return c.stdCtx
+	}
+	// For live contexts, delegate to the fasthttp connection context which
+	// carries cancellation signals (e.g. client disconnect).
+	return c.fctx
 }
 
 func (c *context) HeaderBytes(name string) []byte {

@@ -239,25 +239,37 @@ r.GET("/process", gofi.DefineHandler(gofi.RouteOptions{
 
 #### Standard Library context.Context
 
-In many cases, your background job simply needs the standard library `context.Context` interfaces to pass to external libraries (e.g. database drivers, external API clients, or timeouts).
-If you do not need access to Gofi-specific properties (route parameters, headers, or framework datastores), you can extract the standard library context directly from the request object itself:
+Use `c.Context()` to obtain a standard library `context.Context`. This is the **recommended, safe entry point** for passing contexts to external libraries (database drivers, HTTP clients, timeouts, etc.).
+
+- On a **live handler context** it delegates to the fasthttp connection context, so cancellation signals (e.g. client disconnect) propagate naturally.
+- On a **`c.Copy()`-ed context** it returns a detached `context.Background()`, ensuring async work is never cancelled by the original connection closing.
+
+Because both cases return a non-nil `context.Context`, `c.Context()` works correctly regardless of whether the consuming code runs synchronously or asynchronously:
 
 ```go
 func(c gofi.Context) error {
-    stdCtx := c.Request().Context()
-    
-    // You can now safely pass stdCtx to generic Go functions
-    // and wrap it in timeouts without worrying about Gofi's sync.Pool.
-    backgroundCtx, cancel := context.WithTimeout(stdCtx, 5*time.Second)
+    // Safe for both sync calls and goroutines:
+    ctx := c.Context()
+
+    // Wrap with a timeout (works on live or copied context)
+    ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
     defer cancel()
-    
-    go func(ctx context.Context) {
-        myDatabase.QueryContext(ctx, "...")
-    }(backgroundCtx)
-    
-    return c.SendString(200, "Job started")
+
+    // Synchronous use
+    result, err := myDatabase.QueryContext(ctx, "SELECT ...")
+
+    // Async use — copy first, then take its context
+    cc := c.Copy()
+    go func() {
+        bgCtx := cc.Context() // context.Background(), never nil
+        myQueue.Push(bgCtx, payload)
+    }()
+
+    return c.SendString(200, "ok")
 }
 ```
+
+> **Avoid `c.Request().Context()`** for standard-library context usage. That method returns the raw `*fasthttp.RequestCtx`, which is not a `context.Context`. On a `c.Copy()`-ed context the fasthttp struct is freshly allocated and its Go context is `nil`, causing a panic in anything that calls `Done()`, `Deadline()`, or `Value()` on it.
 
 ### Middleware
 
