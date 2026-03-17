@@ -757,7 +757,7 @@ func TestMyHandler(t *testing.T) {
 
 ### Lightweight Testing with `Test()`
 
-For quick tests on registered routes, use the `Test()` shorthand:
+For quick tests on registered routes, use the `Test()` shorthand. Unlike `Inject`, `Test` dispatches through the full registered route tree (middleware, 404 handling, redirects) and returns both a response and an error.
 
 ```go
 func TestPing(t *testing.T) {
@@ -768,15 +768,44 @@ func TestPing(t *testing.T) {
         },
     })
 
-    resp, err := r.Test("GET", "/ping")
+    resp, err := r.Test(gofi.TestOptions{
+        Method: "GET",
+        Path:   "/ping",
+    })
     assert.NoError(t, err)
     assert.Equal(t, 200, resp.StatusCode)
 }
 ```
 
-### InjectOptions & InjectResponse
+You can also pass headers, query params, cookies, and a body:
 
 ```go
+resp, err := r.Test(gofi.TestOptions{
+    Method:  "POST",
+    Path:    "/users",
+    Headers: map[string]string{"Authorization": "Bearer token"},
+    Query:   map[string]string{"page": "1"},
+    Body:    strings.NewReader(`{"name": "Alice"}`),
+})
+```
+
+If the handler panics, `Test` recovers, invokes the configured error handler, and returns a `500` response alongside a non-nil error.
+
+### TestOptions, InjectOptions & InjectResponse
+
+```go
+// TestOptions is used with r.Test() — dispatches through the full route tree.
+type TestOptions struct {
+    Path    string            // Request path
+    Method  string            // HTTP method (required)
+    Query   map[string]string // Query parameters
+    Paths   map[string]string // Path parameter overrides (e.g. {"id": "123"})
+    Headers map[string]string // Request headers
+    Cookies []http.Cookie     // Request cookies
+    Body    io.Reader         // Request body
+}
+
+// InjectOptions is used with r.Inject() — bypasses the route tree and calls the handler directly.
 type InjectOptions struct {
     Path    string              // Request Path
     Method  string              // HTTP Method
@@ -785,7 +814,7 @@ type InjectOptions struct {
     Headers map[string]string   // Headers
     Cookies []http.Cookie       // Cookies
     Body    io.Reader           // Request Body
-    Handler *RouteOptions       // The Handler definition to test
+    Handler *RouteOptions       // The Handler definition to test (required)
 }
 
 type InjectResponse struct {
@@ -793,6 +822,15 @@ type InjectResponse struct {
     HeaderMap  http.Header
     Body       []byte
 }
+
+// Helper methods on InjectResponse:
+func (r *InjectResponse) BodyString() string          // Body as a string
+func (r *InjectResponse) BindBody(v any) error        // Unmarshal JSON body into v
+func (r *InjectResponse) BodyJSON() map[string]any    // Unmarshal body into a map (nil on error)
+func (r *InjectResponse) Header(key string) string    // Get a response header value
+func (r *InjectResponse) HasHeader(key string) bool   // Check if a header is present
+func (r *InjectResponse) CookieValue(name string) string // Get a Set-Cookie value by name
+func (r *InjectResponse) Cookies() []*http.Cookie     // Parse all Set-Cookie headers
 ```
 
 ## Custom Types/Specs

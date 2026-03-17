@@ -79,6 +79,24 @@ type headerSetter interface {
 	ValidateAndEncodeHeaders(c Context) error
 }
 
+// headerAlreadyWritten reports whether a response header with the given key has
+// already been set — either directly on the fasthttp response (e.g. by middleware
+// that writes to c.fctx.Response.Header) or in the ResponseWriter adapter's
+// pending header map (e.g. by middleware that calls c.Writer().Header().Set).
+// Both locations must be checked because the adapter's headers are not synced to
+// fasthttp until after the handler returns.
+func (c *context) headerAlreadyWritten(key string) bool {
+	if len(c.fctx.Response.Header.Peek(key)) > 0 {
+		return true
+	}
+	if c.rw != nil && c.rw.headerInit {
+		if vals := c.rw.header.Values(key); len(vals) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Value) error {
 	var ruleProps map[string]*RuleDef
 	if v, ok := rules[string(schemaHeaders)]; ok {
@@ -105,6 +123,14 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 
 		hf := headers.FieldByName(val.fieldName)
 		if !hf.IsValid() {
+			if val.required {
+				if c.headerAlreadyWritten(key) {
+					continue
+				}
+				if err := runValidation(nil, ResponseErr, schemaHeaders, key, val.rules); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 
@@ -125,6 +151,10 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				return newErrReport(ResponseErr, schemaHeaders, key, "typeMismatch", err)
 			}
 
+			if v == "" && c.headerAlreadyWritten(key) {
+				continue
+			}
+
 			if err := checkAndSet(v, key, val.rules); err != nil {
 				return err
 			}
@@ -133,6 +163,9 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 			case utils.IsPrimitiveKind(val.kind):
 				if utils.PrimitiveKindIsEmpty(val.kind, hv) && val.defVal != nil {
 					hv = val.defVal
+				}
+				if utils.PrimitiveKindIsEmpty(val.kind, hv) && c.headerAlreadyWritten(key) {
+					continue
 				}
 				err := runValidation(hv, ResponseErr, schemaHeaders, key, val.rules)
 				if err != nil {
@@ -149,6 +182,10 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
 					}
 
+					if (tv == nil || tv.IsZero()) && c.headerAlreadyWritten(key) {
+						continue
+					}
+
 					err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules)
 					if err != nil {
 						return err
@@ -160,6 +197,10 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 					tv, ok := hv.(time.Time)
 					if !ok {
 						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
+					}
+
+					if tv.IsZero() && c.headerAlreadyWritten(key) {
+						continue
 					}
 
 					err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules)
@@ -178,6 +219,31 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 
 type cookieSetter interface {
 	ValidateAndEncodeCookies(c Context) error
+}
+
+// cookieAlreadyWritten reports whether a Set-Cookie header for the given cookie
+// name has already been written to the response — either directly on the fasthttp
+// response or in the ResponseWriter adapter's pending header map.
+func (c *context) cookieAlreadyWritten(name string) bool {
+	found := false
+	c.fctx.Response.Header.VisitAllCookie(func(key, _ []byte) {
+		if string(key) == name {
+			found = true
+		}
+	})
+	if found {
+		return true
+	}
+	if c.rw != nil && c.rw.headerInit {
+		for _, cookieStr := range c.rw.header.Values("Set-Cookie") {
+			if eqIdx := strings.IndexByte(cookieStr, '='); eqIdx > 0 {
+				if cookieStr[:eqIdx] == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Value) error {
@@ -202,6 +268,14 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 	for key, val := range ruleProps {
 		cf := cookies.FieldByName(val.fieldName)
 		if !cf.IsValid() {
+			if val.required {
+				if c.cookieAlreadyWritten(key) {
+					continue
+				}
+				if err := runValidation(nil, ResponseErr, schemaCookies, key, val.rules); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 
@@ -211,11 +285,13 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 			if utils.PrimitiveKindIsEmpty(val.kind, cv) && val.defVal != nil {
 				cv = val.defVal
 			}
-			err := runValidation(cv, ResponseErr, schemaHeaders, key, val.rules)
+			if utils.PrimitiveKindIsEmpty(val.kind, cv) && c.cookieAlreadyWritten(key) {
+				continue
+			}
+			err := runValidation(cv, ResponseErr, schemaCookies, key, val.rules)
 			if err != nil {
 				return err
 			}
-			// Set cookie via fasthttp
 			cookie := &http.Cookie{Name: key, Value: fmt.Sprintf("%v", cv)}
 			c.fctx.Response.Header.Add("Set-Cookie", cookie.String())
 
@@ -227,12 +303,16 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return newErrReport(ResponseErr, schemaCookies, "", "parser", errors.New("unable to parse cookie"))
 				}
 
+				if cf.IsNil() && c.cookieAlreadyWritten(key) {
+					continue
+				}
+
 				var cookV string
 				if cook != nil {
 					cookV = cook.Value
 				}
 
-				err := runValidation(cookV, ResponseErr, schemaHeaders, key, val.rules)
+				err := runValidation(cookV, ResponseErr, schemaCookies, key, val.rules)
 				if err != nil {
 					return err
 				}
@@ -244,7 +324,11 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 					return newErrReport(ResponseErr, schemaCookies, "", "parser", errors.New("unable to parse cookie"))
 				}
 
-				err := runValidation(cook.Value, ResponseErr, schemaHeaders, key, val.rules)
+				if cook.Value == "" && c.cookieAlreadyWritten(key) {
+					continue
+				}
+
+				err := runValidation(cook.Value, ResponseErr, schemaCookies, key, val.rules)
 				if err != nil {
 					return err
 				}

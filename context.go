@@ -63,6 +63,10 @@ type Context interface {
 	Method() string
 	// QueryBytes returns the query parameter value as raw bytes (zero-copy from fasthttp)
 	QueryBytes(name string) []byte
+	// HasResponseHeader reports whether a response header with the given key has already been
+	// set — either by a middleware writing directly to the fasthttp response or via c.Writer().
+	// Useful for middleware idempotency checks where a header may have been set upstream.
+	HasResponseHeader(key string) bool
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
 
@@ -244,6 +248,10 @@ func (c *context) Body() []byte {
 
 func (c *context) QueryBytes(name string) []byte {
 	return c.fctx.QueryArgs().Peek(name)
+}
+
+func (c *context) HasResponseHeader(key string) bool {
+	return c.headerAlreadyWritten(key)
 }
 
 func (c *context) HeaderBytes(name string) []byte {
