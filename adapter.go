@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -350,11 +351,37 @@ func (r *InjectResponse) Result() *InjectResponse {
 }
 
 func (r *InjectResponse) BodyString() string {
-	panic("Not implemented yet...")
+	return string(r.Body)
 }
 
 func (r *InjectResponse) BindBody(v any) error {
-	panic("Not implemented yet...")
+	return json.Unmarshal(r.Body, v)
+}
+
+func (r *InjectResponse) Header(key string) string {
+	return r.HeaderMap.Get(key)
+}
+
+func (r *InjectResponse) HasHeader(key string) bool {
+	_, ok := r.HeaderMap[http.CanonicalHeaderKey(key)]
+	return ok
+}
+
+func (r *InjectResponse) CookieValue(name string) string {
+	for _, c := range r.Cookies() {
+		if c.Name == name {
+			return c.Value
+		}
+	}
+	return ""
+}
+
+func (r *InjectResponse) BodyJSON() map[string]any {
+	var body map[string]any
+	if err := json.Unmarshal(r.Body, &body); err != nil {
+		return nil
+	}
+	return body
 }
 
 // Cookies parses the Set-Cookie headers and returns the cookies.
