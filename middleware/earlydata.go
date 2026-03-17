@@ -32,7 +32,7 @@ var EarlyDataConfigDefault = EarlyDataConfig{
 		return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions || method == http.MethodTrace
 	},
 	ErrorHandler: func(c gofi.Context) error {
-		return c.SendString(http.StatusTooEarly, "Too Early")
+		return gofi.NewHTTPError(http.StatusTooEarly, "too early")
 	},
 }
 

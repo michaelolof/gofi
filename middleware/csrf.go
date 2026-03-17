@@ -118,7 +118,7 @@ var CSRFConfigDefault = CSRFConfig{
 	Expiration:     1 * time.Hour,
 	KeyGenerator:   DefaultCSRFGenerator,
 	ErrorHandler: func(c gofi.Context) error {
-		return c.SendString(http.StatusForbidden, "Invalid CSRF Token")
+		return gofi.NewHTTPError(http.StatusForbidden, "invalid CSRF token")
 	},
 }
 

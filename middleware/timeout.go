@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/michaelolof/gofi"
-	"github.com/valyala/fasthttp"
 )
 
 // TimeoutConfig defines the config for the Timeout middleware.
@@ -23,7 +22,7 @@ type TimeoutConfig struct {
 var TimeoutConfigDefault = TimeoutConfig{
 	Timeout: 5 * time.Second,
 	ErrorHandler: func(c gofi.Context) error {
-		return c.SendString(fasthttp.StatusRequestTimeout, "Request Timeout")
+		return gofi.NewHTTPError(408, "request timeout")
 	},
 }
 
@@ -57,7 +56,7 @@ func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					ch <- runResult{err: fmt.Errorf("panic in timeout middleware: %v", r)}
+					ch <- runResult{err: gofi.NewHTTPError(500, fmt.Sprintf("panic in timeout middleware: %v", r))}
 				}
 			}()
 
@@ -72,7 +71,8 @@ func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 			copyCtx.Response.CopyTo(&origCtx.Response)
 			return result.err
 		case <-time.After(cfg.Timeout):
-			// Timeout response is written on the foreground request context only.
+			// By default, timeout errors are returned to the router error handler.
+			// A custom middleware ErrorHandler may still choose to handle the response locally.
 			return cfg.ErrorHandler(c)
 		}
 	}

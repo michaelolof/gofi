@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"errors"
 	"log"
 	"strconv"
 )
@@ -29,15 +30,23 @@ func DefineHandler(opts RouteOptions) RouteOptions {
 }
 
 func defaultErrorHandler(err error, c Context) {
+	code := 500
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr != nil && httpErr.Code > 0 {
+		code = httpErr.Code
+	}
+
 	// Write JSON error response directly without encoding/json
 	msg := err.Error()
 	var buf []byte
-	if prefix, ok := preComputedErrPrefix[500]; ok {
+	if prefix, ok := preComputedErrPrefix[code]; ok {
 		buf = make([]byte, 0, len(prefix)+len(msg)+4)
 		buf = append(buf, prefix...)
 	} else {
 		buf = make([]byte, 0, 128)
-		buf = append(buf, `{"status":"error","statusCode":500,"message":"`...)
+		buf = append(buf, `{"status":"error","statusCode":`...)
+		buf = strconv.AppendInt(buf, int64(code), 10)
+		buf = append(buf, `,"message":"`...)
 	}
 	// Simple JSON string escape for the error message
 	for i := 0; i < len(msg); i++ {
@@ -58,15 +67,15 @@ func defaultErrorHandler(err error, c Context) {
 	}
 	buf = append(buf, `"}`...)
 
-	if err := c.SendBytes(500, buf); err != nil {
+	if err := c.SendBytes(code, buf); err != nil {
 		log.Println("gofi: error handler failed:", err)
 	}
 }
 
 // pre-computed error JSON templates for common status codes
 var preComputedErrPrefix = func() map[int][]byte {
-	m := make(map[int][]byte, 8)
-	for _, code := range []int{400, 401, 403, 404, 405, 409, 422, 500} {
+	m := make(map[int][]byte, 10)
+	for _, code := range []int{400, 401, 403, 404, 405, 408, 409, 422, 425, 500} {
 		prefix := make([]byte, 0, 64)
 		prefix = append(prefix, `{"status":"error","statusCode":`...)
 		prefix = strconv.AppendInt(prefix, int64(code), 10)

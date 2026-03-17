@@ -471,8 +471,8 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				err = fmt.Errorf("panic recovered in Inject: %v", r)
-				fctx.Response.SetStatusCode(500)
+				err = NewHTTPError(500, fmt.Sprintf("panic recovered in Inject: %v", r))
+				s.opts.errHandler(err, c)
 			}
 		}()
 		if handlerErr := c.Next(); handlerErr != nil {

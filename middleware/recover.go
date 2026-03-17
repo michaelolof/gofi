@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"runtime/debug"
@@ -17,12 +18,21 @@ type RecoverConfig struct {
 	// Output is the output log destination.
 	// Optional. Default: os.Stderr
 	Output *log.Logger
+
+	// ErrorHandler is executed when a panic is recovered.
+	// If it returns a non-nil error, that error is forwarded to the router error handler.
+	// If it returns nil, the panic is considered fully handled inside the middleware.
+	// Optional. Default: returns an error describing the recovered panic.
+	ErrorHandler func(c gofi.Context, r any) error
 }
 
 // RecoverConfigDefault is the default config
 var RecoverConfigDefault = RecoverConfig{
 	EnableStackTrace: false,
 	Output:           log.New(os.Stderr, "", log.LstdFlags),
+	ErrorHandler: func(c gofi.Context, r any) error {
+		return gofi.NewHTTPError(500, fmt.Sprintf("panic recovered: %v", r))
+	},
 }
 
 // Recover creates a new middleware handler
@@ -38,9 +48,12 @@ func Recover(config ...RecoverConfig) gofi.MiddlewareFunc {
 		if cfg.Output == nil {
 			cfg.Output = RecoverConfigDefault.Output
 		}
+		if cfg.ErrorHandler == nil {
+			cfg.ErrorHandler = RecoverConfigDefault.ErrorHandler
+		}
 	}
 
-	return func(c gofi.Context) error {
+	return func(c gofi.Context) (retErr error) {
 		defer func() {
 			if r := recover(); r != nil {
 				// Log the panic
@@ -50,8 +63,7 @@ func Recover(config ...RecoverConfig) gofi.MiddlewareFunc {
 					cfg.Output.Printf("panic recovered: %v\n", r)
 				}
 
-				// Return 500 status code
-				_ = c.SendString(500, "Internal Server Error")
+				retErr = cfg.ErrorHandler(c, r)
 			}
 		}()
 
