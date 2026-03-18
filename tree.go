@@ -10,6 +10,7 @@ const (
 )
 
 type routeData struct {
+	pattern  string
 	handlers []HandlerFunc
 	rules    *schemaRules
 	meta     any

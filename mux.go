@@ -136,7 +136,7 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 		})
 
 		if routeData != nil {
-			c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+			c.setContextSettings(newContextOptions(routeData.pattern, method), s.routeMeta, s.globalStore, s.opts)
 			c.handlers = routeData.handlers
 			c.handlerIdx = -1
 
@@ -644,6 +644,7 @@ func (s *serveMux) method(method string, path string, opts RouteOptions) {
 	}
 
 	data := &routeData{
+		pattern:  path,
 		handlers: allHandlers,
 		meta:     opts.Meta,
 	}
