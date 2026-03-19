@@ -174,14 +174,14 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 			}
 		}
 
-		if !ctx.Hijacked() {
-			s.releaseContext(c)
-		}
+		// No route matched — run global middleware with not-found terminal.
+		s.runNotFound(ctx, c, path, method)
+		return
 	}
 
-	// 404
-	ctx.SetStatusCode(http.StatusNotFound)
-	ctx.SetBodyString("404 page not found\n")
+	// No tree registered for this method — still run global middleware.
+	c := s.acquireContext(ctx)
+	s.runNotFound(ctx, c, path, method)
 }
 
 // dummyLogger implements fasthttp.Logger
@@ -198,6 +198,33 @@ func (s *serveMux) acquireContext(ctx *fasthttp.RequestCtx) *context {
 
 func (s *serveMux) releaseContext(c *context) {
 	s.ctxPool.Put(c)
+}
+
+// runNotFound runs the global middleware chain terminated by a 404 handler.
+// This ensures middleware (e.g. CORS) always executes even when no route is matched.
+func (s *serveMux) runNotFound(ctx *fasthttp.RequestCtx, c *context, path, method string) {
+	c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+
+	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
+	allHandlers = append(allHandlers, s.middlewares...)
+	allHandlers = append(allHandlers, func(c Context) error {
+		return NewHTTPError(http.StatusNotFound, "404 page not found")
+	})
+
+	c.handlers = allHandlers
+	c.handlerIdx = -1
+
+	if err := c.Next(); err != nil {
+		s.opts.errHandler(err, c)
+	}
+
+	if c.rw != nil {
+		c.rw.syncHeaders()
+	}
+
+	if !ctx.Hijacked() {
+		s.releaseContext(c)
+	}
 }
 
 func (s *serveMux) GlobalStore() GofiStore {
