@@ -83,7 +83,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 			}
 
 			if !ok && !fileOk && !hasNested {
-				if rule.required {
+				if rule.required || rule.present {
 					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 				}
 				continue
@@ -179,7 +179,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 						i++
 					}
 
-					if i == 0 && rule.required {
+					if i == 0 && rule.required && !rule.present {
 						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("value must not be empty"))
 					}
 					if err := m.bindValue(fieldVal, nslice.Interface()); err != nil {
@@ -278,7 +278,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 			if rule.kind == reflect.Slice || rule.kind == reflect.Array || rule.kind == reflect.Struct {
 				// Continue
 			} else {
-				if rule.required {
+				if rule.required || rule.present {
 					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 				}
 				continue

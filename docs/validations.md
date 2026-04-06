@@ -66,7 +66,9 @@ Here is the complete list of supported validation tags in Gofi.
 ### Comparison & Length
 | Tag | Description | Example |
 | :--- | :--- | :--- |
-| **`required`** | Field must be non-zero value. | `validate:"required"` |
+| **`required`** | Field must be present AND non-zero (rejects `0`, `false`, `""`, `[]`, `{}`). | `validate:"required"` |
+| **`present`** | Field must be present. Zero-values (`0`, `false`, `""`, `[]`) are allowed. Equivalent to `required,allow_zero`. | `validate:"present"` |
+| **`allow_zero`** | Modifier for `required`. Relaxes the zero-value check so that `required,allow_zero` behaves like `present`. | `validate:"required,allow_zero"` |
 | **`not_empty`** | Field must not be empty (strings, slices, maps). | `validate:"not_empty"` |
 | **`len`** | Exact length (string/array/slice) or value (number). | `validate:"len=5"` |
 | **`min`** | Minimum length (string/array/slice) or value (number). | `validate:"min=5"` |
@@ -221,6 +223,83 @@ Here is the complete list of supported validation tags in Gofi.
 - `boolean` - String "true"/"false" or boolean
 - `isdefault` - Sets a default value if empty
 - `e164` - Valid E.164 phone number format
+
+## Presence and Zero-Value Validation
+
+Gofi distinguishes between two closely related but distinct concepts:
+
+- **Presence** — the field exists in the payload (is not missing or null).
+- **Non-zero** — the field's value is not the zero-value for its type (`0`, `false`, `""`, `[]`, `{}`).
+
+The built-in `required` tag enforces **both**, which means it rejects legitimate zero-values like `0` for numeric counters or `false` for boolean flags. Use `present` or `required,allow_zero` when you need the field to exist but want to allow any value including the zero-value.
+
+### Comparison Table
+
+| Tag | Field Missing | Field = zero-value | Field = non-zero |
+| :--- | :---: | :---: | :---: |
+| *(no tag)* | OK | OK | OK |
+| `validate:"required"` | ERROR | ERROR | OK |
+| `validate:"present"` | ERROR | OK | OK |
+| `validate:"required,allow_zero"` | ERROR | OK | OK |
+
+> `present` and `required,allow_zero` are semantically identical. Both are supported for ergonomics — `present` is more concise, `required,allow_zero` is more explicit.
+
+### Usage Examples
+
+**`present` — field must exist, zero-values allowed:**
+
+```go
+type OrderSchema struct {
+    Query struct {
+        // Quantity must be provided but 0 is a valid amount
+        Quantity float64 `json:"quantity" validate:"present"`
+
+        // Confirmed must be provided but false is a valid state
+        Confirmed bool `json:"confirmed" validate:"present"`
+
+        // Tags must be provided but an empty list is acceptable
+        Tags []string `json:"tags" validate:"present"`
+    }
+}
+
+func handler(c gofi.Context) error {
+    s, err := gofi.ValidateAndBind[OrderSchema](c)
+    if err != nil {
+        return err // error if any present-tagged field is missing from payload
+    }
+    // s.Query.Quantity == 0 → OK
+    // s.Query.Confirmed == false → OK
+    // s.Query.Tags == [] → OK
+    return nil
+}
+```
+
+**`required,allow_zero` — explicit form, identical semantics:**
+
+```go
+type PaymentSchema struct {
+    Body struct {
+        Amount   float64  `json:"amount"   validate:"required,allow_zero"`
+        Currency string   `json:"currency" validate:"required"`
+    }
+}
+```
+
+### Migration Guide
+
+If you have a field that should be **required but accepts zero-values** (e.g., a counter that can be `0`, a flag that can be `false`), change the validate tag from `required` to `present`:
+
+```go
+// Before: 0 was incorrectly rejected
+Volume int `json:"volume" validate:"required"`
+
+// After: 0 is now accepted, field still must be present in payload
+Volume int `json:"volume" validate:"present"`
+```
+
+This change is **non-breaking** for all non-zero values — it only affects payloads where the field carries a zero-value.
+
+---
 
 ## Validation Utilities
 Gofi also exposes two (2) lower-level validation functions that you can use anywhere in your application, not just within route handlers.

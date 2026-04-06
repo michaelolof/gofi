@@ -598,7 +598,7 @@ func (s *serveMux) compileWebSocketVariantPayload(variant WebSocketMessage) open
 		return openapiSchema{Type: "object"}
 	}
 
-	ruleDefs := newRuleDef(reflect.StructField{Name: variant.Type, Type: typ}, "", value, nil, false, nil, nil, nil, nil)
+	ruleDefs := newRuleDef(reflect.StructField{Name: variant.Type, Type: typ}, "", value, nil, false, false, nil, nil, nil, nil)
 	schema := s.getTypeInfo(typ, value, variant.Type, ruleDefs)
 	if schema.Title == "" {
 		schema.Title = variant.Type

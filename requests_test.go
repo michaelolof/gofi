@@ -909,3 +909,379 @@ func TestBody_Nested(t *testing.T) {
 	})
 	assert.Nil(t, err)
 }
+
+// TestRequest_PresentTag_Slice covers present tag on a []Item field.
+func TestRequest_PresentTag_Slice(t *testing.T) {
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	t.Run("missing field — error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Items []Item `json:"items" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "missing present field should produce an error")
+					assert.Nil(t, s)
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("empty slice — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Items []Item `json:"items" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"items": []any{}}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "empty slice with present tag should not error")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, []Item{}, s.Request.Body.Items)
+					}
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("non-empty slice — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Items []Item `json:"items" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"items": []any{map[string]any{"name": "x"}}}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "non-empty slice with present tag should not error")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, []Item{{Name: "x"}}, s.Request.Body.Items)
+					}
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestRequest_PresentTag_Float covers present tag on a float64 field.
+func TestRequest_PresentTag_Float(t *testing.T) {
+	t.Run("missing field — error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Score float64 `json:"score" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "missing present float field should error")
+					assert.Nil(t, s)
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("zero value — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Score float64 `json:"score" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"score": 0}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "zero float with present tag should not error")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, float64(0), s.Request.Body.Score)
+					}
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestRequest_PresentTag_Bool covers present tag on a bool field.
+func TestRequest_PresentTag_Bool(t *testing.T) {
+	t.Run("missing field — error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Active bool `json:"active" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "missing present bool field should error")
+					assert.Nil(t, s)
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("false value — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Active bool `json:"active" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"active": false}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "false bool with present tag should not error")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, false, s.Request.Body.Active)
+					}
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestRequest_PresentTag_String covers present tag on a string field.
+func TestRequest_PresentTag_String(t *testing.T) {
+	t.Run("missing field — error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Name string `json:"name" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "missing present string field should error")
+					assert.Nil(t, s)
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("empty string — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Name string `json:"name" validate:"present"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"name": ""}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "empty string with present tag should not error")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, "", s.Request.Body.Name)
+					}
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestRequest_AllowZeroTag verifies that required,allow_zero behaves identically to present.
+func TestRequest_AllowZeroTag(t *testing.T) {
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	t.Run("slice empty — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Items []Item `json:"items" validate:"required,allow_zero"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"items": []any{}}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "required,allow_zero should accept empty slice")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, []Item{}, s.Request.Body.Items)
+					}
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("float zero — ok", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Score float64 `json:"score" validate:"required,allow_zero"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"score": 0}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "required,allow_zero should accept zero float")
+					assert.NotNil(t, s)
+					if s != nil {
+						assert.Equal(t, float64(0), s.Request.Body.Score)
+					}
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestRequest_RequiredRegression verifies that required still rejects zero/empty values.
+func TestRequest_RequiredRegression(t *testing.T) {
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	t.Run("required slice empty — error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Items []Item `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"items": []any{}}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "required should reject empty slice (regression guard)")
+					assert.Nil(t, s)
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("required float zero — error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Score float64 `json:"score" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+		m := NewRouter()
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"score": 0}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "required should reject zero float (regression guard)")
+					assert.Nil(t, s)
+					return nil
+				},
+			},
+		})
+	})
+}

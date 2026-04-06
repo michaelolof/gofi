@@ -60,7 +60,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					}
 
 					sfummy := reflect.StructField{Type: rqf.Type, Name: string(rqn)}
-					pruleDefs := newRuleDef(sfummy, "", nil, nil, false, nil, nil, nil, nil)
+					pruleDefs := newRuleDef(sfummy, "", nil, nil, false, false, nil, nil, nil, nil)
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
@@ -115,7 +115,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 
 					// ruleDefs := getFieldRuleDefs(rqf, string(rqn), nil)
 					sfummy := reflect.StructField{Type: rqf.Type, Name: string(rqn)}
-					pruleDefs := newRuleDef(sfummy, "", nil, nil, false, nil, nil, nil, nil)
+					pruleDefs := newRuleDef(sfummy, "", nil, nil, false, false, nil, nil, nil, nil)
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
@@ -175,6 +175,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 	var defStr string
 	var rules []ruleOpts
 	var required bool
+	var present bool
 	var max *float64
 
 	for _, stag := range supportedTags {
@@ -204,6 +205,8 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 				}
 
 				vtags := strings.Split(tag, ",")
+
+				var allowZero bool
 				rules = make([]ruleOpts, 0, len(vtags))
 				for _, tag := range vtags {
 					maches := tagFieldRegex.FindStringSubmatch(tag)
@@ -224,6 +227,12 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 					if ruleName == "required" {
 						required = true
 					}
+					if ruleName == "present" {
+						present = true
+					}
+					if ruleName == "allow_zero" {
+						allowZero = true
+					}
 
 					if (ruleName == "max" || ruleName == "lte") && len(options) > 1 {
 						flt, err := strconv.ParseFloat(options[0], 64)
@@ -234,11 +243,23 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 
 					rules = append(rules, newRuleOpts(sf.Type, sf.Type.Kind(), ruleName, options, s.opts))
 				}
+
+				// Normalize required+allow_zero → present: relax zero-value check to nil-only.
+				// Replace the IsRequired validator with IsPresent in the rules slice.
+				if required && allowZero {
+					present = true
+					for i, r := range rules {
+						if r.rule == "required" {
+							rules[i] = newRuleOpts(sf.Type, sf.Type.Kind(), "present", nil, s.opts)
+							break
+						}
+					}
+				}
 			}
 		}
 	}
 
-	rtn := newRuleDef(sf, defStr, defVal, rules, required, max, nil, nil, nil)
+	rtn := newRuleDef(sf, defStr, defVal, rules, required, present, max, nil, nil, nil)
 	rtn.tags = tagList
 	return rtn
 }
@@ -292,7 +313,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 
 		// var items structFieldInfo
 		optStr = ruleDefs.ruleOptions("oneof")
-		pRequired = ruleDefs.required
+		pRequired = ruleDefs.required || ruleDefs.present
 
 		if v, ok := ruleDefs.tags["example"]; ok && len(v) > 0 {
 			if v, err := utils.PrimitiveFromStr(typ.Kind(), v[0]); err == nil && utils.IsPrimitive(v) {
@@ -420,7 +441,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 
 					_ruleDefs := s.getFieldRuleDefs(sf, name, val)
 					ruleDefs.attach(name, _ruleDefs)
-					if _ruleDefs.hasRule("required") {
+					if _ruleDefs.hasRule("required") || _ruleDefs.hasRule("present") {
 						requiredProps = append(requiredProps, name)
 					}
 					properties[name] = s.getTypeInfoRecursive(sf.Type, val, name, _ruleDefs)

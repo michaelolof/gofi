@@ -64,6 +64,7 @@ type RuleDef struct {
 	orderedProps         []*RuleDef
 	max                  *float64
 	required             bool
+	present              bool
 
 	tags         map[string][]string
 	accessor     fieldAccessor
@@ -81,7 +82,7 @@ func preComputeJSONKey(name string) []byte {
 	return buf
 }
 
-func newRuleDef(sf reflect.StructField, defStr string, defVal any, rules []ruleOpts, required bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {
+func newRuleDef(sf reflect.StructField, defStr string, defVal any, rules []ruleOpts, required bool, present bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {
 	props := make(map[string]*RuleDef)
 	if properties != nil {
 		props = properties
@@ -111,6 +112,7 @@ func newRuleDef(sf reflect.StructField, defStr string, defVal any, rules []ruleO
 		defVal:               defVal,
 		rules:                rules,
 		required:             required,
+		present:              present,
 		max:                  max,
 		item:                 items,
 		properties:           props,
@@ -206,7 +208,7 @@ func getItemRuleDef(typ reflect.Type) *RuleDef {
 		Type: typ,
 		Name: "",
 	}
-	return newRuleDef(sf, "", nil, nil, false, nil, nil, nil, nil)
+	return newRuleDef(sf, "", nil, nil, false, false, nil, nil, nil, nil)
 }
 
 type ruleDefMap map[string]RuleDef

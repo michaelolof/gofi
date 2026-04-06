@@ -172,3 +172,98 @@ func TestAnyValueResponse(t *testing.T) {
 	assert.Equal(t, string(res.Body), `{"value":"foo"}`)
 	assert.Nil(t, err)
 }
+
+// TestResponse_PresentTag_SliceEmpty verifies that validate:"present" on a direct Body slice
+// does not produce a validation error when the slice is nil/empty in the response.
+func TestResponse_PresentTag_SliceEmpty(t *testing.T) {
+
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	type testSchema struct {
+		Ok struct {
+			Body []Item `validate:"present"`
+		}
+	}
+
+	mux := NewRouter()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			return c.Send(200, testSchema{}.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Nil(t, err, "present tag should allow nil/empty slice in response")
+	assert.Equal(t, `[]`, string(res.Body))
+}
+
+// TestResponse_PresentTag_FloatZero verifies that validate:"present" on a direct Body float64
+// does not produce a validation error when the value is 0 in the response.
+func TestResponse_PresentTag_FloatZero(t *testing.T) {
+
+	type testSchema struct {
+		Ok struct {
+			Body float64 `validate:"present"`
+		}
+	}
+
+	mux := NewRouter()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			return c.Send(200, testSchema{}.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Nil(t, err, "present tag should allow zero float in response")
+	assert.Equal(t, `0`, string(res.Body))
+}
+
+// TestResponse_RequiredRegression_SliceEmpty verifies that validate:"required" on a direct Body
+// slice still rejects an empty slice (existing behavior preserved). When validation fails,
+// the handler returns an error which errHandler converts to a 500 HTTP response.
+func TestResponse_RequiredRegression_SliceEmpty(t *testing.T) {
+
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	type testSchema struct {
+		Ok struct {
+			Body []Item `validate:"required"`
+		}
+	}
+
+	mux := NewRouter()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			var ok testSchema
+			ok.Ok.Body = []Item{}
+			return c.Send(200, ok.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Nil(t, err) // Inject only propagates panics, not handler errors
+	assert.Equal(t, 500, res.StatusCode, "required should reject empty slice in response (regression guard)")
+}

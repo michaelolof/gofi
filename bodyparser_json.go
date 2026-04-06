@@ -58,7 +58,7 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "reader", err)
-	} else if len(bs) == 0 && opts.SchemaRules != nil && opts.SchemaRules.required {
+	} else if len(bs) == 0 && opts.SchemaRules != nil && (opts.SchemaRules.required || opts.SchemaRules.present) {
 		return newErrReport(RequestErr, schemaBody, "", "required", errors.New("request body is required"))
 	} else if len(bs) == 0 {
 		return nil
@@ -129,7 +129,7 @@ func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 		body = body.Elem()
 	}
 
-	if opts.SchemaRules != nil && opts.SchemaRules.required && !body.IsValid() {
+	if opts.SchemaRules != nil && (opts.SchemaRules.required || opts.SchemaRules.present) && !body.IsValid() {
 		return nil, newErrReport(ResponseErr, schemaBody, "", "required", errors.New("value is required for body"))
 	}
 
@@ -170,7 +170,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		val = nil
 	}
 
-	if !opts.SchemaRules.required && val == nil {
+	if !opts.SchemaRules.required && !opts.SchemaRules.present && val == nil {
 		return nil, nil
 	}
 
@@ -342,7 +342,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 			}
 
-			if len(arrNodes) == 0 && rules.required {
+			if len(arrNodes) == 0 && rules.required && !rules.present {
 				_keys := append(keys, "0")
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(_keys, "."), "required", errors.New("value must not be empty"))
 			} else if rules.max != nil && len(arrNodes) > int(*rules.max) {

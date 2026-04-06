@@ -11,6 +11,8 @@ const (
 
 var Validators = rules.ContextValidators{
 	"required":         rules.IsRequired,
+	"present":          rules.IsPresent,
+	"allow_zero":       rules.IsAllowZero,
 	"oneof":            rules.IsOneOf,
 	"max":              rules.IsMax,
 	"min":              rules.IsMin,

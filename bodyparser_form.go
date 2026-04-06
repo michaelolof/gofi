@@ -73,7 +73,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 			}
 
 			if !ok && !hasNested {
-				if rule.required {
+				if rule.required || rule.present {
 					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 				}
 				continue
@@ -136,7 +136,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 						i++
 					}
 
-					if i == 0 && rule.required {
+					if i == 0 && rule.required && !rule.present {
 						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("value must not be empty"))
 					}
 
@@ -240,7 +240,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			if rule.kind == reflect.Slice || rule.kind == reflect.Array || rule.kind == reflect.Struct {
 				// Continue to handle nested binding
 			} else {
-				if rule.required {
+				if rule.required || rule.present {
 					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 				}
 				continue
