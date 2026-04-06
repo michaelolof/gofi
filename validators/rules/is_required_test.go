@@ -59,6 +59,27 @@ func TestIsRequired(t *testing.T) {
 			val:     0,
 			wantErr: true,
 		},
+		{
+			// Non-pointer structs are always present in Go;
+			// IsRequired must not reject them even when all fields are zero.
+			name: "struct with all zero-valued fields — no error",
+			valParams: ValidatorContext{
+				Type: reflect.TypeOf(struct{ Value int }{}),
+				Kind: reflect.Struct,
+			},
+			val:     struct{ Value int }{},
+			wantErr: false,
+		},
+		{
+			// Regression guard: nil must still be rejected regardless of type.
+			name: "nil value — error (regression guard)",
+			valParams: ValidatorContext{
+				Type: reflect.TypeOf(struct{ Value int }{}),
+				Kind: reflect.Struct,
+			},
+			val:     nil,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -49,6 +49,12 @@ func IsRequired(c ValidatorContext) func(arg any) error {
 			return nil
 		}
 
+		// Non-pointer structs are always present in Go — they cannot be nil.
+		// Their field contents are validated individually, not via IsZero on the struct itself.
+		if v.Kind() == reflect.Struct {
+			return nil
+		}
+
 		// General reflection-based check for other types
 		if !v.Type().ConvertibleTo(c.Type) {
 			// If we can't convert, but it passed the checks above (meaning it's not empty slice/map/string/number),

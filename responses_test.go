@@ -106,6 +106,43 @@ func TestTypeAliasResponse(t *testing.T) {
 	assert.Nil(t, err)
 }
 
+// TestSend_StructRequiredWithZeroFields verifies that a response body struct tagged
+// validate:"required" does not produce a validation error when its inner fields are
+// zero-valued (e.g. a nil slice). The struct itself is always present — IsRequired
+// must not call IsZero() on struct kinds.
+func TestSend_StructRequiredWithZeroFields(t *testing.T) {
+
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	type testSchema struct {
+		Ok struct {
+			Body struct {
+				Items []Item `json:"items"`
+			} `validate:"required"`
+		}
+	}
+
+	mux := NewRouter()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			// Send with a nil Items slice — the body struct itself is present.
+			return c.Send(200, testSchema{}.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Nil(t, err, "expected no validation error for a required struct with zero-valued inner fields")
+	assert.Equal(t, `{"items":[]}`, string(res.Body))
+}
+
 func TestAnyValueResponse(t *testing.T) {
 
 	type testSchema struct {
