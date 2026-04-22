@@ -21,6 +21,27 @@ func b2s(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
+// joinPath joins a prefix and a relative path with exactly one '/' separator,
+// handling all four slash-boundary combinations and empty operands.
+func joinPath(prefix, path string) string {
+	if prefix == "" {
+		return path
+	}
+	if path == "" {
+		return prefix
+	}
+	pSuffix := strings.HasSuffix(prefix, "/")
+	pPrefix := strings.HasPrefix(path, "/")
+	switch {
+	case pSuffix && pPrefix:
+		return prefix + path[1:]
+	case !pSuffix && !pPrefix:
+		return prefix + "/" + path
+	default:
+		return prefix + path
+	}
+}
+
 type serveMux struct {
 	trees             map[string]*node
 	rOpts             *RouteOptions
@@ -85,10 +106,11 @@ func (s *serveMux) Connect(path string, opts RouteOptions) {
 func (s *serveMux) Route(pattern string, fn func(r Router)) Router {
 	im := s.With().(*serveMux)
 	if pattern != "" {
-		if im.prefix != "" && !strings.HasSuffix(im.prefix, "/") && !strings.HasPrefix(pattern, "/") {
-			im.prefix += "/"
+		if im.prefix != "" {
+			im.prefix = joinPath(im.prefix, pattern)
+		} else {
+			im.prefix = pattern
 		}
-		im.prefix += pattern
 	}
 
 	if fn != nil {
@@ -166,6 +188,9 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 				} else {
 					redirectPath = redirectPath + "/"
 				}
+				if qs := ctx.URI().QueryString(); len(qs) > 0 {
+					redirectPath += "?" + b2s(qs)
+				}
 				ctx.Redirect(redirectPath, code)
 				if !ctx.Hijacked() {
 					s.releaseContext(c)
@@ -174,13 +199,63 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 			}
 		}
 
-		// No route matched — run global middleware with not-found terminal.
+		// No route matched in this method's tree — run global middleware with not-found terminal.
+		// First check if the path is registered under another method (405).
+		if s.opts.methodNotAllowed {
+			if allow := s.allowedMethods(path, method); allow != "" {
+				c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+				allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
+				allHandlers = append(allHandlers, s.middlewares...)
+				allHandlers = append(allHandlers, func(c Context) error {
+					c.Writer().Header().Set("Allow", allow)
+					return NewHTTPError(http.StatusMethodNotAllowed, "405 method not allowed")
+				})
+				c.handlers = allHandlers
+				c.handlerIdx = -1
+				if err := c.Next(); err != nil {
+					s.opts.errHandler(err, c)
+				}
+				if c.rw != nil {
+					c.rw.syncHeaders()
+				}
+				if !ctx.Hijacked() {
+					s.releaseContext(c)
+				}
+				return
+			}
+		}
 		s.runNotFound(ctx, c, path, method)
 		return
 	}
 
 	// No tree registered for this method — still run global middleware.
 	c := s.acquireContext(ctx)
+
+	// 405 check: is this path registered under a different method?
+	if s.opts.methodNotAllowed {
+		if allow := s.allowedMethods(path, method); allow != "" {
+			c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+			allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
+			allHandlers = append(allHandlers, s.middlewares...)
+			allHandlers = append(allHandlers, func(c Context) error {
+				c.Writer().Header().Set("Allow", allow)
+				return NewHTTPError(http.StatusMethodNotAllowed, "405 method not allowed")
+			})
+			c.handlers = allHandlers
+			c.handlerIdx = -1
+			if err := c.Next(); err != nil {
+				s.opts.errHandler(err, c)
+			}
+			if c.rw != nil {
+				c.rw.syncHeaders()
+			}
+			if !ctx.Hijacked() {
+				s.releaseContext(c)
+			}
+			return
+		}
+	}
+
 	s.runNotFound(ctx, c, path, method)
 }
 
@@ -198,6 +273,25 @@ func (s *serveMux) acquireContext(ctx *fasthttp.RequestCtx) *context {
 
 func (s *serveMux) releaseContext(c *context) {
 	s.ctxPool.Put(c)
+}
+
+// allowedMethods returns a comma-separated Allow header value listing every
+// registered HTTP method that has a matching route for path, excluding the
+// method that was actually requested. Returns "" if no other method matches.
+func (s *serveMux) allowedMethods(path, requestedMethod string) string {
+	var buf []byte
+	for m, root := range s.trees {
+		if m == requestedMethod {
+			continue
+		}
+		if data, _ := root.getValue(path, nil); data != nil {
+			if len(buf) > 0 {
+				buf = append(buf, ',', ' ')
+			}
+			buf = append(buf, m...)
+		}
+	}
+	return string(buf)
 }
 
 // runNotFound runs the global middleware chain terminated by a 404 handler.
@@ -255,10 +349,7 @@ func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
 
 func (s *serveMux) Static(prefix, root string) {
 	if s.prefix != "" {
-		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(prefix, "/") {
-			prefix = "/" + prefix
-		}
-		prefix = s.prefix + prefix
+		prefix = joinPath(s.prefix, prefix)
 	}
 
 	if !strings.HasSuffix(prefix, "/") {
@@ -622,10 +713,7 @@ func ListenAndServe(addr string, r Router) error {
 
 func (s *serveMux) method(method string, path string, opts RouteOptions) {
 	if s.prefix != "" {
-		if !strings.HasSuffix(s.prefix, "/") && !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-		path = s.prefix + path
+		path = joinPath(s.prefix, path)
 	}
 
 	if opts.Schema != nil {
@@ -705,6 +793,9 @@ func newRouter() *serveMux {
 func (s *serveMux) Configure(config Config) {
 	if config.BodyLimit > 0 {
 		s.opts.bodyLimit = config.BodyLimit
+	}
+	if config.MethodNotAllowed != nil {
+		s.opts.methodNotAllowed = *config.MethodNotAllowed
 	}
 }
 

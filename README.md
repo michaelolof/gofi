@@ -324,6 +324,40 @@ r.Route("/api", func(r gofi.Router) {
 
 This structure keeps your routing logic clean and hierarchical. Middleware applied within a `Route` block will only affect routes within that block.
 
+## Route Patterns
+
+Gofi supports three kinds of path segments:
+
+| Syntax | Example | Description |
+|--------|---------|-------------|
+| Static | `/users/me` | Matched exactly. |
+| Named parameter | `/users/:id` | Matches any single segment. Value read via `c.PathParam("id")`. |
+| Catch-all | `/files/*filepath` | Matches the remainder of the path (including sub-segments). Value read via `c.PathParam("filepath")`. |
+
+### Match priority
+
+When multiple patterns could match the same request, **static segments always win** over wildcards:
+
+```go
+r.Get("/users/:id",  detailHandler)
+r.Get("/users/me",   meHandler)    // registration order does not matter
+
+// GET /users/me   → meHandler (static wins)
+// GET /users/123  → detailHandler (:id matches)
+```
+
+Named parameters (`:name`) take priority over catch-alls (`*name`).
+
+### Trailing-slash redirect
+
+When a request path differs from the registered pattern only by a trailing slash, Gofi issues an automatic redirect (`301`/`308`) and preserves query parameters:
+
+```text
+GET /users?page=2  with  /users/  registered  →  301 Location: /users/?page=2
+```
+
+For a full reference — including what registration combinations panic at startup — see [docs/routing.md](docs/routing.md).
+
 ## Defining Route Options
 
 Routes are defined using `DefineHandler` which takes `RouteOptions`.

@@ -79,5 +79,17 @@ type Router interface {
 type Config struct {
 	// BodyLimit sets the maximum allowed size for a request body (in bytes).
 	// Default: 4 * 1024 * 1024 (4MB) if zero or not provided.
+
+	// MethodNotAllowed controls whether a 405 response is sent when a path matches
+	// a registered route under a different HTTP method. When true (the default),
+	// requests that match no route for the requested method but do match a route
+	// for another method receive a 405 with an Allow header. When false, those
+	// requests fall through to the 404 handler.
+	//
+	// Note: Set this to false if you manage OPTIONS/CORS responses yourself.
+	MethodNotAllowed *bool
+
+	// BodyLimit sets the maximum allowed size for a request body (in bytes).
+	// Default: 4 * 1024 * 1024 (4MB) if zero or not provided.
 	BodyLimit int
 }

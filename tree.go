@@ -19,10 +19,10 @@ type routeData struct {
 type node struct {
 	path      string
 	indices   string
-	wildChild bool
+	wildChild *node // non-nil when a :param or *catchAll child exists at this node
 	nType     nodeType
 	priority  uint32
-	children  []*node
+	children  []*node // static children only, sorted by priority
 	data      *routeData
 	maxParams uint8
 }
@@ -61,7 +61,7 @@ func (n *node) addRoute(path string, data *routeData) {
 	}
 
 	// Empty tree
-	if len(n.path) == 0 && len(n.children) == 0 {
+	if len(n.path) == 0 && len(n.children) == 0 && n.wildChild == nil {
 		n.insertChild(path, fullPath, data)
 		n.nType = root
 		return
@@ -86,48 +86,53 @@ walk:
 				children:  n.children,
 				data:      n.data,
 				priority:  n.priority - 1,
-				maxParams: n.maxParams, // Pass down maxParams
+				maxParams: n.maxParams,
 			}
 
 			// Update maxParams for child based on remaining path
-			child.maxParams = countParams(child.path) + childMaxParams(child.children)
+			child.maxParams = countParams(child.path) + childMaxParams(child.children, child.wildChild)
 
 			n.children = []*node{&child}
 			// []byte for proper unicode char extraction
 			n.indices = string([]byte{n.path[i]})
 			n.path = path[:i]
 			n.data = nil
-			n.wildChild = false
+			n.wildChild = nil
 		}
 
 		// Make new node a child of this node
 		if i < len(path) {
 			path = path[i:]
 
-			if n.wildChild {
-				n = n.children[0]
-				n.priority++
+			c := path[0]
 
-				// Update maxParams
-				if numParams > n.maxParams {
-					n.maxParams = numParams
+			// Incoming segment starts with ':' or '*' — wildcard route.
+			if c == ':' || c == '*' {
+				if n.wildChild != nil {
+					// A wildcard child already exists. Walk into it if compatible.
+					wc := n.wildChild
+					wc.priority++
+
+					if numParams > wc.maxParams {
+						wc.maxParams = numParams
+					}
+					numParams--
+
+					if len(path) >= len(wc.path) && wc.path == path[:len(wc.path)] &&
+						wc.nType != catchAll &&
+						(len(wc.path) >= len(path) || path[len(wc.path)] == '/') {
+						n = wc
+						continue walk
+					}
+					// Genuinely different wildcard name — conflict.
+					panic("path segment '" + path + "' conflicts with existing wildcard '" + wc.path + "' in path '" + fullPath + "'")
 				}
-				numParams-- // We just matched one param
-
-				// Check if the wildcard matches
-				if len(path) >= len(n.path) && n.path == path[:len(n.path)] &&
-
-					// Adding a child to a catchAll is not possible
-					n.nType != catchAll &&
-
-					// Check for longer wildcard, e.g. :name and :names
-					(len(n.path) >= len(path) || path[len(n.path)] == '/') {
-					continue walk
-				}
-				panic("path segment '" + path + "' conflicts with existing wildcard '" + n.path + "' in path '" + fullPath + "'")
+				// No existing wildcard — insert one.
+				n.insertChild(path, fullPath, data)
+				return
 			}
 
-			c := path[0]
+			// Incoming segment is static.
 
 			// slash after param
 			if n.nType == param && c == '/' && len(n.children) == 1 {
@@ -136,7 +141,12 @@ walk:
 				continue walk
 			}
 
-			// Check if a child with the next path byte exists
+			// If a wildcard child already exists and the incoming path is static,
+			// check whether the static segment conflicts with the wildcard prefix,
+			// or can simply be inserted as a static sibling. We just fall through
+			// to the static-child lookup below — the wildChild lives separately.
+
+			// Check if a static child with the next path byte exists.
 			for i, max := 0, len(n.indices); i < max; i++ {
 				if c == n.indices[i] {
 					i = n.incrementChildPrio(i)
@@ -145,24 +155,29 @@ walk:
 				}
 			}
 
-			// Otherwise insert it
-			if c != ':' && c != '*' {
-				// []byte for proper unicode char extraction
-				n.indices += string([]byte{c})
-				child := &node{
-					maxParams: numParams,
+			// No existing static child — create one.
+			// A catch-all wildChild captures everything; no static siblings allowed after it.
+			if n.wildChild != nil && n.wildChild.nType == catchAll {
+				existingPattern := "(unknown)"
+				if len(n.wildChild.children) > 0 && n.wildChild.children[0].data != nil {
+					existingPattern = n.wildChild.children[0].data.pattern
 				}
-				n.children = append(n.children, child)
-				n.incrementChildPrio(len(n.indices) - 1)
-				n = child
+				panic("new path '" + fullPath + "' conflicts with existing catch-all wildcard '" + existingPattern + "'")
 			}
+			n.indices += string([]byte{c})
+			child := &node{
+				maxParams: numParams,
+			}
+			n.children = append(n.children, child)
+			n.incrementChildPrio(len(n.indices) - 1)
+			n = child
 			n.insertChild(path, fullPath, data)
 			return
 		}
 
 		// Default behaviour: the node already exists
 		if n.data != nil {
-			panic("a route is already registered for path '" + fullPath + "'")
+			panic("a route is already registered for path '" + n.data.pattern + "' (attempted duplicate registration of '" + fullPath + "')")
 		}
 		n.data = data
 		return
@@ -195,12 +210,11 @@ func (n *node) insertChild(path, fullPath string, data *routeData) {
 				path = path[i:]
 			}
 
-			n.wildChild = true
 			child := &node{
 				nType: param,
 				path:  wildcard,
 			}
-			n.children = []*node{child}
+			n.wildChild = child
 			n = child
 			n.priority++
 
@@ -236,11 +250,9 @@ func (n *node) insertChild(path, fullPath string, data *routeData) {
 
 			// First node: catchAll node with empty path
 			child := &node{
-				wildChild: true,
-				nType:     catchAll,
+				nType: catchAll,
 			}
-			n.children = []*node{child}
-			n.indices = string('/')
+			n.wildChild = child
 			n = child
 			n.priority++
 
@@ -272,76 +284,78 @@ walk:
 			if path[:len(prefix)] == prefix {
 				path = path[len(prefix):]
 
-				if !n.wildChild {
-					c := path[0]
-					for i, max := 0, len(n.indices); i < max; i++ {
-						if c == n.indices[i] {
-							n = n.children[i]
-							continue walk
-						}
-					}
+				c := path[0]
 
-					// Nothing found.
-					// We can recommend to redirect to the same URL without a
-					// trailing slash if a leaf exists for that path.
-					tsr = (path == "/" && n.data != nil)
-					return
+				// 1. Try static children first.
+				for i, max := 0, len(n.indices); i < max; i++ {
+					if c == n.indices[i] {
+						n = n.children[i]
+						continue walk
+					}
 				}
 
-				// handle wildcard child
-				n = n.children[0]
-				switch n.nType {
-				case param:
-					end := 0
-					for end < len(path) && path[end] != '/' {
-						end++
-					}
+				// 2. No static child matched — try the wildcard child.
+				if n.wildChild != nil {
+					n = n.wildChild
+					switch n.nType {
+					case param:
+						end := 0
+						for end < len(path) && path[end] != '/' {
+							end++
+						}
 
-					if params != nil {
-						p := params()
-						*p = append(*p, Param{
-							Key:   n.path[1:],
-							Value: path[:end],
-						})
-					}
+						if params != nil {
+							p := params()
+							*p = append(*p, Param{
+								Key:   n.path[1:],
+								Value: path[:end],
+							})
+						}
 
-					if end < len(path) {
-						if len(n.children) > 0 {
-							path = path[end:]
+						if end < len(path) {
+							if len(n.children) > 0 {
+								path = path[end:]
+								n = n.children[0]
+								continue walk
+							}
+							tsr = (len(path) == end+1)
+							return
+						}
+
+						if data = n.data; data != nil {
+							return
+						} else if len(n.children) == 1 {
 							n = n.children[0]
-							continue walk
+							tsr = (n.path == "/" && n.data != nil)
 						}
-						// ... but we can't
-						tsr = (len(path) == end+1)
+
 						return
-					}
 
-					if data = n.data; data != nil {
+					case catchAll:
+						// catchAll is a two-node structure: first node (empty path,
+						// no data), second node (path="/*name", has data).
+						if len(n.children) > 0 {
+							n = n.children[0]
+						}
+						if params != nil {
+							p := params()
+							*p = append(*p, Param{
+								Key:   n.path[2:],
+								Value: path[1:],
+							})
+						}
+
+						data = n.data
 						return
-					} else if len(n.children) == 1 {
-						// No handle found. Check if a handle for this path + a
-						// trailing slash exists for TSR recommendation
-						n = n.children[0]
-						tsr = (n.path == "/" && n.data != nil)
+
+					default:
+						panic("invalid node type")
 					}
-
-					return
-
-				case catchAll:
-					if params != nil {
-						p := params()
-						*p = append(*p, Param{
-							Key:   n.path[2:],
-							Value: path[1:],
-						})
-					}
-
-					data = n.data
-					return
-
-				default:
-					panic("invalid node type")
 				}
+
+				// Nothing found.
+				tsr = (path == "/" && n.data != nil)
+				return
 			}
 		} else if path == prefix {
 			// We should have reached the node containing the handle.
@@ -353,7 +367,7 @@ walk:
 			// If there is no handle for this route, but this route has a
 			// wildcard child, there must be a handle for this path with an
 			// additional trailing slash
-			if path == "/" && n.wildChild && n.nType != root {
+			if path == "/" && n.wildChild != nil && n.nType != root {
 				tsr = true
 				return
 			}
@@ -430,12 +444,15 @@ func countParams(path string) uint8 {
 	return uint8(n)
 }
 
-func childMaxParams(children []*node) uint8 {
+func childMaxParams(children []*node, wildChild *node) uint8 {
 	var max uint8
 	for _, child := range children {
 		if child.maxParams > max {
 			max = child.maxParams
 		}
+	}
+	if wildChild != nil && wildChild.maxParams > max {
+		max = wildChild.maxParams
 	}
 	return max
 }

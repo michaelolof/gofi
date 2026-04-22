@@ -14,7 +14,8 @@ type muxOptions struct {
 	customSpecs      CustomSpecs
 	bodyParsers      []BodyParser
 	schemaRules      SchemaRulesMap
-	bodyLimit        int // MaxRequestBodySize
+	bodyLimit        int  // MaxRequestBodySize
+	methodNotAllowed bool // respond 405 instead of 404 on method mismatch
 }
 
 func defaultMuxOptions() *muxOptions {
@@ -28,6 +29,7 @@ func defaultMuxOptions() *muxOptions {
 		bodyParsers:      bp,
 		schemaRules:      make(SchemaRulesMap),
 		bodyLimit:        4 * 1024 * 1024, // 4 MB default
+		methodNotAllowed: true,            // enabled by default
 	}
 }
 
