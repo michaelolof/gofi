@@ -62,8 +62,8 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 }
 
 func (w *responseWriter) syncHeaders() {
-	if !w.headerInit {
-		return // no headers were ever set via the adapter
+	if !w.headerInit || w.headerSync {
+		return // no headers ever set, or already flushed to fasthttp
 	}
 	w.headerSync = true
 	for key, vals := range w.header {

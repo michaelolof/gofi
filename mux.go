@@ -688,8 +688,10 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 		respHeaders.Add(string(key), string(value))
 	}
 
-	// Also sync any headers that were set via the adapter
-	if c.rw != nil {
+	// Include adapter headers only if they were never synced to fasthttp.
+	// If syncHeaders already ran (e.g. via WriteHeader or Write), the values
+	// are already captured above from fctx.Response.Header.
+	if c.rw != nil && c.rw.headerInit && !c.rw.headerSync {
 		for k, vals := range c.rw.header {
 			for _, v := range vals {
 				respHeaders.Add(k, v)
