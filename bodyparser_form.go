@@ -57,6 +57,9 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 		if bodyStruct.Kind() == reflect.Pointer {
 			bodyStruct = bodyStruct.Elem()
 		}
+		// Capture custom specs for use in parseVal closures
+		customSpecs := opts.Context.CustomSpecs()
+
 		for key, rule := range opts.SchemaRules.properties {
 			vals, ok := formValues[key]
 
@@ -84,10 +87,14 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				continue
 			}
 
-			// Helper to parse string to value
+			// Helper to parse string to value, respecting custom specs
 			parseVal := func(v string, r *RuleDef) (any, error) {
 				if r.format == utils.TimeObjectFormat {
 					return time.Parse(r.pattern, v)
+				}
+				// Check custom spec first
+				if spec, ok := customSpecs.Find(string(r.format)); ok {
+					return spec.Decode(v)
 				}
 				return utils.PrimitiveFromStr(r.kind, v)
 			}
@@ -129,7 +136,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 							}
 						}
 
-						if err := f.bindStruct(subForm, istrct, elemRule); err != nil {
+						if err := f.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
 							return err
 						}
 						nslice = reflect.Append(nslice, istrct)
@@ -171,6 +178,25 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				}
 
 			} else if rule.kind == reflect.Struct {
+				// If this struct-like field has a custom spec format, treat it as a scalar
+				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+					if len(vals) > 0 {
+						val, err := parseVal(vals[0], rule)
+						if err != nil {
+							return newErrReport(RequestErr, schemaBody, key, "typeCast", err)
+						}
+
+						if err := runValidation(val, RequestErr, schemaBody, key, rule.rules); err != nil {
+							return err
+						}
+
+						if err := f.bindValue(fieldVal, val); err != nil {
+							return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
+						}
+					}
+					continue
+				}
+
 				// Nested struct
 				subForm := make(map[string][]string)
 				prefix := key + "."
@@ -179,7 +205,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 						subForm[strings.TrimPrefix(k, prefix)] = v
 					}
 				}
-				if err := f.bindStruct(subForm, fieldVal, rule); err != nil {
+				if err := f.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
 					return err
 				}
 			} else {
@@ -229,7 +255,7 @@ func (f *FormBodyParser) bindValue(field reflect.Value, val any) error {
 	return fmt.Errorf("cannot convert %v to %v", rv.Type(), field.Type())
 }
 
-func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef) error {
+func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef, customSpecs CustomSpecs) error {
 	if dest.Kind() == reflect.Pointer {
 		dest = dest.Elem()
 	}
@@ -255,6 +281,10 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 		parseVal := func(v string, r *RuleDef) (any, error) {
 			if r.format == utils.TimeObjectFormat {
 				return time.Parse(r.pattern, v)
+			}
+			// Check custom spec first
+			if spec, ok := customSpecs.Find(string(r.format)); ok {
+				return spec.Decode(v)
 			}
 			return utils.PrimitiveFromStr(r.kind, v)
 		}
@@ -292,7 +322,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 						}
 					}
 
-					if err := f.bindStruct(subForm, istrct, elemRule); err != nil {
+					if err := f.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
 						return err
 					}
 
@@ -323,6 +353,20 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 				}
 			}
 		} else if rule.kind == reflect.Struct {
+			// If this struct-like field has a custom spec format, treat it as a scalar
+			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+				if len(vals) > 0 {
+					val, err := parseVal(vals[0], rule)
+					if err != nil {
+						return err
+					}
+					if err := f.bindValue(fieldVal, val); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
 			// Nested struct
 			prefix := key + "."
 			subForm := make(map[string][]string)
@@ -331,7 +375,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 					subForm[strings.TrimPrefix(k, prefix)] = v
 				}
 			}
-			if err := f.bindStruct(subForm, fieldVal, rule); err != nil {
+			if err := f.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
 				return err
 			}
 		} else {

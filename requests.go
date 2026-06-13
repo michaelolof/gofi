@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
 )
 
@@ -294,6 +295,14 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 	body := io.NopCloser(bytes.NewReader(bodyBytes))
 
 	contentType := c.rules().reqContent()
+	// Fall back to the actual request Content-Type header if the schema
+	// didn't specify one explicitly (allows form/multipart parsing to work
+	// without requiring a schema-defined content-type header).
+	if contentType == cont.ApplicationJson {
+		if actualCT := c.Request().Header.Get("Content-Type"); actualCT != "" {
+			contentType = cont.ContentType(actualCT)
+		}
+	}
 	sz, err := c.serverOpts.getSerializer(contentType)
 	if err != nil {
 		return schemaPtr, newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
@@ -327,6 +336,13 @@ func bindRequestBodyWithoutValidation[T any](c *context, schemaPtr *T, reqStruct
 
 	body := io.NopCloser(bytes.NewReader(bodyBytes))
 	contentType := c.rules().reqContent()
+	// Fall back to the actual request Content-Type header if the schema
+	// didn't specify one explicitly.
+	if contentType == cont.ApplicationJson {
+		if actualCT := c.Request().Header.Get("Content-Type"); actualCT != "" {
+			contentType = cont.ContentType(actualCT)
+		}
+	}
 	sz, err := c.serverOpts.getSerializer(contentType)
 	if err != nil {
 		return

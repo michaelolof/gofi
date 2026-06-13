@@ -48,6 +48,9 @@ type SerializerFn func(cont.ContentType) (BodyParser, bool)
 type CustomSpecs map[string]CustomSpec
 
 func (c CustomSpecs) Find(specID string) (CustomSpec, bool) {
+	if specID == "" {
+		return nil, false
+	}
 	v, ok := c[specID]
 	return v, ok
 }

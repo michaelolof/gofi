@@ -56,6 +56,8 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 		if bodyStruct.Kind() == reflect.Pointer {
 			bodyStruct = bodyStruct.Elem()
 		}
+		// Capture custom specs for use in parseVal closures
+		customSpecs := opts.Context.CustomSpecs()
 		for key, rule := range opts.SchemaRules.properties {
 			// Check form values first
 			vals, ok := form.Value[key]
@@ -125,6 +127,10 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 				if r.format == utils.TimeObjectFormat {
 					return time.Parse(r.pattern, v)
 				}
+				// Check custom spec first
+				if spec, ok := customSpecs.Find(string(r.format)); ok {
+					return spec.Decode(v)
+				}
 				return utils.PrimitiveFromStr(r.kind, v)
 			}
 
@@ -172,7 +178,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 							}
 						}
 
-						if err := m.bindStruct(subForm, istrct, elemRule); err != nil {
+						if err := m.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
 							return err
 						}
 						nslice = reflect.Append(nslice, istrct)
@@ -212,6 +218,25 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 				}
 
 			} else if rule.kind == reflect.Struct {
+				// If this struct-like field has a custom spec format, treat it as a scalar
+				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+					if len(vals) > 0 {
+						val, err := parseVal(vals[0], rule)
+						if err != nil {
+							return newErrReport(RequestErr, schemaBody, key, "typeCast", err)
+						}
+
+						if err := runValidation(val, RequestErr, schemaBody, key, rule.rules); err != nil {
+							return err
+						}
+
+						if err := m.bindValue(fieldVal, val); err != nil {
+							return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
+						}
+					}
+					continue
+				}
+
 				subForm := make(map[string][]string)
 				prefix := key + "."
 				for k, v := range form.Value {
@@ -219,7 +244,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 						subForm[strings.TrimPrefix(k, prefix)] = v
 					}
 				}
-				if err := m.bindStruct(subForm, fieldVal, rule); err != nil {
+				if err := m.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
 					return err
 				}
 			} else {
@@ -268,7 +293,7 @@ func (m *MultipartBodyParser) bindValue(field reflect.Value, val any) error {
 	return fmt.Errorf("cannot convert %v to %v", rv.Type(), field.Type())
 }
 
-func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef) error {
+func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef, customSpecs CustomSpecs) error {
 	if dest.Kind() == reflect.Pointer {
 		dest = dest.Elem()
 	}
@@ -293,6 +318,10 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 		parseVal := func(v string, r *RuleDef) (any, error) {
 			if r.format == utils.TimeObjectFormat {
 				return time.Parse(r.pattern, v)
+			}
+			// Check custom spec first
+			if spec, ok := customSpecs.Find(string(r.format)); ok {
+				return spec.Decode(v)
 			}
 			return utils.PrimitiveFromStr(r.kind, v)
 		}
@@ -329,7 +358,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 						}
 					}
 
-					if err := m.bindStruct(subForm, istrct, elemRule); err != nil {
+					if err := m.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
 						return err
 					}
 
@@ -359,6 +388,20 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 				}
 			}
 		} else if rule.kind == reflect.Struct {
+			// If this struct-like field has a custom spec format, treat it as a scalar
+			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+				if len(vals) > 0 {
+					val, err := parseVal(vals[0], rule)
+					if err != nil {
+						return err
+					}
+					if err := m.bindValue(fieldVal, val); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
 			prefix := key + "."
 			subForm := make(map[string][]string)
 			for k, v := range form {
@@ -366,7 +409,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 					subForm[strings.TrimPrefix(k, prefix)] = v
 				}
 			}
-			if err := m.bindStruct(subForm, fieldVal, rule); err != nil {
+			if err := m.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
 				return err
 			}
 		} else {

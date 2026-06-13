@@ -269,6 +269,15 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 			}
 			return string(v), nil
 		default:
+			// If the format is a custom spec ID (not empty), extract
+			// the raw JSON value so the caller can pass it to spec.Decode().
+			if format != "" {
+				v, err := extractRawValue(node)
+				if err != nil {
+					return nil, err
+				}
+				return v, nil
+			}
 			return ObjectDefinition, nil
 		}
 	case reflect.Map:
@@ -444,5 +453,31 @@ type arrayItem struct {
 func NewArrayItem(size int) arrayItem {
 	return arrayItem{
 		Size: size,
+	}
+}
+
+// extractRawValue extracts the raw value from a fastjson node for custom spec decoding.
+// For string nodes, returns the string; for numbers, returns float64; for bools, returns bool.
+func extractRawValue(node *fastjson.Value) (any, error) {
+	switch node.Type() {
+	case fastjson.TypeString:
+		v, err := node.StringBytes()
+		if err != nil {
+			return nil, err
+		}
+		return string(v), nil
+	case fastjson.TypeNumber:
+		v, err := node.Float64()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case fastjson.TypeTrue:
+		return true, nil
+	case fastjson.TypeFalse:
+		return false, nil
+	default:
+		// For objects and arrays, return the raw representation
+		return node.MarshalTo([]byte{}), nil
 	}
 }

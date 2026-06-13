@@ -1285,3 +1285,382 @@ func TestRequest_RequiredRegression(t *testing.T) {
 		})
 	})
 }
+
+// TestCustomSpecBody_JSON verifies custom spec types work in JSON request body fields
+func TestCustomSpecBody_JSON(t *testing.T) {
+	t.Run("scalar field", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" spec:"custom"`
+				} `validate:"required"`
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"custom": "hello-world"}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "validation should succeed for custom spec body field")
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "hello-world", s.Request.Body.Custom.Val(), "custom spec should decode JSON body field")
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("required field with custom spec", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" validate:"required" spec:"custom"`
+				} `validate:"required"`
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"custom": "required-value"}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "required-value", s.Request.Body.Custom.Val())
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("missing required custom spec field returns error", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" validate:"required" spec:"custom"`
+				} `validate:"required"`
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					_, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "missing required custom spec field should error")
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("nested struct field with custom spec", func(t *testing.T) {
+		type Inner struct {
+			Custom vendorType `json:"custom" spec:"custom"`
+		}
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Inner Inner `json:"inner"`
+				} `validate:"required"`
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"inner": map[string]any{"custom": "nested-value"}}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "nested-value", s.Request.Body.Inner.Custom.Val(), "custom spec should decode nested JSON body field")
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("custom spec alongside non-custom fields", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Name   string     `json:"name" validate:"required"`
+					Age    int        `json:"age" validate:"required"`
+					Custom vendorType `json:"custom" spec:"custom"`
+				} `validate:"required"`
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"name": "John", "age": 30, "custom": "mixed-mode"}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "John", s.Request.Body.Name)
+					assert.Equal(t, 30, s.Request.Body.Age)
+					assert.Equal(t, "mixed-mode", s.Request.Body.Custom.Val())
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("custom spec Decode error is returned", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" spec:"custom"`
+				} `validate:"required"`
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Method: "POST",
+			Body:   utils.TryAsReader(map[string]any{"custom": 12345}),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					_, err := ValidateAndBind[testSchema](c)
+					assert.NotNil(t, err, "custom spec Decode error should propagate")
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestCustomSpecBody_Form verifies custom spec types work in Form-encoded request body fields
+func TestCustomSpecBody_Form(t *testing.T) {
+	t.Run("scalar field", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" spec:"custom"`
+				}
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:    "/test",
+			Method:  "POST",
+			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+			Body:    strings.NewReader("custom=form-value"),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "validation should succeed for custom spec form body field")
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "form-value", s.Request.Body.Custom.Val(), "custom spec should decode form body field")
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("required field", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" validate:"required" spec:"custom"`
+				}
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:    "/test",
+			Method:  "POST",
+			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+			Body:    strings.NewReader("custom=required-form"),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "required-form", s.Request.Body.Custom.Val())
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestCustomSpecBody_Multipart verifies custom spec types work in Multipart-encoded request body fields
+func TestCustomSpecBody_Multipart(t *testing.T) {
+	t.Run("scalar field", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Body struct {
+					Custom vendorType `json:"custom" spec:"custom"`
+				}
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:    "/test",
+			Method:  "POST",
+			Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+			Body: strings.NewReader(
+				"--boundary123\r\n" +
+					"Content-Disposition: form-data; name=\"custom\"\r\n\r\n" +
+					"multipart-value\r\n" +
+					"--boundary123--\r\n",
+			),
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err, "validation should succeed for custom spec multipart body field")
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "multipart-value", s.Request.Body.Custom.Val(), "custom spec should decode multipart body field")
+					return nil
+				},
+			},
+		})
+	})
+}
+
+// TestCustomSpecBody_Regression verifies existing custom spec behavior is unchanged
+func TestCustomSpecBody_Regression(t *testing.T) {
+	t.Run("custom spec in path params still work", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Path struct {
+					Custom vendorType `json:"custom" validate:"required" spec:"custom"`
+				}
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test/:custom",
+			Method: "GET",
+			Paths:  map[string]string{"custom": "path-value"},
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "path-value", s.Request.Path.Custom.Val(), "custom spec path params should still work")
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("custom spec in query params still work", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Query struct {
+					Custom vendorType `json:"custom" spec:"custom"`
+				}
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:   "/test",
+			Query:  map[string]string{"custom": "query-value"},
+			Method: "GET",
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "query-value", s.Request.Query.Custom.Val(), "custom spec query params should still work")
+					return nil
+				},
+			},
+		})
+	})
+
+	t.Run("custom spec in headers still work", func(t *testing.T) {
+		type testSchema struct {
+			Request struct {
+				Header struct {
+					Custom vendorType `json:"custom" spec:"custom"`
+				}
+			}
+		}
+
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		m.Inject(InjectOptions{
+			Path:    "/test",
+			Headers: map[string]string{"custom": "header-value"},
+			Method:  "GET",
+			Handler: &RouteOptions{
+				Schema: &testSchema{},
+				Handler: func(c Context) error {
+					s, err := ValidateAndBind[testSchema](c)
+					assert.Nil(t, err)
+					if err != nil {
+						return err
+					}
+					assert.Equal(t, "header-value", s.Request.Header.Custom.Val(), "custom spec headers should still work")
+					return nil
+				},
+			},
+		})
+	})
+}

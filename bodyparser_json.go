@@ -193,6 +193,27 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		return &walkFinished, nil
 	}
 
+	// Check for custom spec types on body fields (e.g., struct fields tagged with spec:"custom")
+	if spec, ok := opts.Context.CustomSpecs().Find(string(opts.SchemaRules.format)); ok {
+		decoded, err := spec.Decode(val)
+		if err != nil {
+			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "typeCast", err)
+		}
+
+		if err := runValidationLazy(decoded, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+			return nil, err
+		}
+
+		if opts.ShouldBind && opts.Body != nil {
+			err = j.decodeFieldValue(opts.Body, decoded)
+			if err != nil {
+				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+			}
+		}
+
+		return &walkFinished, nil
+	}
+
 	switch opts.SchemaRules.kind {
 	case reflect.Struct:
 		// Fast path: use pre-ordered props slice when available
