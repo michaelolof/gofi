@@ -446,6 +446,33 @@ Supported UI templates:
 - `RapidDoc()`
 - `StopLight()`
 
+### Enriching Docs with Fluid (Typed OpenAPI Components)
+
+Use the [`fluid`](docs/fluid-components.md) companion package to build reusable
+OpenAPI components with full type safety — no more raw `map[string]any`:
+
+```go
+import "github.com/michaelolof/gofi/fluid"
+
+gofi.DocsComponent{
+    Schemas: map[string]any{
+        "Error": fluid.ObjectSchema(map[string]fluid.SchemaObject{
+            "code":    fluid.IntegerSchema().WithDescription("HTTP status code"),
+            "message": fluid.StringSchema().WithDescription("Error message"),
+        }).WithRequired("code", "message"),
+        "User":  fluid.ObjectSchema(map[string]fluid.SchemaObject{
+            "id":   fluid.IntegerSchema(),
+            "name": fluid.StringSchema(),
+        }).WithRequired("id", "name"),
+    },
+}
+```
+
+Fluid supports the full OpenAPI 3.0.3 component vocabulary — schemas,
+parameters, responses, request bodies, headers, examples, and security
+schemes — all with fluent `With*()` builders and IDE auto-completion.
+See the [Fluid guide](docs/fluid-components.md) for the complete reference.
+
 ### Custom Documentation UI
 
 You can serve your own custom documentation UI by implementing the `DocsUiTemplate` interface:
