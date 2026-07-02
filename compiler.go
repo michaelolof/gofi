@@ -64,12 +64,18 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
+						if isPromotedEmbed(rqff) {
+							continue // children are emitted as their own promoted entries
+						}
 						if rqn == schemaCookies && !utils.ValidCookieType(rqff.Type) {
 							continue
 						}
 
 						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						name := getFieldName(rqff)
+						if name == "-" {
+							continue
+						}
 						if in == "header" {
 							name = strings.ToLower(name)
 						}
@@ -119,13 +125,18 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
-
+						if isPromotedEmbed(rqff) {
+							continue // children are emitted as their own promoted entries
+						}
 						if rqn == schemaCookies && !utils.ValidCookieType(rqff.Type) {
 							continue
 						}
 
 						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						name := getFieldName(rqff)
+						if name == "-" {
+							continue
+						}
 						ruleDefs := s.getFieldRuleDefs(rqff, name, val)
 						pruleDefs.attach(name, ruleDefs)
 						var required *bool
@@ -433,6 +444,9 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 				typeStr = "object"
 				obj := reflect.ValueOf(value)
 				for _, sf := range reflect.VisibleFields(typ) {
+					if isPromotedEmbed(sf) {
+						continue
+					}
 					val := getPrimitiveValFromParent(obj, sf)
 					name := getFieldName(sf)
 					if name == "-" {
@@ -513,6 +527,34 @@ func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any 
 	default:
 		return nil
 	}
+}
+
+// isPromotedEmbed reports whether f is an anonymous (embedded) struct field
+// whose children encoding/json would promote into the parent — in which case
+// gofi must NOT emit the carrier field itself, only its promoted children
+// (which reflect.VisibleFields already returns separately).
+//
+// An embed WITH an explicit json name is NOT promoted by encoding/json; it is
+// treated as a normal nested object and must be emitted as one field.
+func isPromotedEmbed(f reflect.StructField) bool {
+	if !f.Anonymous {
+		return false
+	}
+	t := f.Type
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem() // encoding/json promotes through embedded *struct
+	}
+	if t.Kind() != reflect.Struct {
+		return false // embedded non-struct (e.g. named scalar) is a real field
+	}
+	// An explicit, non-empty json name disables promotion.
+	if tag, ok := f.Tag.Lookup("json"); ok {
+		name := strings.Split(tag, ",")[0]
+		if name != "" && name != "-" {
+			return false
+		}
+	}
+	return true
 }
 
 func getFieldName(sf reflect.StructField) string {

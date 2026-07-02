@@ -232,6 +232,9 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			}
 		} else if j.MaintainOrder && opts.SchemaRules.typ != nil {
 			for _, field := range reflect.VisibleFields(opts.SchemaRules.typ) {
+				if isPromotedEmbed(field) {
+					continue
+				}
 				jsonTags := strings.Split(field.Tag.Get("json"), ",")
 				var name string
 				if len(jsonTags) > 0 && jsonTags[0] != "" {
@@ -697,6 +700,9 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 			// Slow path: arbitrary struct without predefined schema
 			typ := val.Type()
 			for _, field := range reflect.VisibleFields(typ) {
+				if isPromotedEmbed(field) {
+					continue
+				}
 				jsonTags := strings.Split(field.Tag.Get("json"), ",")
 				var name string
 				if len(jsonTags) > 0 && jsonTags[0] != "" {

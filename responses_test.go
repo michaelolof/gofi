@@ -267,3 +267,48 @@ func TestResponse_RequiredRegression_SliceEmpty(t *testing.T) {
 	assert.Nil(t, err) // Inject only propagates panics, not handler errors
 	assert.Equal(t, 500, res.StatusCode, "required should reject empty slice in response (regression guard)")
 }
+
+// =============================================================================
+// Embedded (anonymous) struct response encoding tests
+// =============================================================================
+
+func TestEmbeddedStruct_EncodeResponse(t *testing.T) {
+	// An untagged embedded struct in a response body should be flattened,
+	// NOT emitted as a nested object named after the Go type.
+	type Info struct {
+		Status  string `json:"status"`
+		Version int    `json:"version"`
+	}
+
+	type testSchema struct {
+		Ok struct {
+			Body struct {
+				Message string `json:"message"`
+				Info            // promoted
+			}
+		}
+	}
+
+	mux := NewRouter()
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			var ok testSchema
+			ok.Ok.Body.Message = "hello"
+			ok.Ok.Body.Status = "active"
+			ok.Ok.Body.Version = 2
+			return c.Send(200, ok.Ok)
+		},
+	}
+
+	res, err := mux.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "GET",
+		Handler: &handler,
+	})
+
+	assert.Nil(t, err)
+	// The response should be a flat object: {"message":"hello","status":"active","version":2}
+	// NOT: {"message":"hello","Info":{"status":"active","version":2}}
+	assert.JSONEq(t, `{"message":"hello","status":"active","version":2}`, string(res.Body))
+}

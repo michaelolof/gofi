@@ -1664,3 +1664,97 @@ func TestCustomSpecBody_Regression(t *testing.T) {
 		})
 	})
 }
+
+// =============================================================================
+// Embedded (anonymous) struct binding tests
+// =============================================================================
+
+func TestEmbeddedStruct_HeaderBinding(t *testing.T) {
+	// Headers should bind through an untagged embedded struct.
+	type AuthHeader struct {
+		Authorization string `json:"authorization" validate:"required"`
+	}
+	type MockSet struct {
+		XMockOutcome string `json:"x-mock-outcome" validate:"required"`
+	}
+
+	type testSchema struct {
+		Request struct {
+			Header struct {
+				AuthHeader // promoted
+				MockSet    // promoted
+			}
+		}
+	}
+
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[testSchema](c)
+			assert.Nil(t, err, "binding should succeed")
+			if err != nil {
+				return err
+			}
+			assert.Equal(t, "Bearer token123", s.Request.Header.Authorization)
+			assert.Equal(t, "approved", s.Request.Header.XMockOutcome)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method: "GET",
+		Path:   "/test",
+		Headers: map[string]string{
+			"authorization":    "Bearer token123",
+			"x-mock-outcome":   "approved",
+		},
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestEmbeddedStruct_BodyBinding(t *testing.T) {
+	// Body should bind through an untagged embedded struct.
+	type Meta struct {
+		RequestID string `json:"request_id" validate:"required"`
+		Source    string `json:"source"`
+	}
+
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Name string `json:"name" validate:"required"`
+				Meta        // promoted
+			}
+		}
+	}
+
+	handler := RouteOptions{
+		Schema: &testSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[testSchema](c)
+			assert.Nil(t, err, "binding should succeed")
+			if err != nil {
+				return err
+			}
+			assert.Equal(t, "John", s.Request.Body.Name)
+			assert.Equal(t, "req-abc", s.Request.Body.RequestID)
+			assert.Equal(t, "mobile", s.Request.Body.Source)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/test",
+		Body: utils.TryAsReader(map[string]any{
+			"name":       "John",
+			"request_id": "req-abc",
+			"source":     "mobile",
+		}),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
