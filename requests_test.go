@@ -3,6 +3,7 @@ package gofi
 import (
 	"bytes"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"testing"
@@ -1755,6 +1756,290 @@ func TestEmbeddedStruct_BodyBinding(t *testing.T) {
 			"source":     "mobile",
 		}),
 		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+// =============================================================================
+// Multipart required file-field validation tests
+// =============================================================================
+
+// multipart file upload schema used across the test suite.
+type multipartFileSchema struct {
+	Request struct {
+		Header struct {
+			ContentType string `json:"content-type" validate:"required" default:"multipart/form-data"`
+		} `validate:"required"`
+		Body struct {
+			Description string                `json:"description" validate:"required"`
+			File        *multipart.FileHeader `json:"file" validate:"required"`
+		} `validate:"required"`
+	}
+}
+
+// optional-file variant of the schema.
+type multipartOptionalFileSchema struct {
+	Request struct {
+		Header struct {
+			ContentType string `json:"content-type" validate:"required" default:"multipart/form-data"`
+		} `validate:"required"`
+		Body struct {
+			Description string                `json:"description" validate:"required"`
+			File        *multipart.FileHeader `json:"file"`
+		} `validate:"required"`
+	}
+}
+
+// multi-file variant.
+type multipartMultiFileSchema struct {
+	Request struct {
+		Header struct {
+			ContentType string `json:"content-type" validate:"required" default:"multipart/form-data"`
+		} `validate:"required"`
+		Body struct {
+			Description string                  `json:"description" validate:"required"`
+			Files       []*multipart.FileHeader `json:"files" validate:"required"`
+		} `validate:"required"`
+	}
+}
+
+// buildMultipartBody creates a multipart/form-data body with the given parts.
+// Each part is either:
+//   - [2]string{"fieldName", "text value"}         → text field
+//   - [3]string{"fieldName", "filename", "content"} → file upload
+func buildMultipartBody(boundary string, parts [][]string) []byte {
+	var buf bytes.Buffer
+	for _, p := range parts {
+		buf.WriteString("--" + boundary + "\r\n")
+		if len(p) == 3 {
+			// File upload
+			buf.WriteString(fmt.Sprintf(
+				"Content-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"+
+					"Content-Type: application/octet-stream\r\n\r\n%s\r\n",
+				p[0], p[1], p[2],
+			))
+		} else {
+			// Text field
+			buf.WriteString(fmt.Sprintf(
+				"Content-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n",
+				p[0], p[1],
+			))
+		}
+	}
+	buf.WriteString("--" + boundary + "--\r\n")
+	return buf.Bytes()
+}
+
+func TestMultipartRequiredFile_HappyPath(t *testing.T) {
+	// Case 1: real uploaded file → err == nil, File != nil
+	body := buildMultipartBody("boundary123", [][]string{
+		{"description", "passport upload"},
+		{"file", "passport.pdf", "fake-pdf-content"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &multipartFileSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[multipartFileSchema](c)
+				assert.Nil(t, err, "happy path should succeed")
+				if err != nil {
+					return err
+				}
+				assert.NotNil(t, s.Request.Body.File, "required file field should be non-nil")
+				assert.Equal(t, "passport.pdf", s.Request.Body.File.Filename)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+}
+
+func TestMultipartRequiredFile_MissingFile(t *testing.T) {
+	// Case 2: missing file field entirely → validation error
+	body := buildMultipartBody("boundary123", [][]string{
+		{"description", "no file here"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &multipartFileSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[multipartFileSchema](c)
+				assert.NotNil(t, err, "missing required file should produce an error")
+				return nil // don't propagate; we assert inside
+			},
+		},
+	})
+	assert.Nil(t, err)
+}
+
+func TestMultipartRequiredFile_TextFieldNamedFile(t *testing.T) {
+	// Case 3: text field named "file", NOT a file upload → validation error
+	// This is the KEY regression test — a text part named "file" must not
+	// satisfy validate:"required" for *multipart.FileHeader.
+	body := buildMultipartBody("boundary123", [][]string{
+		{"description", "pretending to upload"},
+		{"file", "not-a-real-file-upload"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &multipartFileSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[multipartFileSchema](c)
+				assert.NotNil(t, err, "text field named 'file' must not satisfy required file validation")
+				if err == nil {
+					// Safety: if we somehow get success, prove the field is nil
+					assert.Nil(t, s.Request.Body.File, "file field should be nil when only a text field was sent")
+				}
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+}
+
+func TestMultipartOptionalFile_Missing(t *testing.T) {
+	// Case 4: optional file field, missing → err == nil, File == nil
+	body := buildMultipartBody("boundary123", [][]string{
+		{"description", "no file provided"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &multipartOptionalFileSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[multipartOptionalFileSchema](c)
+				assert.Nil(t, err, "optional file field should not error when missing")
+				if err != nil {
+					return err
+				}
+				assert.Nil(t, s.Request.Body.File, "optional file field should be nil when not provided")
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+}
+
+func TestMultipartMultiFile_HappyPath(t *testing.T) {
+	// Case 5: required multi-file field, at least one upload → success
+	body := buildMultipartBody("boundary123", [][]string{
+		{"description", "multi file upload"},
+		{"files", "doc1.txt", "content1"},
+		{"files", "doc2.txt", "content2"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &multipartMultiFileSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[multipartMultiFileSchema](c)
+				assert.Nil(t, err, "multi-file upload should succeed")
+				if err != nil {
+					return err
+				}
+				assert.Len(t, s.Request.Body.Files, 2, "should have 2 files bound")
+				assert.Equal(t, "doc1.txt", s.Request.Body.Files[0].Filename)
+				assert.Equal(t, "doc2.txt", s.Request.Body.Files[1].Filename)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+}
+
+func TestMultipartMultiFile_ZeroUploads(t *testing.T) {
+	// Case 6: required multi-file field, zero uploads → validation error
+	body := buildMultipartBody("boundary123", [][]string{
+		{"description", "forgot the files"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &multipartMultiFileSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[multipartMultiFileSchema](c)
+				assert.NotNil(t, err, "required multi-file with zero uploads should error")
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+}
+
+func TestMultipart_NoRegressionTextFields(t *testing.T) {
+	// Case 7: ordinary text multipart fields still work after the fix.
+	type textOnlySchema struct {
+		Request struct {
+			Header struct {
+				ContentType string `json:"content-type" validate:"required" default:"multipart/form-data"`
+			} `validate:"required"`
+			Body struct {
+				Name  string `json:"name" validate:"required"`
+				Email string `json:"email" validate:"required,email"`
+				Age   int    `json:"age" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	body := buildMultipartBody("boundary123", [][]string{
+		{"name", "John Doe"},
+		{"email", "john@example.com"},
+		{"age", "30"},
+	})
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Path:    "/test",
+		Method:  "POST",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=boundary123"},
+		Body:    bytes.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: &textOnlySchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[textOnlySchema](c)
+				assert.Nil(t, err, "text-only multipart form should still work")
+				if err != nil {
+					return err
+				}
+				assert.Equal(t, "John Doe", s.Request.Body.Name)
+				assert.Equal(t, "john@example.com", s.Request.Body.Email)
+				assert.Equal(t, 30, s.Request.Body.Age)
+				return nil
+			},
+		},
 	})
 	assert.Nil(t, err)
 }

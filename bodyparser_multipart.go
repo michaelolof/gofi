@@ -17,6 +17,24 @@ type MultipartBodyParser struct {
 	MaxRequestSize int64
 }
 
+// multipart file-field classification helpers
+var fileHeaderPtrType = reflect.TypeOf(&multipart.FileHeader{})
+
+func isSingleFileField(fieldVal reflect.Value) bool {
+	return fieldVal.IsValid() && fieldVal.Type() == fileHeaderPtrType
+}
+
+func isMultiFileField(fieldVal reflect.Value) bool {
+	if !fieldVal.IsValid() {
+		return false
+	}
+	k := fieldVal.Kind()
+	if k != reflect.Slice && k != reflect.Array {
+		return false
+	}
+	return fieldVal.Type().Elem() == fileHeaderPtrType
+}
+
 func (m *MultipartBodyParser) Match(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -84,25 +102,43 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 				}
 			}
 
-			if !ok && !fileOk && !hasNested {
-				if rule.required || rule.present {
-					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
-				}
-				continue
-			}
-
+			// Resolve the struct field early so we can classify it before
+			// the presence check.
 			fieldVal := bodyStruct.FieldByName(rule.fieldName)
 			if !fieldVal.IsValid() {
 				continue
 			}
 
-			// Handle Files
-			if fileOk {
-				if rule.kind == reflect.Slice || rule.kind == reflect.Array {
-					elemType := fieldVal.Type().Elem()
-					if elemType != reflect.TypeOf(&multipart.FileHeader{}) {
-						return newErrReport(RequestErr, schemaBody, key, "typeMismatch", errors.New("field must be []*multipart.FileHeader"))
+			// Classify the field: file vs text vs nested.
+			isSingleFile := isSingleFileField(fieldVal)
+			isMultiFile := isMultiFileField(fieldVal)
+			filePresent := fileOk && len(files) > 0
+			textPresent := ok
+
+			// Category-aware presence check (§6.2).
+			// File fields require an actual uploaded file; text fields
+			// must not satisfy required file validation.
+			if isSingleFile || isMultiFile {
+				if !filePresent {
+					if rule.required || rule.present {
+						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 					}
+					continue
+				}
+			} else {
+				if !textPresent && !fileOk && !hasNested {
+					if rule.required || rule.present {
+						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
+					}
+					continue
+				}
+			}
+
+			// Handle Files — only for genuine file-typed fields.
+			// filePresent already guarantees len(files) > 0 for required
+			// fields; for optional fields we bind only when files exist.
+			if fileOk {
+				if isMultiFile {
 					slice := reflect.MakeSlice(fieldVal.Type(), len(files), len(files))
 					for i, file := range files {
 						slice.Index(i).Set(reflect.ValueOf(file))
@@ -110,14 +146,9 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 					if err := m.bindValue(fieldVal, slice.Interface()); err != nil {
 						return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
 					}
-				} else {
-					if len(files) > 0 {
-						if fieldVal.Type() != reflect.TypeOf(&multipart.FileHeader{}) {
-							return newErrReport(RequestErr, schemaBody, key, "typeMismatch", errors.New("field must be *multipart.FileHeader"))
-						}
-						if err := m.bindValue(fieldVal, files[0]); err != nil {
-							return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
-						}
+				} else if isSingleFile && len(files) > 0 {
+					if err := m.bindValue(fieldVal, files[0]); err != nil {
+						return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
 					}
 				}
 				continue
