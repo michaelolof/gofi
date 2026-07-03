@@ -186,9 +186,8 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			err = j.decodeFieldValue(opts.Body, val)
-			if err != nil {
-				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+			if err = j.decodeFieldValue(opts.Body, val); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
 
@@ -207,9 +206,8 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			err = j.decodeFieldValue(opts.Body, decoded)
-			if err != nil {
-				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+			if err = j.decodeFieldValue(opts.Body, decoded); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
 
@@ -393,9 +391,8 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			}
 
 			if opts.ShouldBind && opts.Body != nil {
-				err = j.decodeFieldValue(opts.Body, arr)
-				if err != nil {
-					newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+				if err = j.decodeFieldValue(opts.Body, arr); err != nil {
+					return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 				}
 			}
 
@@ -477,9 +474,8 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			err = j.decodeFieldValue(opts.Body, v)
-			if err != nil {
-				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+			if err = j.decodeFieldValue(opts.Body, v); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
 
@@ -491,9 +487,8 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			err = j.decodeFieldValue(opts.Body, val)
-			if err != nil {
-				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+			if err = j.decodeFieldValue(opts.Body, val); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
 

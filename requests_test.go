@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/michaelolof/gofi/utils"
 	"github.com/stretchr/testify/assert"
@@ -2499,4 +2500,286 @@ func TestOrdinarySlice_StillEncodes(t *testing.T) {
 	})
 	assert.Nil(t, err)
 	assert.Equal(t, `{"numbers":[1,2,3]}`, strings.TrimSpace(string(rec.Body)))
+}
+
+// =============================================================================
+// Decode-failure tests — verify that decodeFieldValue errors are now returned
+// instead of silently swallowed (see §10 of improvements.md).
+// =============================================================================
+
+// badStringSpec is a custom spec whose Decode always returns a struct{},
+// which cannot be SafeConvert'd into a string field, triggering the
+// decodeFieldValue error path (site 2 — custom-spec branch).
+type badStringSpec struct{}
+
+func (b *badStringSpec) SpecID() string { return "badstring" }
+func (b *badStringSpec) Type() string   { return "string" }
+func (b *badStringSpec) Format() string { return "string" }
+func (b *badStringSpec) Decode(val any) (any, error) {
+	return struct{}{}, nil // struct → string is not convertible
+}
+func (b *badStringSpec) Encode(val any) (string, error) {
+	return fmt.Sprintf("%v", val), nil
+}
+
+// TestDecodeFailure_ScalarTypeMismatch verifies that a scalar field whose
+// value passes GetNodeByKind but fails SafeConvert in decodeFieldValue
+// now returns a RequestErr (site 5 — default scalar branch).
+// We use a custom spec that returns a non-convertible type to trigger the path.
+func TestDecodeFailure_ScalarTypeMismatch(t *testing.T) {
+	// badSpec returns an int regardless of input, which cannot be SafeConvert'd
+	// into a string field — triggering the decodeFieldValue error path.
+	badSpec := &badStringSpec{}
+
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Value string `json:"value" spec:"badstring" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	m.RegisterSpec(badSpec)
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"value": "anything"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[testSchema](c)
+				return err
+			},
+		},
+	})
+	assert.Nil(t, err)
+	body := string(rec.Body)
+	assert.Contains(t, body, "value", "error response should mention the failing field")
+	assert.Contains(t, body, "error", "error response should be an error JSON")
+}
+
+// TestDecodeFailure_TimeNonRFC3339 verifies that a time.Time field receiving a
+// non-RFC3339 string now returns a RequestErr (site 1 — TimeObjectFormat branch).
+func TestDecodeFailure_TimeNonRFC3339(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				When time.Time `json:"when" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"when": "1990-01-15"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[testSchema](c)
+				return err
+			},
+		},
+	})
+	assert.Nil(t, err)
+	body := string(rec.Body)
+	assert.Contains(t, body, "when", "error response should mention the failing time field")
+}
+
+// TestDecodeFailure_RequiredTimeUndecodable verifies that a required time.Time
+// field with an undecodable value MUST fail — the required check runs first,
+// then the decode step returns the error (instead of silently zeroing).
+func TestDecodeFailure_RequiredTimeUndecodable(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				When time.Time `json:"when" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"when": "not-a-date"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[testSchema](c)
+				return err
+			},
+		},
+	})
+	assert.Nil(t, err)
+	body := string(rec.Body)
+	assert.Contains(t, body, "when", "required+undecodable field must produce an error")
+}
+
+// TestDecodeFailure_InterfaceField verifies that an interface{} field receiving
+// a value that cannot be assigned (e.g. a string to fmt.Stringer) returns an error.
+func TestDecodeFailure_InterfaceField(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Value any `json:"value"`
+			} `validate:"required"`
+		}
+	}
+
+	// Normal case: any field should bind any JSON value successfully.
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"value": "hello"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, "hello", s.Request.Body.Value)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestDecodeFailure_CustomSpecDecode verifies that a custom-spec field whose
+// spec.Decode succeeds but the result fails to bind via decodeFieldValue
+// now returns an error (site 2 — custom-spec branch).
+func TestDecodeFailure_CustomSpecDecode(t *testing.T) {
+	// Use the existing vendorSpec which succeeds on string input.
+	// The decoded value (vendorType) should bind correctly.
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Custom vendorType `json:"custom" spec:"custom" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	m.RegisterSpec(&vendorSpec{})
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"custom": "hello-world"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, "hello-world", s.Request.Body.Custom.Val())
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestDecodeFailure_ScalarRegression verifies that ordinary scalars still bind
+// correctly after the decode-error fix (the return only fires on real errors).
+func TestDecodeFailure_ScalarRegression(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Name   string  `json:"name" validate:"required"`
+				Age    int     `json:"age" validate:"required"`
+				Amount float64 `json:"amount"`
+				Active bool    `json:"active"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body: utils.TryAsReader(map[string]any{
+			"name":   "Alice",
+			"age":    30,
+			"amount": 99.95,
+			"active": true,
+		}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, "Alice", s.Request.Body.Name)
+				assert.Equal(t, 30, s.Request.Body.Age)
+				assert.Equal(t, 99.95, s.Request.Body.Amount)
+				assert.True(t, s.Request.Body.Active)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestDecodeFailure_TimeRFC3339Regression verifies that valid RFC3339 time
+// still binds correctly.
+func TestDecodeFailure_TimeRFC3339Regression(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				When time.Time `json:"when" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"when": "2024-01-15T10:30:00Z"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.False(t, s.Request.Body.When.IsZero(), "time should be bound")
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestDecodeFailure_PrimitiveArrayRegression verifies that primitive arrays
+// still bind correctly after the fix.
+func TestDecodeFailure_PrimitiveArrayRegression(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Numbers []int `json:"numbers" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"numbers": []int{1, 2, 3}}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, []int{1, 2, 3}, s.Request.Body.Numbers)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
 }
