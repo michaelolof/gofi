@@ -2783,3 +2783,256 @@ func TestDecodeFailure_PrimitiveArrayRegression(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, 200, rec.StatusCode)
 }
+
+// === time.Time decode improvements ===
+
+// TestTimeDecode_CustomLayout verifies that a value time.Time field with a
+// custom pattern tag decodes a date-only string correctly.
+func TestTimeDecode_CustomLayout(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				DateOfBirth time.Time `json:"date_of_birth" validate:"required" pattern:"2006-01-02"`
+			} `validate:"required"`
+		}
+	}
+
+	expected := time.Date(1990, 1, 15, 0, 0, 0, 0, time.UTC)
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"date_of_birth": "1990-01-15"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, expected, s.Request.Body.DateOfBirth)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestTimeDecode_RFC3339Default verifies that a value time.Time field without
+// a pattern tag still decodes RFC3339 strings (backwards compatibility).
+func TestTimeDecode_RFC3339Default(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				When time.Time `json:"when" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	expected := time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC)
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"when": "2025-06-15T10:30:00Z"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, expected, s.Request.Body.When)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestTimeDecode_CustomLayoutBadValue verifies that a value time.Time with a
+// custom pattern returns a RequestErr when the value matches neither the
+// custom layout nor RFC3339/RFC3339Nano.
+func TestTimeDecode_CustomLayoutBadValue(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				When time.Time `json:"when" validate:"required" pattern:"2006-01-02"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"when": "not-a-date-at-all"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[testSchema](c)
+				return err
+			},
+		},
+	})
+	assert.Nil(t, err)
+	body := string(rec.Body)
+	assert.Contains(t, body, "error", "error response should be an error JSON")
+}
+
+// TestTimeDecode_PointerTimeRFC3339 verifies that a *time.Time field decodes
+// a valid RFC3339 string correctly (was silently nil before the fix).
+func TestTimeDecode_PointerTimeRFC3339(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				IssueDate *time.Time `json:"issue_date,omitempty"`
+			} `validate:"required"`
+		}
+	}
+
+	expected := time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC)
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"issue_date": "2025-06-15T10:30:00Z"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.NotNil(t, s.Request.Body.IssueDate)
+				assert.Equal(t, expected, *s.Request.Body.IssueDate)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestTimeDecode_PointerTimeCustomLayout verifies that a *time.Time field with
+// a custom pattern tag decodes a date-only string correctly.
+func TestTimeDecode_PointerTimeCustomLayout(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				ExpiryDate *time.Time `json:"expiry_date,omitempty" pattern:"2006-01-02"`
+			} `validate:"required"`
+		}
+	}
+
+	expected := time.Date(2030, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"expiry_date": "2030-12-31"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.NotNil(t, s.Request.Body.ExpiryDate)
+				assert.Equal(t, expected, *s.Request.Body.ExpiryDate)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestTimeDecode_PointerTimeOptionalAbsent verifies that an optional *time.Time
+// field remains nil when absent from the request body.
+func TestTimeDecode_PointerTimeOptionalAbsent(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				IssueDate *time.Time `json:"issue_date,omitempty"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Nil(t, s.Request.Body.IssueDate)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}
+
+// TestTimeDecode_PointerTimeRequiredAbsent verifies that a required *time.Time
+// field returns a validation error when absent.
+func TestTimeDecode_PointerTimeRequiredAbsent(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				IssueDate *time.Time `json:"issue_date" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[testSchema](c)
+				return err
+			},
+		},
+	})
+	assert.Nil(t, err)
+	body := string(rec.Body)
+	assert.Contains(t, body, "error", "expected error response for missing required *time.Time")
+}
+
+// TestTimeDecode_RFC3339Nano verifies that RFC3339Nano strings still decode
+// correctly for a value time.Time field.
+func TestTimeDecode_RFC3339Nano(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				When time.Time `json:"when" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	expected := time.Date(2025, 6, 15, 10, 30, 0, 123456789, time.UTC)
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Path:   "/test",
+		Method: "POST",
+		Body:   utils.TryAsReader(map[string]any{"when": "2025-06-15T10:30:00.123456789Z"}),
+		Handler: &RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				s, err := ValidateAndBind[testSchema](c)
+				assert.Nil(t, err)
+				assert.Equal(t, expected, s.Request.Body.When)
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 200, rec.StatusCode)
+}

@@ -186,7 +186,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			if err = j.decodeFieldValue(opts.Body, val); err != nil {
+			if err = j.decodeFieldValue(opts.Body, val, opts.SchemaRules.pattern); err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
@@ -206,7 +206,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			if err = j.decodeFieldValue(opts.Body, decoded); err != nil {
+			if err = j.decodeFieldValue(opts.Body, decoded, ""); err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
@@ -391,7 +391,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			}
 
 			if opts.ShouldBind && opts.Body != nil {
-				if err = j.decodeFieldValue(opts.Body, arr); err != nil {
+				if err = j.decodeFieldValue(opts.Body, arr, ""); err != nil {
 					return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 				}
 			}
@@ -474,7 +474,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			if err = j.decodeFieldValue(opts.Body, v); err != nil {
+			if err = j.decodeFieldValue(opts.Body, v, ""); err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
@@ -487,7 +487,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			if err = j.decodeFieldValue(opts.Body, val); err != nil {
+			if err = j.decodeFieldValue(opts.Body, val, opts.SchemaRules.pattern); err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
 			}
 		}
@@ -498,7 +498,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	return &walkFinished, nil
 }
 
-func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
+func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any, timeLayout string) error {
 	if val == nil {
 		return nil
 	}
@@ -513,6 +513,17 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 
 	switch field.Kind() {
 	case reflect.Pointer:
+		// *time.Time → parse string into time using the provided layout
+		if field.Type().Elem() == utils.TimeType {
+			if s, ok := val.(string); ok {
+				t, err := parseTime(s, timeLayout)
+				if err != nil {
+					return err
+				}
+				field.Set(reflect.ValueOf(&t))
+				return nil
+			}
+		}
 		switch field.Type().Elem().Kind() {
 		case reflect.Slice, reflect.Array:
 			if v, ok := val.([]any); ok {
@@ -575,16 +586,12 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 	default:
 		if field.Type() == utils.TimeType {
 			if s, ok := val.(string); ok {
-				t, err := time.Parse(time.RFC3339, s)
+				t, err := parseTime(s, timeLayout)
 				if err != nil {
-					// try other formats or fallback
-					t, err = time.Parse(time.RFC3339Nano, s)
+					return err
 				}
-				if err == nil {
-					field.Set(reflect.ValueOf(t))
-					return nil
-				}
-				return err
+				field.Set(reflect.ValueOf(t))
+				return nil
 			}
 		}
 
@@ -640,6 +647,21 @@ func decodeBase64Field(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("expected base64-encoded JSON string, got %s", s)
 	}
 	return base64.StdEncoding.DecodeString(s)
+}
+
+// parseTime parses a time string using the provided layout.
+// When layout is non-empty it tries that first, then falls back to RFC3339 and RFC3339Nano.
+// This mirrors the encode side which uses rules.pattern for time.Format.
+func parseTime(s string, layout string) (time.Time, error) {
+	if layout != "" {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339Nano, s)
 }
 
 func (j *JSONBodyParser) getFieldStruct(strct reflect.Value, fieldname string) reflect.Value {
