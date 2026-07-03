@@ -145,6 +145,9 @@ func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, ke
 		return v, nil
 	case reflect.Array, reflect.Slice:
 		// peek into the array to see if its a list of primitives
+		if format == utils.RawJSONFormat || format == utils.ByteFormat {
+			return obj.MarshalTo(nil), nil
+		}
 		return ArrayDefinition, nil
 	case reflect.Struct:
 		switch format {
@@ -259,6 +262,9 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 		}
 		return v, nil
 	case reflect.Array, reflect.Slice:
+		if format == utils.RawJSONFormat || format == utils.ByteFormat {
+			return node.MarshalTo(nil), nil
+		}
 		return ArrayDefinition, nil
 	case reflect.Struct:
 		switch format {

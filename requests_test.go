@@ -2,6 +2,7 @@ package gofi
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -792,14 +793,10 @@ func TestRequestBody_Bytes(t *testing.T) {
 		}
 	}
 
-	// JSON parser treats []byte as []uint8 -> array of numbers [1, 2, 3] OR base64 string "base64..." depending on implementation.
-	// Standard Go encoding/json uses base64 for []byte.
-	// Gofi bodyparser uses reflect.Slice recursion for slices.
+	// []byte fields now serialize/deserialize as base64 strings,
+	// matching encoding/json semantics.
 
-	// If Gofi iterates slice, it expects JSON array of numbers.
-	// Let's verify this hypothesis.
-
-	t.Run("Array of Numbers", func(t *testing.T) {
+	t.Run("Base64 String", func(t *testing.T) {
 		handler := RouteOptions{
 			Schema: &byteSchema{},
 			Handler: func(c Context) error {
@@ -814,7 +811,7 @@ func TestRequestBody_Bytes(t *testing.T) {
 		_, err := m.Inject(InjectOptions{
 			Method:  "POST",
 			Path:    "/bytes",
-			Body:    strings.NewReader("[1, 2, 3]"),
+			Body:    strings.NewReader(`"AQID"`),
 			Handler: &handler,
 		})
 		assert.Nil(t, err)
@@ -846,8 +843,8 @@ func TestResponseBody_Bytes(t *testing.T) {
 	})
 
 	assert.Nil(t, err)
-	// Gofi encoding iterates slice and writes array: [65,66,67]
-	assert.Equal(t, "[65,66,67]", string(rec.Body))
+	// []byte now encodes as base64 string per encoding/json semantics
+	assert.Equal(t, "\"QUJD\"", string(rec.Body))
 }
 
 func TestBody_Map(t *testing.T) {
@@ -1707,8 +1704,8 @@ func TestEmbeddedStruct_HeaderBinding(t *testing.T) {
 		Method: "GET",
 		Path:   "/test",
 		Headers: map[string]string{
-			"authorization":    "Bearer token123",
-			"x-mock-outcome":   "approved",
+			"authorization":  "Bearer token123",
+			"x-mock-outcome": "approved",
 		},
 		Handler: &handler,
 	})
@@ -2042,4 +2039,464 @@ func TestMultipart_NoRegressionTextFields(t *testing.T) {
 		},
 	})
 	assert.Nil(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// json.RawMessage / []byte tests (§7.1-7.3)
+// ---------------------------------------------------------------------------
+
+// --- Schema types ---
+
+type rawMsgSchema struct {
+	Request struct {
+		Body struct {
+			SourceWalletID string          `json:"source_wallet_id" validate:"required"`
+			Metadata       json.RawMessage `json:"metadata,omitempty"`
+		} `validate:"required"`
+	}
+}
+
+type rawMsgRequiredSchema struct {
+	Request struct {
+		Body struct {
+			Metadata json.RawMessage `json:"metadata" validate:"required"`
+		} `validate:"required"`
+	}
+}
+
+type rawMsgResponseSchema struct {
+	Ok struct {
+		Body struct {
+			Metadata json.RawMessage `json:"metadata"`
+		}
+	}
+}
+
+type rawMsgListSchema struct {
+	Request struct {
+		Body struct {
+			Items []json.RawMessage `json:"items" validate:"required"`
+		} `validate:"required"`
+	}
+}
+
+type byteFieldSchema struct {
+	Request struct {
+		Body struct {
+			Data []byte `json:"data" validate:"required"`
+		} `validate:"required"`
+	}
+}
+
+type byteFieldResponseSchema struct {
+	Ok struct {
+		Body struct {
+			Data []byte `json:"data"`
+		}
+	}
+}
+
+// --- §7.1 Spec generation tests ---
+
+func TestRawJSON_SpecGeneration(t *testing.T) {
+	t.Run("json.RawMessage property is free-form", func(t *testing.T) {
+		r := newRouter()
+		cs := r.compileSchema(&rawMsgSchema{}, Info{})
+		bs := cs.specs.bodySchema
+		metadataProp := bs.Properties["metadata"]
+		// Should NOT be "array" type
+		assert.NotEqual(t, "array", metadataProp.Type)
+		// Should NOT have "integer"/"int32" items
+		assert.Nil(t, metadataProp.Items)
+	})
+
+	t.Run("[]byte property emits string/byte format", func(t *testing.T) {
+		r := newRouter()
+		cs := r.compileSchema(&byteFieldSchema{}, Info{})
+		bs := cs.specs.bodySchema
+		dataProp := bs.Properties["data"]
+		assert.Equal(t, "string", dataProp.Type)
+		assert.Equal(t, "byte", dataProp.Format)
+	})
+}
+
+// --- §7.2 Request binding tests ---
+
+func TestRawJSON_BindObject(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, json.RawMessage(`{"a":1}`), s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"source_wallet_id":"w1","metadata":{"a":1}}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestRawJSON_BindArray(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, json.RawMessage(`[1,2,3]`), s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"source_wallet_id":"w1","metadata":[1,2,3]}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestRawJSON_BindString(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, json.RawMessage(`"hello"`), s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"source_wallet_id":"w1","metadata":"hello"}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestRawJSON_BindNumber(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, json.RawMessage(`42`), s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"source_wallet_id":"w1","metadata":42}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestRawJSON_BindBool(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, json.RawMessage(`true`), s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"source_wallet_id":"w1","metadata":true}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestRawJSON_BindNull(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgSchema](c)
+			assert.Nil(t, err)
+			assert.Nil(t, s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"source_wallet_id":"w1","metadata":null}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestRawJSON_Required_ErrorOnMissing(t *testing.T) {
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/test",
+		Body:   strings.NewReader(`{}`),
+		Handler: &RouteOptions{
+			Schema: &rawMsgRequiredSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[rawMsgRequiredSchema](c)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err, "inject should not panic")
+}
+
+func TestRawJSON_Required_PassesForEmptyObject(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgRequiredSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgRequiredSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, json.RawMessage(`{}`), s.Request.Body.Metadata)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"metadata":{}}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestByteField_BindBase64(t *testing.T) {
+	// base64("Hello") = "SGVsbG8="
+	handler := RouteOptions{
+		Schema: &byteFieldSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[byteFieldSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, []byte("Hello"), s.Request.Body.Data)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"data":"SGVsbG8="}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestByteField_InvalidBase64(t *testing.T) {
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/test",
+		Body:   strings.NewReader(`{"data":"!!!not-base64!!!"}`),
+		Handler: &RouteOptions{
+			Schema: &byteFieldSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[byteFieldSchema](c)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err, "inject should not panic")
+}
+
+func TestByteField_NonString(t *testing.T) {
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/test",
+		Body:   strings.NewReader(`{"data":123}`),
+		Handler: &RouteOptions{
+			Schema: &byteFieldSchema{},
+			Handler: func(c Context) error {
+				_, err := ValidateAndBind[byteFieldSchema](c)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	})
+	assert.Nil(t, err, "inject should not panic")
+}
+
+func TestRawJSONList(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgListSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgListSchema](c)
+			assert.Nil(t, err)
+			assert.Len(t, s.Request.Body.Items, 3)
+			assert.Equal(t, json.RawMessage(`{"a":1}`), s.Request.Body.Items[0])
+			assert.Equal(t, json.RawMessage(`"str"`), s.Request.Body.Items[1])
+			assert.Equal(t, json.RawMessage(`42`), s.Request.Body.Items[2])
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"items":[{"a":1},"str",42]}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+// --- §7.3 Response encoding tests ---
+
+func TestRawJSON_EncodeVerbatim(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgResponseSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgResponseSchema](c)
+			assert.Nil(t, err)
+			s.Ok.Body.Metadata = json.RawMessage(`{"a":1}`)
+			return c.Send(200, s.Ok)
+		},
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Method:  "GET",
+		Path:    "/test",
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+	assert.Contains(t, string(rec.Body), `"metadata":{"a":1}`)
+	assert.NotContains(t, string(rec.Body), `[123,34,97`)
+}
+
+func TestRawJSON_EncodeNull(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &rawMsgResponseSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[rawMsgResponseSchema](c)
+			assert.Nil(t, err)
+			// nil RawMessage should encode as null
+			return c.Send(200, s.Ok)
+		},
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Method:  "GET",
+		Path:    "/test",
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+	assert.Contains(t, string(rec.Body), `"metadata":null`)
+}
+
+func TestByteField_EncodeBase64(t *testing.T) {
+	handler := RouteOptions{
+		Schema: &byteFieldResponseSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[byteFieldResponseSchema](c)
+			assert.Nil(t, err)
+			s.Ok.Body.Data = []byte("Hello")
+			return c.Send(200, s.Ok)
+		},
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Method:  "GET",
+		Path:    "/test",
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+	assert.Contains(t, string(rec.Body), `"data":"SGVsbG8="`)
+}
+
+// --- §7.2 Regression: ordinary slices still work ---
+
+func TestOrdinarySlice_StillBinds(t *testing.T) {
+	type intSliceSchema struct {
+		Request struct {
+			Body struct {
+				Numbers []int `json:"numbers" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	handler := RouteOptions{
+		Schema: &intSliceSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[intSliceSchema](c)
+			assert.Nil(t, err)
+			assert.Equal(t, []int{1, 2, 3}, s.Request.Body.Numbers)
+			return nil
+		},
+	}
+
+	m := NewRouter()
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Body:    strings.NewReader(`{"numbers":[1,2,3]}`),
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+}
+
+func TestOrdinarySlice_StillEncodes(t *testing.T) {
+	type intSliceRespSchema struct {
+		Ok struct {
+			Body struct {
+				Numbers []int `json:"numbers"`
+			}
+		}
+	}
+
+	handler := RouteOptions{
+		Schema: &intSliceRespSchema{},
+		Handler: func(c Context) error {
+			s, err := ValidateAndBind[intSliceRespSchema](c)
+			assert.Nil(t, err)
+			s.Ok.Body.Numbers = []int{1, 2, 3}
+			return c.Send(200, s.Ok)
+		},
+	}
+
+	m := NewRouter()
+	rec, err := m.Inject(InjectOptions{
+		Method:  "GET",
+		Path:    "/test",
+		Handler: &handler,
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, `{"numbers":[1,2,3]}`, strings.TrimSpace(string(rec.Body)))
 }

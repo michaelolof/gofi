@@ -406,6 +406,20 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			typeStr = "boolean"
 
 		case reflect.Slice, reflect.Array:
+			// []byte (no custom marshaler) → base64 string
+			if utils.IsByteSlice(typ) {
+				typeStr = "string"
+				format = "byte"
+				ruleDefs.format = utils.ByteFormat
+				break
+			}
+			// json.RawMessage / json.Marshaler → free-form ("any JSON")
+			if utils.IsRawJSON(typ) {
+				typeStr = ""
+				format = ""
+				ruleDefs.format = utils.RawJSONFormat
+				break
+			}
 			typeStr = "array"
 			_ruleDefs := getItemRuleDef(typ.Elem())
 			ruleDefs.append(_ruleDefs)

@@ -2,6 +2,8 @@ package gofi
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -208,6 +210,55 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			err = j.decodeFieldValue(opts.Body, decoded)
 			if err != nil {
 				newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "encoder", err)
+			}
+		}
+
+		return &walkFinished, nil
+	}
+
+	// json.RawMessage / json.Marshaler → verbatim JSON binding
+	if opts.SchemaRules.format == utils.RawJSONFormat {
+		raw, ok := val.([]byte)
+		if !ok {
+			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", errors.New("expected raw JSON bytes"))
+		}
+
+		if err := runValidationLazy(raw, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+			return nil, err
+		}
+
+		if opts.ShouldBind && opts.Body != nil {
+			if err := j.decodeRawJSONField(opts.Body, raw); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+			}
+		}
+
+		return &walkFinished, nil
+	}
+
+	// []byte (no custom marshaler) → base64 string binding
+	if opts.SchemaRules.format == utils.ByteFormat {
+		raw, ok := val.([]byte)
+		if !ok {
+			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", errors.New("expected raw JSON bytes"))
+		}
+
+		decoded, err := decodeBase64Field(raw)
+		if err != nil {
+			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+		}
+
+		if err := runValidationLazy(decoded, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+			return nil, err
+		}
+
+		if opts.ShouldBind && opts.Body != nil {
+			if opts.Body.Kind() == reflect.Pointer {
+				ptr := reflect.New(opts.Body.Type().Elem())
+				ptr.Elem().Set(reflect.ValueOf(decoded))
+				opts.Body.Set(ptr)
+			} else {
+				opts.Body.Set(reflect.ValueOf(decoded))
 			}
 		}
 
@@ -457,6 +508,14 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 		return nil
 	}
 
+	// Fast path: if the value is raw JSON bytes and the field implements json.Unmarshaler,
+	// delegate to it (covers json.RawMessage and custom marshaler types in collections).
+	if raw, ok := val.([]byte); ok && field.CanAddr() {
+		if u, ok2 := field.Addr().Interface().(json.Unmarshaler); ok2 {
+			return u.UnmarshalJSON(raw)
+		}
+	}
+
 	switch field.Kind() {
 	case reflect.Pointer:
 		switch field.Type().Elem().Kind() {
@@ -541,6 +600,51 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any) error {
 		field.Set(v)
 		return nil
 	}
+}
+
+// decodeRawJSONField binds raw JSON bytes into a field, supporting json.RawMessage
+// and other types implementing json.Unmarshaler.
+func (j *JSONBodyParser) decodeRawJSONField(field *reflect.Value, raw []byte) error {
+	// Try json.Unmarshaler on the addressable value (covers non-pointer json.RawMessage)
+	if field.CanAddr() {
+		if u, ok := field.Addr().Interface().(json.Unmarshaler); ok {
+			return u.UnmarshalJSON(raw)
+		}
+	}
+	// For pointer fields that implement json.Unmarshaler (e.g. *json.RawMessage passed directly)
+	if field.Kind() == reflect.Pointer {
+		// Allocate if nil
+		if field.IsNil() {
+			elemType := field.Type().Elem()
+			// Check if *Elem implements json.Unmarshaler
+			if reflect.PointerTo(elemType).Implements(reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()) {
+				field.Set(reflect.New(elemType))
+			}
+		}
+		if !field.IsNil() {
+			if u, ok := field.Interface().(json.Unmarshaler); ok {
+				return u.UnmarshalJSON(raw)
+			}
+		}
+	}
+	// Fallback: assign raw bytes directly for []byte-compatible fields
+	if field.Kind() == reflect.Slice && field.Type().Elem().Kind() == reflect.Uint8 {
+		field.Set(reflect.ValueOf(raw))
+		return nil
+	}
+	return fmt.Errorf("cannot bind raw JSON to field of type %s", field.Type())
+}
+
+// decodeBase64Field decodes a base64-encoded JSON string value into raw bytes.
+func decodeBase64Field(raw []byte) ([]byte, error) {
+	// raw is the JSON representation, e.g. "SGVsbG8=" (with quotes)
+	s := string(raw)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	} else {
+		return nil, fmt.Errorf("expected base64-encoded JSON string, got %s", s)
+	}
+	return base64.StdEncoding.DecodeString(s)
 }
 
 func (j *JSONBodyParser) getFieldStruct(strct reflect.Value, fieldname string) reflect.Value {
@@ -777,6 +881,35 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
 			}
 		}
+	}
+
+	// json.Marshaler (covers json.RawMessage) → write verbatim
+	if vIsValid {
+		if m, ok := vany.(json.Marshaler); ok {
+			// For nil slices/pointers that implement json.Marshaler, emit null.
+			switch val.Kind() {
+			case reflect.Slice, reflect.Map, reflect.Pointer, reflect.Interface:
+				if val.IsNil() {
+					_, err := buf.WriteString("null")
+					return err
+				}
+			}
+			raw, err := m.MarshalJSON()
+			if err != nil {
+				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
+			}
+			buf.Write(raw) // already valid JSON
+			return nil
+		}
+	}
+	// []byte (no custom marshaler) → base64 string
+	if vIsValid && utils.IsByteSlice(val.Type()) {
+		if val.IsNil() {
+			_, err := buf.WriteString("null")
+			return err
+		}
+		encodeString(buf, base64.StdEncoding.EncodeToString(val.Bytes()))
+		return nil
 	}
 
 	switch val.Kind() {
