@@ -188,6 +188,11 @@ func TestWithEnum(t *testing.T) {
 	assertJSONContains(t, s, []string{`"type":"string"`, `"enum":["a","b","c"]`})
 }
 
+func TestWithConst(t *testing.T) {
+	s := IntegerSchema().WithConst(1100)
+	assertJSONContains(t, s, []string{`"type":"integer"`, `"const":1100`})
+}
+
 func TestWithNullable(t *testing.T) {
 	s := StringSchema().WithNullable()
 	assertJSONContains(t, s, []string{`"type":"string"`, `"nullable":true`})

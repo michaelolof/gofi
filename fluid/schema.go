@@ -6,6 +6,11 @@ package fluid
 // all other fields should be left at their zero values. The JSON output
 // will be {"$ref": "..."}.
 //
+// Const is not part of the OpenAPI 3.0.3 spec (it was introduced in 3.1
+// via full JSON Schema 2020-12 support) but is included here as a
+// widely-supported de-facto extension for expressing single-value
+// schemas without resorting to a single-element Enum.
+//
 // See: https://spec.openapis.org/oas/v3.0.3#schema-object
 type SchemaObject struct {
 	Ref                  string                  `json:"$ref,omitempty"`
@@ -16,6 +21,7 @@ type SchemaObject struct {
 	Default              any                     `json:"default,omitempty"`
 	Example              any                     `json:"example,omitempty"`
 	Enum                 []any                   `json:"enum,omitempty"`
+	Const                any                     `json:"const,omitempty"`
 	Minimum              *float64                `json:"minimum,omitempty"`
 	Maximum              *float64                `json:"maximum,omitempty"`
 	ExclusiveMinimum     *float64                `json:"exclusiveMinimum,omitempty"`
@@ -153,6 +159,13 @@ func (s SchemaObject) WithDefault(def any) SchemaObject {
 // WithEnum sets the enum values.
 func (s SchemaObject) WithEnum(values ...any) SchemaObject {
 	s.Enum = values
+	return s
+}
+
+// WithConst sets the const value, constraining the schema to a single
+// literal value. See the Const field docs for spec-conformance notes.
+func (s SchemaObject) WithConst(value any) SchemaObject {
+	s.Const = value
 	return s
 }
 
