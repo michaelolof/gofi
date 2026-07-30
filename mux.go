@@ -786,7 +786,7 @@ func newRouter() *serveMux {
 		make(map[string]*node),
 		map[string]map[string]openapiOperationObject{},
 		map[string]map[string]any{},
-		NewGlobalStore(),
+		newGlobalStore(),
 		middlewares,
 		defaultMuxOptions(),
 	)

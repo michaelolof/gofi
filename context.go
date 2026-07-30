@@ -158,7 +158,7 @@ func (c *context) GlobalStore() ReadOnlyStore {
 
 func (c *context) DataStore() GofiStore {
 	if c.dataStore == nil {
-		c.dataStore = NewDataStore()
+		c.dataStore = newDataStore()
 	}
 	return c.dataStore
 }
@@ -212,7 +212,7 @@ func (c *context) Copy() Context {
 
 	// Copy datastore if initialized already
 	if c.dataStore != nil {
-		cc.dataStore = NewDataStore()
+		cc.dataStore = newDataStore()
 		if len(c.dataStore.items) > 0 {
 			cc.dataStore.items = make([]kv, len(c.dataStore.items))
 			copy(cc.dataStore.items, c.dataStore.items)

@@ -95,14 +95,23 @@ type anyKeyStore interface {
 	allAny() iter.Seq2[any, any]
 }
 
-// NewGlobalStore creates the store backing Router.GlobalStore(). It is not
-// safe for concurrent writes — see the gofiStore doc comment. Populate it
-// during setup, before the server starts serving requests.
-func NewGlobalStore() *gofiStore {
+// newGlobalStore creates the single store backing a router's GlobalStore(). It
+// is intentionally unexported: the router is the sole owner of the global
+// store, created once in newRouter and shared (by reference) with every
+// sub-router and request Context. Keeping this internal is what makes
+// "global to the router" a guarantee rather than a call-site convention —
+// there is no way to mint a second, detached "global" store. It is not safe
+// for concurrent writes; see the gofiStore doc comment.
+func newGlobalStore() *gofiStore {
 	return &gofiStore{items: make([]kv, 0, 8)}
 }
 
-func NewDataStore() *gofiStore {
+// newDataStore creates the per-request data store returned by
+// Context.DataStore(). It is intentionally unexported: a Context is the sole
+// owner of its data store (allocated lazily on first access, and freshly for
+// each Context.Copy), which is what keeps the data store scoped to a single
+// request rather than to whoever calls a constructor.
+func newDataStore() *gofiStore {
 	return &gofiStore{items: make([]kv, 0, 4)}
 }
 

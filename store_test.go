@@ -6,7 +6,7 @@ type dbKey struct{}
 type tenantKey struct{}
 
 func TestStore_StringBackwardCompat(t *testing.T) {
-	s := NewGlobalStore()
+	s := newGlobalStore()
 
 	// Deprecated string API must keep working unchanged.
 	s.Set("db", 42)
@@ -28,7 +28,7 @@ func TestStore_StringBackwardCompat(t *testing.T) {
 }
 
 func TestStore_StructKeys(t *testing.T) {
-	s := NewGlobalStore()
+	s := newGlobalStore()
 
 	StoreSet(s, dbKey{}, "postgres")
 	StoreSet(s, tenantKey{}, 99)
@@ -48,7 +48,7 @@ func TestStore_StructKeys(t *testing.T) {
 }
 
 func TestStore_KeysDoNotCollide(t *testing.T) {
-	s := NewGlobalStore()
+	s := newGlobalStore()
 
 	// Distinct named struct types must never clash, even though both are
 	// zero-sized and structurally identical.
@@ -70,7 +70,7 @@ func TestStore_KeysDoNotCollide(t *testing.T) {
 }
 
 func TestStore_GetMissingAndWrongType(t *testing.T) {
-	s := NewGlobalStore()
+	s := newGlobalStore()
 	StoreSet(s, dbKey{}, "postgres")
 
 	if _, ok := StoreGet[string](s, tenantKey{}); ok {
@@ -88,12 +88,12 @@ func TestStore_TryGetPanicsWhenMissing(t *testing.T) {
 			t.Fatal("StoreTryGet on missing key did not panic")
 		}
 	}()
-	s := NewGlobalStore()
+	s := newGlobalStore()
 	_ = StoreTryGet[string](s, dbKey{})
 }
 
 func TestStore_DeprecatedAllSkipsStructKeys(t *testing.T) {
-	s := NewGlobalStore()
+	s := newGlobalStore()
 	s.Set("str", 1)
 	StoreSet(s, dbKey{}, 2)
 
@@ -118,7 +118,7 @@ func TestStore_DeprecatedAllSkipsStructKeys(t *testing.T) {
 // TestStore_EmptyStructKeyZeroAlloc proves the performance claim: using an
 // empty struct as a key allocates nothing when boxed into the store.
 func TestStore_EmptyStructKeyZeroAlloc(t *testing.T) {
-	s := NewGlobalStore()
+	s := newGlobalStore()
 	StoreSet(s, dbKey{}, "seed") // pre-create the slot so Set overwrites in place
 
 	allocs := testing.AllocsPerRun(1000, func() {
