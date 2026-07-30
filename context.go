@@ -27,7 +27,11 @@ type Context interface {
 	Writer() ResponseWriter
 	// Request returns a Request adapter for backward compatibility
 	Request() *Request
-	// Access global store defined on the server router instance
+	// GlobalStore accesses the global store defined on the server router
+	// instance. It is exposed here as read-only: writes must happen once,
+	// during router setup via Router.GlobalStore(), before the server starts
+	// serving requests — the store is not safe for concurrent writes. See the
+	// concurrency notes on GofiStore.Set / StoreSet.
 	GlobalStore() ReadOnlyStore
 	// Access route context data store. Useful for passing and retrieving during a request lifetime
 	DataStore() GofiStore

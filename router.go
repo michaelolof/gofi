@@ -63,6 +63,12 @@ type Router interface {
 	// embedded within custom fasthttp.Server configurations natively.
 	Handler() fasthttp.RequestHandler
 
+	// GlobalStore returns the router-wide, shared key/value store. It is not
+	// safe for concurrent writes: populate it entirely during setup, before
+	// calling Listen/ListenTLS/Serve. Once the server is running, only read
+	// from it (Get/Has/StoreGet/...) — never call Set/StoreSet from a handler,
+	// middleware, or any goroutine racing with request handling. See the
+	// concurrency notes on GofiStore.Set / StoreSet for why.
 	GlobalStore() GofiStore
 	Meta() RouterMeta
 

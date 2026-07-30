@@ -191,27 +191,46 @@ r.UseErrorHandler(func(err error, c gofi.Context) {
 
 ### Plugins
 
-You can attach shared state or plugins to the router using the `GlobalStore`, which is accessible in all route handlers.
+You can attach shared state or plugins to the router using the `GlobalStore`, which is accessible in all route handlers. The same applies to the per-request `DataStore()`.
+
+Store keys may be **any comparable value**. The recommended convention is a distinct, empty `struct{}` type per key: it is collision-proof (two different named types can never clash) and the fastest option — boxing a zero-sized value into the store allocates nothing, and lookups short-circuit on the type descriptor. Use the generic `StoreSet` / `StoreGet` helpers, which also give you a typed value back with no manual assertion.
 
 ```go
-// 1. Initialize plugin
+// 1. Define a private, collision-proof key type
+type dbKey struct{}
+
+// 2. Initialize plugin
 myDB := NewDatabase()
 
-// 2. Register in GlobalStore
-r.GlobalStore().Set("db", myDB)
+// 3. Register in GlobalStore
+gofi.StoreSet(r.GlobalStore(), dbKey{}, myDB)
 
-// 3. Access in Handler
+// 4. Access in Handler — db is already *Database, no assertion needed
 gofi.DefineHandler(gofi.RouteOptions{
     Handler: func(c gofi.Context) error {
-        // Retrieve from GlobalStore (read-only access)
-        if db, found := c.GlobalStore().Get("db"); found {
-            // Use the plugin
-            db.(*Database).Query("...")
+        if db, found := gofi.StoreGet[*Database](c.GlobalStore(), dbKey{}); found {
+            db.Query("...")
         }
         return nil
     },
 })
 ```
+
+Keys of non-comparable types (slices, maps, funcs) will panic, exactly as with the standard library's `context.WithValue`.
+
+> **Deprecation:** the string-keyed methods `Set` / `Get` / `Has` / `TryGet` / `All` on the store are deprecated in favour of the generic `StoreSet` / `StoreGet` / `StoreHas` / `StoreTryGet` / `StoreAll` helpers and will be removed in a future release. Existing string keys keep working — pass a `string` as the key to the generic helpers.
+
+#### GlobalStore concurrency: write once, at setup
+
+`GlobalStore` is **not internally synchronized** — it is a single instance shared by every in-flight request, and it is deliberately unlocked for performance. This mirrors how the standard library's `context.WithValue` gets away without a mutex: safety comes from never mutating shared state once other goroutines can observe it, not from locking around every access.
+
+In practice:
+
+- ✅ Call `r.GlobalStore().Set(...)` / `gofi.StoreSet(r.GlobalStore(), ...)` during router setup, **before** `Listen` / `ListenTLS` / `Serve`.
+- ✅ Reading from `GlobalStore` inside handlers and middleware (`Get`, `Has`, `StoreGet`, ...) is always safe, as long as all writes finished before the server started.
+- ❌ Never call `Set` / `StoreSet` on a `GlobalStore` from inside a request handler, middleware, or any goroutine that runs concurrently with a live server — this is a genuine data race (`append` can reallocate the backing slice mid-read), not just a logical inconsistency, and will show up under `go test -race`.
+
+If you need state that's populated per-request at runtime, use `c.DataStore()` instead — it's scoped to a single request (or its `Context.Copy()`) and is never shared across goroutines, so no synchronization is needed.
 
 ### Goroutines and Concurrency
 
