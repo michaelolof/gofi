@@ -203,7 +203,8 @@ func (g *gofiStore) allAny() iter.Seq2[any, any] {
 //
 //	type dbKey struct{}
 //	gofi.StoreSet(r.GlobalStore(), dbKey{}, myDB)
-//	db, ok := gofi.StoreGet[*Database](c.GlobalStore(), dbKey{})
+//	v, ok := gofi.StoreGet(c.GlobalStore(), dbKey{})
+//	db, ok := v.(*Database)
 
 // StoreSet stores val under key in the given store.
 //
@@ -221,23 +222,18 @@ func StoreHas[K comparable](s ReadOnlyStore, key K) bool {
 	return s.(anyKeyStore).hasAny(key)
 }
 
-// StoreGet returns the value stored under key, asserted to T, and whether it
-// was found. If the key is missing, or the stored value is not a T, it returns
-// the zero value of T and false.
-func StoreGet[T any, K comparable](s ReadOnlyStore, key K) (T, bool) {
-	v, ok := s.(anyKeyStore).getAny(key)
-	if !ok {
-		var zero T
-		return zero, false
-	}
-	t, ok := v.(T)
-	return t, ok
+// StoreGet returns the value stored under key and whether it was found.
+// Converting the returned value to the appropriate type is the caller's
+// responsibility, e.g. db, ok := gofi.StoreGet(s, dbKey{}); db.(*Database).
+func StoreGet[K comparable](s ReadOnlyStore, key K) (any, bool) {
+	return s.(anyKeyStore).getAny(key)
 }
 
-// StoreTryGet returns the value stored under key asserted to T. It panics if
-// the key is missing or the stored value is not a T.
-func StoreTryGet[T any, K comparable](s ReadOnlyStore, key K) T {
-	return s.(anyKeyStore).tryGetAny(key).(T)
+// StoreTryGet returns the value stored under key. It panics if the key is
+// missing. Converting the returned value to the appropriate type is the
+// caller's responsibility.
+func StoreTryGet[K comparable](s ReadOnlyStore, key K) any {
+	return s.(anyKeyStore).tryGetAny(key)
 }
 
 // StoreAll returns an iterator over every key/value pair in the store,

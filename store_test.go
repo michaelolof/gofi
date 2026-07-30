@@ -36,14 +36,15 @@ func TestStore_StructKeys(t *testing.T) {
 	if !StoreHas(s, dbKey{}) {
 		t.Fatal("StoreHas(dbKey) = false, want true")
 	}
-	if got, ok := StoreGet[string](s, dbKey{}); !ok || got != "postgres" {
-		t.Fatalf("StoreGet[string](dbKey) = %q, %v; want postgres, true", got, ok)
+	// StoreGet returns any; asserting to the expected type is the caller's job.
+	if got, ok := StoreGet(s, dbKey{}); !ok || got.(string) != "postgres" {
+		t.Fatalf("StoreGet(dbKey) = %v, %v; want postgres, true", got, ok)
 	}
-	if got, ok := StoreGet[int](s, tenantKey{}); !ok || got != 99 {
-		t.Fatalf("StoreGet[int](tenantKey) = %d, %v; want 99, true", got, ok)
+	if got, ok := StoreGet(s, tenantKey{}); !ok || got.(int) != 99 {
+		t.Fatalf("StoreGet(tenantKey) = %v, %v; want 99, true", got, ok)
 	}
-	if got := StoreTryGet[string](s, dbKey{}); got != "postgres" {
-		t.Fatalf("StoreTryGet[string](dbKey) = %q; want postgres", got)
+	if got := StoreTryGet(s, dbKey{}); got.(string) != "postgres" {
+		t.Fatalf("StoreTryGet(dbKey) = %v; want postgres", got)
 	}
 }
 
@@ -55,31 +56,39 @@ func TestStore_KeysDoNotCollide(t *testing.T) {
 	StoreSet(s, dbKey{}, "db-val")
 	StoreSet(s, tenantKey{}, "tenant-val")
 
-	if got, _ := StoreGet[string](s, dbKey{}); got != "db-val" {
-		t.Fatalf("dbKey = %q; want db-val", got)
+	if got, _ := StoreGet(s, dbKey{}); got.(string) != "db-val" {
+		t.Fatalf("dbKey = %v; want db-val", got)
 	}
-	if got, _ := StoreGet[string](s, tenantKey{}); got != "tenant-val" {
-		t.Fatalf("tenantKey = %q; want tenant-val", got)
+	if got, _ := StoreGet(s, tenantKey{}); got.(string) != "tenant-val" {
+		t.Fatalf("tenantKey = %v; want tenant-val", got)
 	}
 
 	// A string key "dbKey" must not collide with the dbKey{} struct key.
 	StoreSet(s, "dbKey", "string-val")
-	if got, _ := StoreGet[string](s, dbKey{}); got != "db-val" {
-		t.Fatalf("dbKey struct key corrupted by string key: %q", got)
+	if got, _ := StoreGet(s, dbKey{}); got.(string) != "db-val" {
+		t.Fatalf("dbKey struct key corrupted by string key: %v", got)
 	}
 }
 
-func TestStore_GetMissingAndWrongType(t *testing.T) {
+func TestStore_GetMissing(t *testing.T) {
 	s := newGlobalStore()
 	StoreSet(s, dbKey{}, "postgres")
 
-	if _, ok := StoreGet[string](s, tenantKey{}); ok {
-		t.Fatal("StoreGet for missing key returned ok=true")
+	if v, ok := StoreGet(s, tenantKey{}); ok || v != nil {
+		t.Fatalf("StoreGet for missing key = %v, %v; want nil, false", v, ok)
 	}
-	// Wrong asserted type returns zero, false rather than panicking.
-	if v, ok := StoreGet[int](s, dbKey{}); ok || v != 0 {
-		t.Fatalf("StoreGet[int] on string value = %d, %v; want 0, false", v, ok)
-	}
+}
+
+func TestStore_CallerAssertionPanicsOnWrongType(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("caller's type assertion on wrong-typed value did not panic")
+		}
+	}()
+	s := newGlobalStore()
+	StoreSet(s, dbKey{}, "postgres")
+	v, _ := StoreGet(s, dbKey{})
+	_ = v.(int) // stored value is a string; asserting int panics
 }
 
 func TestStore_TryGetPanicsWhenMissing(t *testing.T) {
@@ -89,7 +98,7 @@ func TestStore_TryGetPanicsWhenMissing(t *testing.T) {
 		}
 	}()
 	s := newGlobalStore()
-	_ = StoreTryGet[string](s, dbKey{})
+	_ = StoreTryGet(s, dbKey{})
 }
 
 func TestStore_DeprecatedAllSkipsStructKeys(t *testing.T) {
@@ -123,7 +132,7 @@ func TestStore_EmptyStructKeyZeroAlloc(t *testing.T) {
 
 	allocs := testing.AllocsPerRun(1000, func() {
 		StoreSet(s, dbKey{}, "value")
-		_, _ = StoreGet[string](s, dbKey{})
+		_, _ = StoreGet(s, dbKey{})
 	})
 	if allocs != 0 {
 		t.Fatalf("empty struct key caused %v allocs/op; want 0", allocs)

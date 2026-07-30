@@ -193,7 +193,7 @@ r.UseErrorHandler(func(err error, c gofi.Context) {
 
 You can attach shared state or plugins to the router using the `GlobalStore`, which is accessible in all route handlers. The same applies to the per-request `DataStore()`.
 
-Store keys may be **any comparable value**. The recommended convention is a distinct, empty `struct{}` type per key: it is collision-proof (two different named types can never clash) and the fastest option — boxing a zero-sized value into the store allocates nothing, and lookups short-circuit on the type descriptor. Use the generic `StoreSet` / `StoreGet` helpers, which also give you a typed value back with no manual assertion.
+Store keys may be **any comparable value**. The recommended convention is a distinct, empty `struct{}` type per key: it is collision-proof (two different named types can never clash) and the fastest option — boxing a zero-sized value into the store allocates nothing, and lookups short-circuit on the type descriptor. Use the generic `StoreSet` / `StoreGet` helpers to write and read; `StoreGet` returns the stored value as `any` — converting it to the appropriate type is the caller's responsibility, same as reading from a `map[any]any`.
 
 ```go
 // 1. Define a private, collision-proof key type
@@ -205,10 +205,11 @@ myDB := NewDatabase()
 // 3. Register in GlobalStore
 gofi.StoreSet(r.GlobalStore(), dbKey{}, myDB)
 
-// 4. Access in Handler — db is already *Database, no assertion needed
+// 4. Access in Handler — assert to the expected type yourself
 gofi.DefineHandler(gofi.RouteOptions{
     Handler: func(c gofi.Context) error {
-        if db, found := gofi.StoreGet[*Database](c.GlobalStore(), dbKey{}); found {
+        if v, found := gofi.StoreGet(c.GlobalStore(), dbKey{}); found {
+            db := v.(*Database)
             db.Query("...")
         }
         return nil
