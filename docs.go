@@ -226,7 +226,10 @@ func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 		// any AdditionalStyle/AdditionalScript the caller supplies. img-src/
 		// font-src allow https:/data: broadly since Scalar injects its own
 		// theme assets at runtime from sources this template can't enumerate.
-		csp: "script-src 'self' 'unsafe-inline' " + srcOrigin + "; style-src 'self' 'unsafe-inline' " + srcOrigin + "; img-src 'self' data: https:; font-src 'self' data: https:",
+		// 'unsafe-eval' is required because the Scalar bundle itself uses
+		// eval/new Function internally (confirmed via a real browser run —
+		// blocked without it, regardless of any inline script in this template).
+		csp: "script-src 'self' 'unsafe-inline' 'unsafe-eval' " + srcOrigin + "; style-src 'self' 'unsafe-inline' " + srcOrigin + "; img-src 'self' data: https:; font-src 'self' data: https:",
 	}
 }
 
@@ -275,8 +278,11 @@ func RedoclyTemplate() DocsUiTemplate {
 	`
 	return &uiTemplate{
 		html: html,
-		// 'unsafe-inline' style-src covers the inline body-margin <style> block.
-		csp: "script-src 'self' https://cdn.redoc.ly; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com",
+		// 'unsafe-inline' style-src covers the inline body-margin <style>
+		// block. worker-src blob: is required because Redoc spins up a
+		// search-index web worker from a blob: URL (confirmed via a real
+		// browser run).
+		csp: "script-src 'self' https://cdn.redoc.ly; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; worker-src 'self' blob:",
 	}
 }
 
@@ -295,7 +301,10 @@ func RapidDoc() DocsUiTemplate {
 	`
 	return &uiTemplate{
 		html: html,
-		csp:  "script-src 'self' https://unpkg.com",
+		// rapi-doc is the same class of LitElement web-component viewer as
+		// StopLight and injects inline <style> the same way; 'unsafe-inline'
+		// is needed for style-src for the same reason (see StopLight below).
+		csp: "script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'",
 	}
 }
 
@@ -323,7 +332,10 @@ func StopLight() DocsUiTemplate {
 	`
 	return &uiTemplate{
 		html: html,
-		csp:  "script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com",
+		// 'unsafe-inline' style-src covers inline <style> the web-components
+		// bundle injects into the light DOM at runtime (not shadow-scoped,
+		// so it's still governed by CSP).
+		csp: "script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com",
 	}
 }
 
