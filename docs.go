@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
@@ -100,10 +101,23 @@ type DocsView struct {
 	DocsPath string
 	// The components to use for the documentation.
 	Components DocsComponent
+	// CSP overrides the Content-Security-Policy header ServeDocs sets on this
+	// view's UI route. Leave empty (the default) to use the policy the
+	// Template itself declares via DocsUiCSP — the built-in templates all
+	// declare one, so no config is needed for the common case. Set this only
+	// if a template needs something the default doesn't cover (e.g. a
+	// changed Scalar ScriptSrcLink pointing somewhere the default policy
+	// doesn't allow). An empty string result from both means no CSP header
+	// is set for this route.
+	CSP string
 }
 
 type DocsComponent struct {
-	Schemas map[string]any `json:"schemas"`
+	Schemas map[string]any `json:"schemas,omitempty"`
+	// PathItems holds reusable OpenAPI 3.1 Path Item definitions (e.g.
+	// fluid.PathItemObject values), referenceable via
+	// "#/components/pathItems/<name>" $refs from callbacks and webhooks.
+	PathItems map[string]any `json:"pathItems,omitempty"`
 }
 
 type DocsUiTemplate interface {
@@ -137,6 +151,7 @@ func SwaggerTemplate() DocsUiTemplate {
 	`
 	return &uiTemplate{
 		html: html,
+		csp:  "script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com",
 	}
 }
 
@@ -200,8 +215,18 @@ func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 		</body>
 		</html>`
 
+	srcOrigin := srcLink
+	if u, err := url.Parse(srcLink); err == nil && u.Scheme != "" && u.Host != "" {
+		srcOrigin = u.Scheme + "://" + u.Host
+	}
+
 	return &uiTemplate{
 		html: html,
+		// 'unsafe-inline' covers the two bootstrap <script> blocks above plus
+		// any AdditionalStyle/AdditionalScript the caller supplies. img-src/
+		// font-src allow https:/data: broadly since Scalar injects its own
+		// theme assets at runtime from sources this template can't enumerate.
+		csp: "script-src 'self' 'unsafe-inline' " + srcOrigin + "; style-src 'self' 'unsafe-inline' " + srcOrigin + "; img-src 'self' data: https:; font-src 'self' data: https:",
 	}
 }
 
@@ -248,7 +273,11 @@ func RedoclyTemplate() DocsUiTemplate {
 		</body>
 		</html>
 	`
-	return &uiTemplate{html: html}
+	return &uiTemplate{
+		html: html,
+		// 'unsafe-inline' style-src covers the inline body-margin <style> block.
+		csp: "script-src 'self' https://cdn.redoc.ly; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com",
+	}
 }
 
 func RapidDoc() DocsUiTemplate {
@@ -264,7 +293,10 @@ func RapidDoc() DocsUiTemplate {
 		</body>
 		</html>
 	`
-	return &uiTemplate{html: html}
+	return &uiTemplate{
+		html: html,
+		csp:  "script-src 'self' https://unpkg.com",
+	}
 }
 
 func StopLight() DocsUiTemplate {
@@ -289,11 +321,15 @@ func StopLight() DocsUiTemplate {
 		</body>
 		</html>
 	`
-	return &uiTemplate{html: html}
+	return &uiTemplate{
+		html: html,
+		csp:  "script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com",
+	}
 }
 
 type uiTemplate struct {
 	html string
+	csp  string
 }
 
 func (u *uiTemplate) HTML(specPath string) []byte {
@@ -301,7 +337,27 @@ func (u *uiTemplate) HTML(specPath string) []byte {
 	return []byte(fmt.Sprintf(u.html, specPath))
 }
 
-// OpenAPISpec extracts the OpenAPI 3.0.3 specification directly from the Router.
+// CSP returns the Content-Security-Policy value this template's rendered
+// HTML needs in order to run (the CDN host(s) it loads from, and
+// 'unsafe-inline' if it embeds a bootstrap <script>/<style> block). ServeDocs
+// applies this automatically to the docs UI route so the template isn't
+// broken by a stricter policy set elsewhere (app middleware or an edge/CDN)
+// that has no way to know what a given doc-UI template needs. Empty means
+// the template needs no policy of its own.
+func (u *uiTemplate) CSP() string {
+	return u.csp
+}
+
+// DocsUiCSP is the optional interface a DocsUiTemplate can implement to
+// participate in ServeDocs' automatic CSP handling. All templates returned
+// by this package's *Template() constructors implement it; a custom
+// DocsUiTemplate that doesn't implement it simply gets no CSP header set,
+// preserving today's behavior.
+type DocsUiCSP interface {
+	CSP() string
+}
+
+// OpenAPISpec extracts the OpenAPI 3.1.0 specification directly from the Router.
 // This is useful for programmatic access, testing, or building static documentation
 // files without running the server.
 func OpenAPISpec(r Router, opts DocsOptions) Docs {
@@ -371,6 +427,7 @@ type docsViewState struct {
 
 	htmlOnce sync.Once
 	htmlBody []byte
+	htmlCSP  string
 }
 
 func ServeDocs(r Router, opts DocsOptions) error {
@@ -426,9 +483,19 @@ func ServeDocs(r Router, opts DocsOptions) error {
 						tmplt = SwaggerTemplate()
 					}
 					state.htmlBody = tmplt.HTML(path.Join(viewOpt.RoutePrefix, docsPath))
+
+					state.htmlCSP = viewOpt.CSP
+					if state.htmlCSP == "" {
+						if cspt, ok := tmplt.(DocsUiCSP); ok {
+							state.htmlCSP = cspt.CSP()
+						}
+					}
 				})
 
 				ctx := c.(*context)
+				if state.htmlCSP != "" {
+					ctx.fctx.Response.Header.Set("Content-Security-Policy", state.htmlCSP)
+				}
 				ctx.fctx.Response.Header.Set("Content-Type", "text/html")
 				ctx.fctx.Response.SetStatusCode(200)
 				ctx.fctx.Response.SetBodyRaw(state.htmlBody)
