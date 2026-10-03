@@ -245,7 +245,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 						allowZero = true
 					}
 
-					if (ruleName == "max" || ruleName == "lte") && len(options) > 1 {
+					if (ruleName == "max" || ruleName == "lte") && len(options) > 0 {
 						flt, err := strconv.ParseFloat(options[0], 64)
 						if err == nil {
 							max = &flt

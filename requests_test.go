@@ -12,6 +12,7 @@ import (
 
 	"github.com/michaelolof/gofi/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCookieRequest(t *testing.T) {
@@ -1808,7 +1809,9 @@ type multipartMultiFileSchema struct {
 func buildMultipartBody(boundary string, parts [][]string) []byte {
 	var buf bytes.Buffer
 	for _, p := range parts {
-		buf.WriteString("--" + boundary + "\r\n")
+		buf.WriteString("--")
+		buf.WriteString(boundary)
+		buf.WriteString("\r\n")
 		if len(p) == 3 {
 			// File upload
 			buf.WriteString(fmt.Sprintf(
@@ -1824,7 +1827,9 @@ func buildMultipartBody(boundary string, parts [][]string) []byte {
 			))
 		}
 	}
-	buf.WriteString("--" + boundary + "--\r\n")
+	buf.WriteString("--")
+	buf.WriteString(boundary)
+	buf.WriteString("--\r\n")
 	return buf.Bytes()
 }
 
@@ -3035,4 +3040,287 @@ func TestTimeDecode_RFC3339Nano(t *testing.T) {
 	})
 	assert.Nil(t, err)
 	assert.Equal(t, 200, rec.StatusCode)
+}
+
+type exactSliceSizingItem struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func bindExactSliceSizingSchema[T any](t *testing.T, payload string) (*T, error) {
+	t.Helper()
+
+	var bound *T
+	var bindErr error
+	router := NewRouter()
+	_, err := router.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/bind",
+		Body:   strings.NewReader(payload),
+		Handler: &RouteOptions{
+			Schema: new(T),
+			Handler: func(c Context) error {
+				bound, bindErr = ValidateAndBind[T](c)
+				return nil
+			},
+		},
+	})
+	require.NoError(t, err)
+	return bound, bindErr
+}
+
+func TestJSONBinding_ExactNonPrimitiveSliceSizing(t *testing.T) {
+	t.Run("empty optional slice", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.NotNil(t, bound.Request.Body.Items)
+		assert.Len(t, bound.Request.Body.Items, 0)
+		assert.Equal(t, 0, cap(bound.Request.Body.Items))
+	})
+
+	t.Run("empty required slice", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[]}`)
+		require.Error(t, err)
+		assert.Nil(t, bound)
+		assert.Contains(t, err.Error(), "items.0")
+	})
+
+	t.Run("one element ignores declared maximum for capacity", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"present,max=50"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Equal(t, []exactSliceSizingItem{{Name: "one"}}, bound.Request.Body.Items)
+		assert.Equal(t, 1, cap(bound.Request.Body.Items))
+	})
+
+	t.Run("nested two element slice", func(t *testing.T) {
+		type group struct {
+			Items []exactSliceSizingItem `json:"items" validate:"required,max=10"`
+		}
+		type schema struct {
+			Request struct {
+				Body struct {
+					Groups []group `json:"groups" validate:"required,max=10"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"groups":[{"items":[{"name":"one"},{"name":"two"}]}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		require.Len(t, bound.Request.Body.Groups, 1)
+		assert.Equal(t, 1, cap(bound.Request.Body.Groups))
+		assert.Len(t, bound.Request.Body.Groups[0].Items, 2)
+		assert.Equal(t, 2, cap(bound.Request.Body.Groups[0].Items))
+	})
+
+	t.Run("slice at maximum", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"required,max=2"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Len(t, bound.Request.Body.Items, 2)
+		assert.Equal(t, 2, cap(bound.Request.Body.Items))
+	})
+
+	t.Run("slice beyond maximum", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"required,max=2"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"},{"name":"three"}]}`)
+		require.Error(t, err)
+		assert.Nil(t, bound)
+		assert.Contains(t, err.Error(), "maximum limit of 2.000000")
+	})
+
+	t.Run("pointer to slice", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items *[]exactSliceSizingItem `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		require.NotNil(t, bound.Request.Body.Items)
+		assert.Equal(t, []exactSliceSizingItem{{Name: "one"}}, *bound.Request.Body.Items)
+		assert.Equal(t, 1, cap(*bound.Request.Body.Items))
+	})
+
+	t.Run("slice of pointers", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []*exactSliceSizingItem `json:"items" validate:"required,max=10"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		require.Len(t, bound.Request.Body.Items, 2)
+		assert.Equal(t, 2, cap(bound.Request.Body.Items))
+		require.NotNil(t, bound.Request.Body.Items[0])
+		require.NotNil(t, bound.Request.Body.Items[1])
+		assert.Equal(t, "one", bound.Request.Body.Items[0].Name)
+		assert.Equal(t, "two", bound.Request.Body.Items[1].Name)
+	})
+
+	t.Run("fixed length array", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items [2]exactSliceSizingItem `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Equal(t, [2]exactSliceSizingItem{{Name: "one"}, {Name: "two"}}, bound.Request.Body.Items)
+	})
+}
+
+type validateOnlyCollectionItem struct {
+	Name string `json:"name" validate:"required"`
+}
+
+type validateOnlyRequiredCollectionSchema struct {
+	Request struct {
+		Body struct {
+			Items []validateOnlyCollectionItem `json:"items" validate:"required,min=1,max=2"`
+		} `validate:"required"`
+	}
+}
+
+type validateOnlyPresentCollectionSchema struct {
+	Request struct {
+		Body struct {
+			Items []validateOnlyCollectionItem `json:"items" validate:"present"`
+		} `validate:"required"`
+	}
+}
+
+func runValidateOnlyCollectionRequest(t *testing.T, schema any, payload string) (*InjectResponse, error) {
+	t.Helper()
+
+	var validationErr error
+	router := NewRouter()
+	response, err := router.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/validate",
+		Body:   strings.NewReader(payload),
+		Handler: &RouteOptions{
+			Schema: schema,
+			Handler: func(c Context) error {
+				validationErr = Validate(c)
+				if validationErr != nil {
+					return c.SendString(400, validationErr.Error())
+				}
+				return c.SendString(200, "OK")
+			},
+		},
+	})
+	require.NoError(t, err)
+	return response, validationErr
+}
+
+func TestValidateOnly_NonPrimitiveCollections(t *testing.T) {
+	t.Run("valid nested collection", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		assert.NoError(t, validationErr)
+		assert.Equal(t, 200, response.StatusCode)
+		assert.Equal(t, "OK", string(response.Body))
+	})
+
+	t.Run("required rejects an empty collection", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "items.0")
+	})
+
+	t.Run("min rejects a collection that is too short", func(t *testing.T) {
+		type minSchema struct {
+			Request struct {
+				Body struct {
+					Items []validateOnlyCollectionItem `json:"items" validate:"present,min=2"`
+				} `validate:"required"`
+			}
+		}
+
+		response, validationErr := runValidateOnlyCollectionRequest(t, &minSchema{}, `{"items":[{"name":"one"}]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "minimum")
+	})
+
+	t.Run("max rejects a collection that is too long", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[{"name":"one"},{"name":"two"},{"name":"three"}]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "maximum")
+	})
+
+	t.Run("present accepts an empty collection", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyPresentCollectionSchema{}, `{"items":[]}`)
+		assert.NoError(t, validationErr)
+		assert.Equal(t, 200, response.StatusCode)
+		assert.Equal(t, "OK", string(response.Body))
+	})
+
+	t.Run("present rejects a missing collection without panic", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyPresentCollectionSchema{}, `{}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "present")
+	})
+
+	t.Run("nested item validation still runs", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[{}]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "items.0.name")
+	})
 }

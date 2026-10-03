@@ -176,6 +176,22 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		return nil, nil
 	}
 
+	// Missing required or present values must fail before walking their shape.
+	// In particular, calling Array, Object, or Get on a nil fastjson node can
+	// panic. Only presence rules are meaningful for a missing value; running
+	// length rules such as min/max against nil would panic in the validator.
+	if val == nil {
+		for _, rule := range opts.SchemaRules.rules {
+			if rule.rule != "required" && rule.rule != "present" {
+				continue
+			}
+			if err := rule.dator(nil); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), rule.rule, err)
+			}
+		}
+		return &walkFinished, nil
+	}
+
 	if opts.ShouldBind && opts.Body != nil && opts.Body.Kind() == reflect.Pointer {
 		opts.Body.Set(reflect.New(opts.Body.Type().Elem()))
 	}
@@ -365,11 +381,6 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		return &walkFinished, nil
 
 	case reflect.Slice, reflect.Array:
-		var size = 50 // DEFAULT_ARRAY_SIZE
-		if opts.SchemaRules.max != nil {
-			size = int(*opts.SchemaRules.max)
-		}
-
 		rules := opts.SchemaRules
 
 		switch true {
@@ -379,13 +390,10 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			if err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 			}
-			arr, err := cont.GetPrimitiveArrValsFromNode(arrNodes, rules.item.kind, rules.format, size)
-			if rules.max != nil && len(arr) > int(*rules.max) {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "max", errors.New("array size too large"))
-			} else if err != nil {
+			arr, err := cont.GetPrimitiveArrValsFromNode(arrNodes, rules.item.kind, rules.format, len(arrNodes))
+			if err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
 			}
-
 			if err := runValidationLazy(arr, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
@@ -400,15 +408,6 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 
 		case utils.NotPrimitiveKind(opts.SchemaRules.item.kind):
 			// Handle array of Non primitives
-			var nslice reflect.Value
-			if opts.ShouldBind && opts.Body != nil {
-				sliceType := opts.Body.Type()
-				if sliceType.Kind() == reflect.Pointer {
-					sliceType = sliceType.Elem()
-				}
-				nslice = reflect.MakeSlice(sliceType, 0, size)
-			}
-
 			arrNodes, err := node.Array()
 			if err != nil {
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
@@ -417,19 +416,36 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			if len(arrNodes) == 0 && rules.required && !rules.present {
 				_keys := append(keys, "0")
 				return nil, newErrReport(RequestErr, schemaField, strings.Join(_keys, "."), "required", errors.New("value must not be empty"))
-			} else if rules.max != nil && len(arrNodes) > int(*rules.max) {
-				_keys := append(keys, strconv.Itoa(len(arrNodes)))
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(_keys, "."), "max", fmt.Errorf("array length must not be greater than %f", *rules.max))
+			}
+			// Reject oversized input before reserving destination memory. The
+			// limit is compiled once with the schema, so successful requests do
+			// not pay for a second validator call or a temporary destination.
+			if rules.max != nil && float64(len(arrNodes)) > *rules.max {
+				for _, rule := range rules.rules {
+					if rule.rule == "max" || rule.rule == "lte" {
+						return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), rule.rule, fmt.Errorf("value must be equal or lesser than maximum limit of %f", *rules.max))
+					}
+				}
+			}
+
+			var collection reflect.Value
+			var collectionType reflect.Type
+			if opts.ShouldBind && opts.Body != nil {
+				collectionType = opts.Body.Type()
+				if collectionType.Kind() == reflect.Pointer {
+					collectionType = collectionType.Elem()
+				}
+				if collectionType.Kind() == reflect.Array {
+					collection = reflect.New(collectionType).Elem()
+				} else {
+					collection = reflect.MakeSlice(collectionType, 0, len(arrNodes))
+				}
 			}
 
 			for i, childNode := range arrNodes {
 				var istrct reflect.Value
 				if opts.ShouldBind && opts.Body != nil {
-					sliceType := opts.Body.Type()
-					if sliceType.Kind() == reflect.Pointer {
-						sliceType = sliceType.Elem()
-					}
-					istrct = reflect.New(sliceType.Elem()).Elem()
+					istrct = reflect.New(collectionType.Elem()).Elem()
 				}
 
 				fopts := j.getFieldOptions(opts, &istrct, rules.item)
@@ -439,14 +455,25 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 				}
 
 				if opts.ShouldBind && opts.Body != nil {
-					nslice = reflect.Append(nslice, istrct)
+					if collectionType.Kind() == reflect.Array {
+						// Match encoding/json's fixed-array behavior: bind values that
+						// fit and ignore any excess values after validating them.
+						if i < collection.Len() {
+							collection.Index(i).Set(istrct)
+						}
+					} else {
+						collection = reflect.Append(collection, istrct)
+					}
 				}
 			}
 
-			// Slice Validation
-			var sliceVal any
+			// Validate collection-level rules without allocating the destination
+			// slice when this is a validation-only request. Validators for slice
+			// and array rules inspect collection length/presence, both of which are
+			// represented by arrNodes.
+			var sliceVal any = arrNodes
 			if opts.ShouldBind && opts.Body != nil {
-				sliceVal = nslice.Interface()
+				sliceVal = collection.Interface()
 			}
 			if err := runValidationLazy(sliceVal, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
 				return nil, err
@@ -454,9 +481,9 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 
 			if opts.ShouldBind && opts.Body != nil {
 				if opts.Body.Kind() == reflect.Pointer {
-					opts.Body.Elem().Set(nslice)
+					opts.Body.Elem().Set(collection)
 				} else {
-					opts.Body.Set(nslice)
+					opts.Body.Set(collection)
 				}
 			}
 
