@@ -127,14 +127,14 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		return errors.New("SchemaRules is nil")
 	}
 
-	// Determine whether json body value is a primitive or not
-	val, err := utils.PrimitiveFromStr(opts.SchemaRules.kind, string(bs))
-	if err != nil {
-		return newErrReport(RequestErr, schemaBody, "", "encoder", err)
-	}
+	// The compiled schema already identifies primitive bodies. Structured JSON
+	// must not stringify the entire payload only to rediscover its schema kind.
+	if utils.IsPrimitiveKind(opts.SchemaRules.kind) {
+		val, err := utils.PrimitiveFromStr(opts.SchemaRules.kind, string(bs))
+		if err != nil {
+			return newErrReport(RequestErr, schemaBody, "", "encoder", err)
+		}
 
-	// Handle if JSON body value is a primitive
-	if utils.IsPrimitive(val) {
 		if err := runValidation(val, RequestErr, schemaBody, "", opts.SchemaRules.rules); err != nil {
 			return err
 		}
