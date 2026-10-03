@@ -26,6 +26,61 @@ type JSONBodyParser struct {
 	MaintainOrder  bool
 }
 
+// jsonRequestOptions is the value-based walker state used by the JSON parser.
+// RequestOptions keeps its pointer-based Body field for compatibility with
+// custom body parsers, but the recursive JSON hot path must not take the
+// address of a new reflect.Value for every visited field.
+type jsonRequestOptions struct {
+	SchemaRules *RuleDef
+	ShouldBind  bool
+	Context     ParserContext
+	Body        reflect.Value
+	HasBody     bool
+}
+
+type requestPathSegment struct {
+	name    string
+	index   int
+	isIndex bool
+}
+
+// requestPath is shared by every recursive walker frame. Successful requests
+// only push and pop segments; a string is materialized when an error is built.
+type requestPath struct {
+	segments []requestPathSegment
+}
+
+func (p *requestPath) pushField(name string) {
+	p.segments = append(p.segments, requestPathSegment{name: name})
+}
+
+func (p *requestPath) pushIndex(index int) {
+	p.segments = append(p.segments, requestPathSegment{index: index, isIndex: true})
+}
+
+func (p *requestPath) pop() {
+	p.segments = p.segments[:len(p.segments)-1]
+}
+
+func (p *requestPath) String() string {
+	if p == nil || len(p.segments) == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	for i, segment := range p.segments {
+		if i > 0 {
+			builder.WriteByte('.')
+		}
+		if segment.isIndex {
+			builder.WriteString(strconv.Itoa(segment.index))
+		} else {
+			builder.WriteString(segment.name)
+		}
+	}
+	return builder.String()
+}
+
 var jsonBodyPool = sync.Pool{
 	New: func() any {
 		return new(bytes.Buffer)
@@ -110,16 +165,21 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
 
-	var bodyStruct reflect.Value
+	walkOpts := jsonRequestOptions{
+		SchemaRules: opts.SchemaRules,
+		ShouldBind:  opts.ShouldBind,
+		Context:     opts.Context,
+	}
 	if opts.ShouldBind && opts.Body != nil {
 		if len(opts.SchemaRules.accessor.index) > 1 && !requestFieldParentsReady(*opts.Body, opts.SchemaRules.accessor.index) {
 			return newErrReport(RequestErr, schemaBody, "", "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", opts.SchemaRules.accessor.index))
 		}
-		bodyStruct = requestCompiledField(*opts.Body, opts.SchemaRules.accessor.index)
+		walkOpts.Body = requestCompiledField(*opts.Body, opts.SchemaRules.accessor.index)
+		walkOpts.HasBody = true
 	}
 
-	strctOpts := j.getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
-	status, err := j.walkStruct(pv, schemaBody, strctOpts, nil)
+	path := requestPath{segments: make([]requestPathSegment, 0, 8)}
+	status, err := j.walkStruct(pv, schemaBody, walkOpts, &path)
 	if err != nil {
 		return err
 	}
@@ -159,17 +219,18 @@ func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions
 	return result, nil
 }
 
-func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaField, opts RequestOptions, keys []string) (*walkFinishStatus, error) {
-	if j.MaxDepth == 0 {
-		j.MaxDepth = 100
+func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaField, opts jsonRequestOptions, path *requestPath) (*walkFinishStatus, error) {
+	maxDepth := j.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = 100
 	}
-	if len(keys) > j.MaxDepth {
-		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "depth", errors.New("max recursion depth exceeded"))
+	if len(path.segments) > maxDepth {
+		return nil, newErrReport(RequestErr, schemaField, path.String(), "depth", errors.New("max recursion depth exceeded"))
 	}
 
 	val, err := cont.GetNodeByKind(node, opts.SchemaRules.kind, opts.SchemaRules.format)
 	if err != nil {
-		return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+		return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 	}
 
 	if (val == nil || val == cont.EOF) && opts.SchemaRules.defVal != nil {
@@ -192,24 +253,24 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 				continue
 			}
 			if err := rule.dator(nil); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), rule.rule, err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), rule.rule, err)
 			}
 		}
 		return &walkFinished, nil
 	}
 
-	if opts.ShouldBind && opts.Body != nil && opts.Body.Kind() == reflect.Pointer {
+	if opts.ShouldBind && opts.HasBody && opts.Body.Kind() == reflect.Pointer {
 		opts.Body.Set(reflect.New(opts.Body.Type().Elem()))
 	}
 
 	if opts.SchemaRules.format == utils.TimeObjectFormat || opts.SchemaRules.format == utils.CookieObjectFormat {
-		if err := runValidationLazy(val, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(val, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			if err = j.decodeFieldValue(opts.Body, val, opts.SchemaRules.pattern); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
 		}
 
@@ -220,16 +281,16 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	if spec, ok := opts.Context.CustomSpecs().Find(string(opts.SchemaRules.format)); ok {
 		decoded, err := spec.Decode(val)
 		if err != nil {
-			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "typeCast", err)
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "typeCast", err)
 		}
 
-		if err := runValidationLazy(decoded, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(decoded, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			if err = j.decodeFieldValue(opts.Body, decoded, ""); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
 		}
 
@@ -240,16 +301,16 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	if opts.SchemaRules.format == utils.RawJSONFormat {
 		raw, ok := val.([]byte)
 		if !ok {
-			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", errors.New("expected raw JSON bytes"))
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", errors.New("expected raw JSON bytes"))
 		}
 
-		if err := runValidationLazy(raw, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(raw, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			if err := j.decodeRawJSONField(opts.Body, raw); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
 		}
 
@@ -260,19 +321,19 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	if opts.SchemaRules.format == utils.ByteFormat {
 		raw, ok := val.([]byte)
 		if !ok {
-			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", errors.New("expected raw JSON bytes"))
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", errors.New("expected raw JSON bytes"))
 		}
 
 		decoded, err := decodeBase64Field(raw)
 		if err != nil {
-			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 		}
 
-		if err := runValidationLazy(decoded, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(decoded, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			if opts.Body.Kind() == reflect.Pointer {
 				ptr := reflect.New(opts.Body.Type().Elem())
 				ptr.Elem().Set(reflect.ValueOf(decoded))
@@ -290,19 +351,23 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		// Fast path: use pre-ordered props slice when available
 		if len(opts.SchemaRules.orderedProps) > 0 {
 			for _, childDef := range opts.SchemaRules.orderedProps {
+				path.pushField(childDef.field)
 				childNode := node.Get(childDef.field)
 				var childStruct reflect.Value
-				if opts.ShouldBind && opts.Body != nil {
+				if opts.ShouldBind && opts.HasBody {
 					indexNeedsValue := len(childDef.accessor.index) > 1
 					if !indexNeedsValue || childNode != nil || childDef.defVal != nil {
-						if indexNeedsValue && !requestFieldParentsReady(*opts.Body, childDef.accessor.index) {
-							return nil, newErrReport(RequestErr, schemaField, strings.Join(append(keys, childDef.field), "."), "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
+						if indexNeedsValue && !requestFieldParentsReady(opts.Body, childDef.accessor.index) {
+							errPath := path.String()
+							path.pop()
+							return nil, newErrReport(RequestErr, schemaField, errPath, "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
 						}
-						childStruct = requestCompiledField(*opts.Body, childDef.accessor.index)
+						childStruct = requestCompiledField(opts.Body, childDef.accessor.index)
 					}
 				}
-				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, childDef.field))
+				childOpts := j.getFieldOptions(opts, childStruct, childDef)
+				_, err := j.walkStruct(childNode, schemaBody, childOpts, path)
+				path.pop()
 				if err != nil {
 					return nil, err
 				}
@@ -323,38 +388,46 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 				if !ok {
 					continue
 				}
+				path.pushField(name)
 				childNode := node.Get(name)
 				var childStruct reflect.Value
-				if opts.ShouldBind && opts.Body != nil {
+				if opts.ShouldBind && opts.HasBody {
 					indexNeedsValue := len(childDef.accessor.index) > 1
 					if !indexNeedsValue || childNode != nil || childDef.defVal != nil {
-						if indexNeedsValue && !requestFieldParentsReady(*opts.Body, childDef.accessor.index) {
-							return nil, newErrReport(RequestErr, schemaField, strings.Join(append(keys, name), "."), "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
+						if indexNeedsValue && !requestFieldParentsReady(opts.Body, childDef.accessor.index) {
+							errPath := path.String()
+							path.pop()
+							return nil, newErrReport(RequestErr, schemaField, errPath, "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
 						}
-						childStruct = requestCompiledField(*opts.Body, childDef.accessor.index)
+						childStruct = requestCompiledField(opts.Body, childDef.accessor.index)
 					}
 				}
-				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, name))
+				childOpts := j.getFieldOptions(opts, childStruct, childDef)
+				_, err := j.walkStruct(childNode, schemaBody, childOpts, path)
+				path.pop()
 				if err != nil {
 					return nil, err
 				}
 			}
 		} else {
 			for childKey, childDef := range opts.SchemaRules.properties {
+				path.pushField(childKey)
 				childNode := node.Get(childKey)
 				var childStruct reflect.Value
-				if opts.ShouldBind && opts.Body != nil {
+				if opts.ShouldBind && opts.HasBody {
 					indexNeedsValue := len(childDef.accessor.index) > 1
 					if !indexNeedsValue || childNode != nil || childDef.defVal != nil {
-						if indexNeedsValue && !requestFieldParentsReady(*opts.Body, childDef.accessor.index) {
-							return nil, newErrReport(RequestErr, schemaField, strings.Join(append(keys, childKey), "."), "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
+						if indexNeedsValue && !requestFieldParentsReady(opts.Body, childDef.accessor.index) {
+							errPath := path.String()
+							path.pop()
+							return nil, newErrReport(RequestErr, schemaField, errPath, "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
 						}
-						childStruct = requestCompiledField(*opts.Body, childDef.accessor.index)
+						childStruct = requestCompiledField(opts.Body, childDef.accessor.index)
 					}
 				}
-				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, childKey))
+				childOpts := j.getFieldOptions(opts, childStruct, childDef)
+				_, err := j.walkStruct(childNode, schemaBody, childOpts, path)
+				path.pop()
 				if err != nil {
 					return nil, err
 				}
@@ -370,29 +443,31 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 
 		obj, err := node.Object()
 		if err != nil {
-			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			opts.Body.Set(reflect.MakeMap(opts.Body.Type()))
 		}
 
 		var mapErr error
 		obj.Visit(func(key []byte, v *fastjson.Value) {
 			var cstrct reflect.Value
-			if opts.ShouldBind && opts.Body != nil {
+			if opts.ShouldBind && opts.HasBody {
 				cstrct = reflect.New(opts.Body.Type().Elem()).Elem()
 			}
 
 			ckey := string(key)
-			copts := j.getFieldOptions(opts, &cstrct, opts.SchemaRules.additionalProperties)
-			_, err := j.walkStruct(v, schemaBody, copts, append(keys, ckey))
+			path.pushField(ckey)
+			copts := j.getFieldOptions(opts, cstrct, opts.SchemaRules.additionalProperties)
+			_, err := j.walkStruct(v, schemaBody, copts, path)
+			path.pop()
 			if err != nil {
 				mapErr = err
 				return
 			}
 
-			if opts.ShouldBind && opts.Body != nil {
+			if opts.ShouldBind && opts.HasBody {
 				opts.Body.SetMapIndex(reflect.ValueOf(ckey), cstrct)
 			}
 
@@ -412,19 +487,19 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			// Handle array of primitive values
 			arrNodes, err := node.Array()
 			if err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 			}
 			arr, err := cont.GetPrimitiveArrValsFromNode(arrNodes, rules.item.kind, rules.format, len(arrNodes))
 			if err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 			}
-			if err := runValidationLazy(arr, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+			if err := runValidationLazy(arr, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
-			if opts.ShouldBind && opts.Body != nil {
+			if opts.ShouldBind && opts.HasBody {
 				if err = j.decodeFieldValue(opts.Body, arr, ""); err != nil {
-					return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+					return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 				}
 			}
 
@@ -434,12 +509,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			// Handle array of Non primitives
 			arrNodes, err := node.Array()
 			if err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 			}
 
 			if len(arrNodes) == 0 && rules.required && !rules.present {
-				_keys := append(keys, "0")
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(_keys, "."), "required", errors.New("value must not be empty"))
+				path.pushIndex(0)
+				errPath := path.String()
+				path.pop()
+				return nil, newErrReport(RequestErr, schemaField, errPath, "required", errors.New("value must not be empty"))
 			}
 			// Reject oversized input before reserving destination memory. The
 			// limit is compiled once with the schema, so successful requests do
@@ -447,14 +524,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			if rules.max != nil && float64(len(arrNodes)) > *rules.max {
 				for _, rule := range rules.rules {
 					if rule.rule == "max" || rule.rule == "lte" {
-						return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), rule.rule, fmt.Errorf("value must be equal or lesser than maximum limit of %f", *rules.max))
+						return nil, newErrReport(RequestErr, schemaField, path.String(), rule.rule, fmt.Errorf("value must be equal or lesser than maximum limit of %f", *rules.max))
 					}
 				}
 			}
 
 			var collection reflect.Value
 			var collectionType reflect.Type
-			if opts.ShouldBind && opts.Body != nil {
+			if opts.ShouldBind && opts.HasBody {
 				collectionType = opts.Body.Type()
 				if collectionType.Kind() == reflect.Pointer {
 					collectionType = collectionType.Elem()
@@ -462,32 +539,28 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 				if collectionType.Kind() == reflect.Array {
 					collection = reflect.New(collectionType).Elem()
 				} else {
-					collection = reflect.MakeSlice(collectionType, 0, len(arrNodes))
+					collection = reflect.MakeSlice(collectionType, len(arrNodes), len(arrNodes))
 				}
 			}
 
 			for i, childNode := range arrNodes {
 				var istrct reflect.Value
-				if opts.ShouldBind && opts.Body != nil {
-					istrct = reflect.New(collectionType.Elem()).Elem()
+				if opts.ShouldBind && opts.HasBody {
+					if i < collection.Len() {
+						istrct = collection.Index(i)
+					} else {
+						// Fixed arrays ignore excess decoded values, but retain the
+						// previous conversion and validation behavior for those items.
+						istrct = reflect.New(collectionType.Elem()).Elem()
+					}
 				}
 
-				fopts := j.getFieldOptions(opts, &istrct, rules.item)
-				_, err := j.walkStruct(childNode, schemaBody, fopts, append(keys, strconv.Itoa(i)))
+				path.pushIndex(i)
+				fopts := j.getFieldOptions(opts, istrct, rules.item)
+				_, err := j.walkStruct(childNode, schemaBody, fopts, path)
+				path.pop()
 				if err != nil {
 					return nil, err
-				}
-
-				if opts.ShouldBind && opts.Body != nil {
-					if collectionType.Kind() == reflect.Array {
-						// Match encoding/json's fixed-array behavior: bind values that
-						// fit and ignore any excess values after validating them.
-						if i < collection.Len() {
-							collection.Index(i).Set(istrct)
-						}
-					} else {
-						collection = reflect.Append(collection, istrct)
-					}
 				}
 			}
 
@@ -496,14 +569,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			// and array rules inspect collection length/presence, both of which are
 			// represented by arrNodes.
 			var sliceVal any = arrNodes
-			if opts.ShouldBind && opts.Body != nil {
+			if opts.ShouldBind && opts.HasBody {
 				sliceVal = collection.Interface()
 			}
-			if err := runValidationLazy(sliceVal, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+			if err := runValidationLazy(sliceVal, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 				return nil, err
 			}
 
-			if opts.ShouldBind && opts.Body != nil {
+			if opts.ShouldBind && opts.HasBody {
 				if opts.Body.Kind() == reflect.Pointer {
 					opts.Body.Elem().Set(collection)
 				} else {
@@ -517,29 +590,29 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	case reflect.Interface:
 		v, err := cont.GetAnyValueFromNode(node)
 		if err != nil {
-			return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "parser", err)
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 		}
 
-		if err := runValidationLazy(v, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(v, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			if err = j.decodeFieldValue(opts.Body, v, ""); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
 		}
 
 		return &walkFinished, nil
 
 	default:
-		if err := runValidationLazy(val, RequestErr, schemaField, keys, opts.SchemaRules.rules); err != nil {
+		if err := runValidationLazy(val, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
-		if opts.ShouldBind && opts.Body != nil {
+		if opts.ShouldBind && opts.HasBody {
 			if err = j.decodeFieldValue(opts.Body, val, opts.SchemaRules.pattern); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, strings.Join(keys, "."), "decode", err)
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
 		}
 
@@ -549,7 +622,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	return &walkFinished, nil
 }
 
-func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any, timeLayout string) error {
+func (j *JSONBodyParser) decodeFieldValue(field reflect.Value, val any, timeLayout string) error {
 	if val == nil {
 		return nil
 	}
@@ -578,59 +651,26 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any, timeLay
 		switch field.Type().Elem().Kind() {
 		case reflect.Slice, reflect.Array:
 			if v, ok := val.([]any); ok {
-				nslice := reflect.New(field.Type().Elem())
-				istrct := field.Type().Elem().Elem()
-				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
-				for _, item := range v {
-					ssf := reflect.New(istrct).Elem()
-					if err := bindValOnElem(&ssf, item); err != nil {
-						return err
-					}
-					slice = reflect.Append(slice, ssf)
+				collection := reflect.New(field.Type().Elem())
+				if err := bindCollectionValues(collection.Elem(), v); err != nil {
+					return err
 				}
-				nslice.Elem().Set(slice)
-				field.Set(nslice)
+				field.Set(collection)
 				return nil
 			} else {
 				return fmt.Errorf("type mismatch. expected array value got %T", val)
 			}
 		default:
 			ptype := reflect.New(field.Type().Elem())
-			v, err := utils.SafeConvert(reflect.ValueOf(val), ptype.Elem().Type())
-			if err != nil {
+			if err := setConvertedReflectValue(ptype.Elem(), val); err != nil {
 				return err
 			}
-			ptype.Elem().Set(v)
 			field.Set(ptype)
 			return nil
 		}
 	case reflect.Slice, reflect.Array:
 		if v, ok := val.([]any); ok {
-			istrct := field.Type().Elem()
-			switch istrct.Kind() {
-			case reflect.Pointer:
-				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
-				for _, item := range v {
-					ssf := reflect.New(istrct.Elem()).Elem()
-					if err := bindValOnElem(&ssf, item); err != nil {
-						return err
-					}
-					slice = reflect.Append(slice, ssf.Addr())
-				}
-				field.Set(slice)
-				return nil
-			default:
-				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
-				for _, item := range v {
-					ssf := reflect.New(istrct).Elem()
-					if err := bindValOnElem(&ssf, item); err != nil {
-						return err
-					}
-					slice = reflect.Append(slice, ssf)
-				}
-				field.Set(slice)
-				return nil
-			}
+			return bindCollectionValues(field, v)
 		} else {
 			return fmt.Errorf("type mismatch. expected array value got %T", val)
 		}
@@ -646,18 +686,48 @@ func (j *JSONBodyParser) decodeFieldValue(field *reflect.Value, val any, timeLay
 			}
 		}
 
-		v, err := utils.SafeConvert(reflect.ValueOf(val), field.Type())
-		if err != nil {
+		return setConvertedReflectValue(field, val)
+	}
+}
+
+func bindCollectionValues(field reflect.Value, values []any) error {
+	collection := field
+	if field.Kind() == reflect.Slice {
+		collection = reflect.MakeSlice(field.Type(), len(values), len(values))
+	}
+
+	for i, item := range values {
+		var elem reflect.Value
+		if i < collection.Len() {
+			elem = collection.Index(i)
+		} else {
+			// Preserve fixed-array behavior: excess values are ignored after
+			// undergoing the same conversion checks as in-range values.
+			elem = reflect.New(collection.Type().Elem()).Elem()
+		}
+
+		if elem.Kind() == reflect.Pointer {
+			value := reflect.New(elem.Type().Elem())
+			if err := bindValOnElem(value.Elem(), item); err != nil {
+				return err
+			}
+			if i < collection.Len() {
+				elem.Set(value)
+			}
+		} else if err := bindValOnElem(elem, item); err != nil {
 			return err
 		}
-		field.Set(v)
-		return nil
 	}
+
+	if field.Kind() == reflect.Slice {
+		field.Set(collection)
+	}
+	return nil
 }
 
 // decodeRawJSONField binds raw JSON bytes into a field, supporting json.RawMessage
 // and other types implementing json.Unmarshaler.
-func (j *JSONBodyParser) decodeRawJSONField(field *reflect.Value, raw []byte) error {
+func (j *JSONBodyParser) decodeRawJSONField(field reflect.Value, raw []byte) error {
 	// Try json.Unmarshaler on the addressable value (covers non-pointer json.RawMessage)
 	if field.CanAddr() {
 		if u, ok := field.Addr().Interface().(json.Unmarshaler); ok {
@@ -793,9 +863,10 @@ func requestCompiledField(parent reflect.Value, index []int) reflect.Value {
 	return parent.FieldByIndex(index)
 }
 
-func (j *JSONBodyParser) getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *RuleDef) RequestOptions {
+func (j *JSONBodyParser) getFieldOptions(opts jsonRequestOptions, fieldStruct reflect.Value, fieldRule *RuleDef) jsonRequestOptions {
 	rtn := opts
 	rtn.Body = fieldStruct
+	rtn.HasBody = fieldStruct.IsValid()
 	rtn.SchemaRules = fieldRule
 	return rtn
 }

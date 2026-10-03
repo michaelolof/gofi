@@ -3470,3 +3470,59 @@ func TestValidateOnly_NonPrimitiveCollections(t *testing.T) {
 		assert.Contains(t, string(response.Body), "items.0.name")
 	})
 }
+
+func TestJSONBinding_WalkerPathStackPreservesErrorPaths(t *testing.T) {
+	t.Run("nested array indexes", func(t *testing.T) {
+		type item struct {
+			Value string `json:"value" validate:"required"`
+		}
+		type group struct {
+			Items []item `json:"items" validate:"required"`
+		}
+		type schema struct {
+			Request struct {
+				Body struct {
+					Groups []group `json:"groups" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		_, err := bindExactSliceSizingSchema[schema](t, `{"groups":[{"items":[{"value":"ok"}]},{"items":[{}]}]}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "groups.1.items.0.value")
+	})
+
+	t.Run("map keys", func(t *testing.T) {
+		type entry struct {
+			Value string `json:"value" validate:"required"`
+		}
+		type schema struct {
+			Request struct {
+				Body struct {
+					Entries map[string]entry `json:"entries" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		_, err := bindExactSliceSizingSchema[schema](t, `{"entries":{"alpha":{}}}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "entries.alpha.value")
+	})
+}
+
+func TestJSONBinding_FixedArrayExcessItemsRemainValidated(t *testing.T) {
+	type item struct {
+		Name string `json:"name" validate:"required"`
+	}
+	type schema struct {
+		Request struct {
+			Body struct {
+				Items [1]item `json:"items" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	_, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{}]}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "items.1.name")
+}
