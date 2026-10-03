@@ -85,7 +85,10 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		}
 
 		if opts.ShouldBind && opts.Body != nil {
-			sf := opts.Body.FieldByName(string(schemaBody))
+			if len(opts.SchemaRules.accessor.index) > 1 && !requestFieldParentsReady(*opts.Body, opts.SchemaRules.accessor.index) {
+				return newErrReport(RequestErr, schemaBody, "", "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", opts.SchemaRules.accessor.index))
+			}
+			sf := requestCompiledField(*opts.Body, opts.SchemaRules.accessor.index)
 			switch sf.Kind() {
 			case reflect.Pointer:
 				sfp := reflect.New(sf.Type().Elem())
@@ -109,7 +112,10 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 
 	var bodyStruct reflect.Value
 	if opts.ShouldBind && opts.Body != nil {
-		bodyStruct = j.getFieldStruct(*opts.Body, schemaBody.String())
+		if len(opts.SchemaRules.accessor.index) > 1 && !requestFieldParentsReady(*opts.Body, opts.SchemaRules.accessor.index) {
+			return newErrReport(RequestErr, schemaBody, "", "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", opts.SchemaRules.accessor.index))
+		}
+		bodyStruct = requestCompiledField(*opts.Body, opts.SchemaRules.accessor.index)
 	}
 
 	strctOpts := j.getFieldOptions(opts, &bodyStruct, opts.SchemaRules)
@@ -284,12 +290,18 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		// Fast path: use pre-ordered props slice when available
 		if len(opts.SchemaRules.orderedProps) > 0 {
 			for _, childDef := range opts.SchemaRules.orderedProps {
+				childNode := node.Get(childDef.field)
 				var childStruct reflect.Value
 				if opts.ShouldBind && opts.Body != nil {
-					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
+					indexNeedsValue := len(childDef.accessor.index) > 1
+					if !indexNeedsValue || childNode != nil || childDef.defVal != nil {
+						if indexNeedsValue && !requestFieldParentsReady(*opts.Body, childDef.accessor.index) {
+							return nil, newErrReport(RequestErr, schemaField, strings.Join(append(keys, childDef.field), "."), "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
+						}
+						childStruct = requestCompiledField(*opts.Body, childDef.accessor.index)
+					}
 				}
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				childNode := node.Get(childDef.field)
 				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, childDef.field))
 				if err != nil {
 					return nil, err
@@ -311,12 +323,18 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 				if !ok {
 					continue
 				}
+				childNode := node.Get(name)
 				var childStruct reflect.Value
 				if opts.ShouldBind && opts.Body != nil {
-					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
+					indexNeedsValue := len(childDef.accessor.index) > 1
+					if !indexNeedsValue || childNode != nil || childDef.defVal != nil {
+						if indexNeedsValue && !requestFieldParentsReady(*opts.Body, childDef.accessor.index) {
+							return nil, newErrReport(RequestErr, schemaField, strings.Join(append(keys, name), "."), "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
+						}
+						childStruct = requestCompiledField(*opts.Body, childDef.accessor.index)
+					}
 				}
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				childNode := node.Get(name)
 				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, name))
 				if err != nil {
 					return nil, err
@@ -324,12 +342,18 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			}
 		} else {
 			for childKey, childDef := range opts.SchemaRules.properties {
+				childNode := node.Get(childKey)
 				var childStruct reflect.Value
 				if opts.ShouldBind && opts.Body != nil {
-					childStruct = j.getFieldStruct(*opts.Body, childDef.fieldName)
+					indexNeedsValue := len(childDef.accessor.index) > 1
+					if !indexNeedsValue || childNode != nil || childDef.defVal != nil {
+						if indexNeedsValue && !requestFieldParentsReady(*opts.Body, childDef.accessor.index) {
+							return nil, newErrReport(RequestErr, schemaField, strings.Join(append(keys, childKey), "."), "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", childDef.accessor.index))
+						}
+						childStruct = requestCompiledField(*opts.Body, childDef.accessor.index)
+					}
 				}
 				childOpts := j.getFieldOptions(opts, &childStruct, childDef)
-				childNode := node.Get(childKey)
 				_, err := j.walkStruct(childNode, schemaBody, childOpts, append(keys, childKey))
 				if err != nil {
 					return nil, err
@@ -691,14 +715,82 @@ func parseTime(s string, layout string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-func (j *JSONBodyParser) getFieldStruct(strct reflect.Value, fieldname string) reflect.Value {
-	if strct.Kind() == reflect.Pointer {
-		strct = strct.Elem()
+// requestFieldByIndex resolves a compiled struct-field index without repeating
+// a name lookup for every request. FieldByIndexErr safely traverses initialized
+// embedded pointers and reports nil parents instead of panicking.
+func requestFieldByIndex(parent reflect.Value, index []int) (reflect.Value, error) {
+	if !parent.IsValid() {
+		return reflect.Value{}, errors.New("cannot access a field on an invalid value")
 	}
-	if strct.Kind() != reflect.Struct {
-		return reflect.Value{}
+	if len(index) == 0 {
+		return reflect.Value{}, errors.New("compiled field index is empty")
 	}
-	return strct.FieldByName(fieldname)
+
+	for parent.Kind() == reflect.Pointer {
+		if parent.IsNil() {
+			return reflect.Value{}, fmt.Errorf("field index %v traverses a nil parent", index)
+		}
+		parent = parent.Elem()
+	}
+	if parent.Kind() != reflect.Struct {
+		return reflect.Value{}, fmt.Errorf("field index %v traverses non-struct %s", index, parent.Kind())
+	}
+	currentType := parent.Type()
+	for position, fieldIndex := range index {
+		for currentType.Kind() == reflect.Pointer {
+			currentType = currentType.Elem()
+		}
+		if currentType.Kind() != reflect.Struct || fieldIndex < 0 || fieldIndex >= currentType.NumField() {
+			return reflect.Value{}, fmt.Errorf("field index %v is invalid at position %d", index, position)
+		}
+		currentType = currentType.Field(fieldIndex).Type
+	}
+
+	current, err := parent.FieldByIndexErr(index)
+	if err != nil {
+		return reflect.Value{}, fmt.Errorf("invalid compiled field index %v: %w", index, err)
+	}
+
+	if !current.CanSet() {
+		return reflect.Value{}, fmt.Errorf("field index %v is not settable", index)
+	}
+	return current, nil
+}
+
+func requestFieldParentsReady(parent reflect.Value, index []int) bool {
+	if !parent.IsValid() || len(index) == 0 {
+		return false
+	}
+	for parent.Kind() == reflect.Pointer {
+		if parent.IsNil() {
+			return false
+		}
+		parent = parent.Elem()
+	}
+	if parent.Kind() != reflect.Struct {
+		return false
+	}
+	for _, fieldIndex := range index[:len(index)-1] {
+		if parent.Kind() != reflect.Struct || fieldIndex < 0 || fieldIndex >= parent.NumField() {
+			return false
+		}
+		parent = parent.Field(fieldIndex)
+		if parent.Kind() == reflect.Pointer {
+			if parent.IsNil() {
+				return false
+			}
+			parent = parent.Elem()
+		}
+	}
+	last := index[len(index)-1]
+	return parent.Kind() == reflect.Struct && last >= 0 && last < parent.NumField()
+}
+
+func requestCompiledField(parent reflect.Value, index []int) reflect.Value {
+	if parent.Kind() == reflect.Pointer {
+		parent = parent.Elem()
+	}
+	return parent.FieldByIndex(index)
 }
 
 func (j *JSONBodyParser) getFieldOptions(opts RequestOptions, fieldStruct *reflect.Value, fieldRule *RuleDef) RequestOptions {
@@ -837,7 +929,9 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 				if len(frules.jsonKeyBytes) > 0 {
 					buf.Write(frules.jsonKeyBytes)
 				} else {
-					buf.WriteString(`"` + frules.field + `":`)
+					buf.WriteByte('"')
+					buf.WriteString(frules.field)
+					buf.WriteString(`":`)
 				}
 
 				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, frules.field)); err != nil {
@@ -868,7 +962,9 @@ func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, va
 				}
 				first = false
 
-				buf.WriteString(`"` + name + `":`)
+				buf.WriteByte('"')
+				buf.WriteString(name)
+				buf.WriteString(`":`)
 				fieldValue := val.FieldByName(field.Name)
 				if err := j.encodeFieldValue(c, buf, fieldValue, nil, append(kp, name)); err != nil {
 					return err

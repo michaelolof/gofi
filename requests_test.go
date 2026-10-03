@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1757,6 +1758,151 @@ func TestEmbeddedStruct_BodyBinding(t *testing.T) {
 		Handler: &handler,
 	})
 	assert.Nil(t, err)
+}
+
+func TestJSONBinding_CompiledFieldIndexes(t *testing.T) {
+	type PromotedFields struct {
+		Promoted string `json:"promoted" validate:"required"`
+	}
+	type nestedFields struct {
+		Count int `json:"count" validate:"required"`
+	}
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Flat    string       `json:"flat" validate:"required"`
+				Renamed string       `json:"renamed_value" validate:"required"`
+				Ignored string       `json:"-"`
+				Nested  nestedFields `json:"nested" validate:"required"`
+				PromotedFields
+				Optional *string `json:"optional"`
+			} `validate:"required"`
+		}
+	}
+
+	t.Run("binds flat nested promoted renamed and optional fields", func(t *testing.T) {
+		handler := RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				bound, err := ValidateAndBind[testSchema](c)
+				require.NoError(t, err)
+				require.NotNil(t, bound)
+				assert.Equal(t, "flat-value", bound.Request.Body.Flat)
+				assert.Equal(t, "renamed-value", bound.Request.Body.Renamed)
+				assert.Empty(t, bound.Request.Body.Ignored)
+				assert.Equal(t, 7, bound.Request.Body.Nested.Count)
+				assert.Equal(t, "embedded-value", bound.Request.Body.Promoted)
+				require.NotNil(t, bound.Request.Body.Optional)
+				assert.Equal(t, "optional-value", *bound.Request.Body.Optional)
+				return nil
+			},
+		}
+
+		_, err := NewRouter().Inject(InjectOptions{
+			Method: "POST",
+			Path:   "/indexed-fields",
+			Body: strings.NewReader(`{
+				"flat":"flat-value",
+				"renamed_value":"renamed-value",
+				"Ignored":"must-not-bind",
+				"nested":{"count":7},
+				"promoted":"embedded-value",
+				"optional":"optional-value"
+			}`),
+			Handler: &handler,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("keeps absent optional embedded pointers nil", func(t *testing.T) {
+		type OptionalPromotedFields struct {
+			Value string `json:"optional_promoted"`
+		}
+		type optionalEmbeddedSchema struct {
+			Request struct {
+				Body struct {
+					*OptionalPromotedFields
+				} `validate:"required"`
+			}
+		}
+
+		handler := RouteOptions{
+			Schema: &optionalEmbeddedSchema{},
+			Handler: func(c Context) error {
+				bound, err := ValidateAndBind[optionalEmbeddedSchema](c)
+				require.NoError(t, err)
+				require.NotNil(t, bound)
+				assert.Nil(t, bound.Request.Body.OptionalPromotedFields)
+				return nil
+			},
+		}
+
+		_, err := NewRouter().Inject(InjectOptions{
+			Method:  "POST",
+			Path:    "/indexed-fields-optional",
+			Body:    strings.NewReader(`{}`),
+			Handler: &handler,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("returns a controlled error for a nil embedded pointer", func(t *testing.T) {
+		type PointerPromotedFields struct {
+			Value string `json:"pointer_promoted"`
+		}
+		type pointerEmbeddedSchema struct {
+			Request struct {
+				Body struct {
+					*PointerPromotedFields
+				} `validate:"required"`
+			}
+		}
+
+		var bindingErr error
+		handler := RouteOptions{
+			Schema: &pointerEmbeddedSchema{},
+			Handler: func(c Context) error {
+				_, bindingErr = ValidateAndBind[pointerEmbeddedSchema](c)
+				return nil
+			},
+		}
+
+		_, err := NewRouter().Inject(InjectOptions{
+			Method:  "POST",
+			Path:    "/indexed-fields-nil-embedded",
+			Body:    strings.NewReader(`{"pointer_promoted":"value"}`),
+			Handler: &handler,
+		})
+		require.NoError(t, err)
+		require.Error(t, bindingErr)
+		assert.Contains(t, bindingErr.Error(), "nil or invalid parent")
+	})
+}
+
+func TestRequestFieldByIndex_InvalidPathReturnsError(t *testing.T) {
+	type target struct {
+		Value string
+	}
+
+	value := reflect.ValueOf(&target{}).Elem()
+	field, err := requestFieldByIndex(value, []int{1})
+	assert.Error(t, err)
+	assert.False(t, field.IsValid())
+}
+
+func TestRequestFieldByIndex_InitializedPointerEmbed(t *testing.T) {
+	type embedded struct {
+		Value string
+	}
+	type target struct {
+		*embedded
+	}
+
+	value := reflect.ValueOf(&target{embedded: &embedded{}}).Elem()
+	field, err := requestFieldByIndex(value, []int{0, 0})
+	require.NoError(t, err)
+	field.SetString("bound")
+	assert.Equal(t, "bound", value.Interface().(target).Value)
 }
 
 // =============================================================================
