@@ -178,6 +178,24 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		walkOpts.HasBody = true
 	}
 
+	// Schemas identified as a common, safe shape at registration time can bind
+	// directly from fastjson nodes without the generic walker's interface
+	// conversions and per-node feature checks. A mismatch falls back to the
+	// generic walker so supported values and errors remain unchanged.
+	jsonBindMaxDepth := requestJSONBindMaxDepth(opts.Context)
+	if walkOpts.ShouldBind && walkOpts.HasBody && jsonBindMaxDepth > 0 {
+		maxDepth := j.MaxDepth
+		if maxDepth == 0 {
+			maxDepth = 100
+		}
+		if int(jsonBindMaxDepth) <= maxDepth {
+			if bindCompiledJSONNode(opts.SchemaRules, pv, walkOpts.Body) {
+				return nil
+			}
+			walkOpts.Body.SetZero()
+		}
+	}
+
 	path := requestPath{segments: make([]requestPathSegment, 0, 8)}
 	status, err := j.walkStruct(pv, schemaBody, walkOpts, &path)
 	if err != nil {

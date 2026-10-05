@@ -219,6 +219,8 @@ type schemaRules struct {
 	websocket  *compiledWebSocketContract
 	schemaPool *sync.Pool
 	schemaType reflect.Type
+
+	jsonBindMaxDepth uint8
 }
 
 func newSchemaRules(typ reflect.Type) schemaRules {

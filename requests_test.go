@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"reflect"
@@ -3525,4 +3526,110 @@ func TestJSONBinding_FixedArrayExcessItemsRemainValidated(t *testing.T) {
 	_, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{}]}`)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "items.1.name")
+}
+
+type compiledJSONBindMetric struct {
+	CPU    float64 `json:"cpu"`
+	Active bool    `json:"active"`
+}
+
+type compiledJSONBindEvent struct {
+	At      time.Time              `json:"at"`
+	Tags    []string               `json:"tags"`
+	Metrics compiledJSONBindMetric `json:"metrics"`
+}
+
+type compiledJSONBindRecord struct {
+	ID       string                  `json:"id"`
+	Count    int                     `json:"count"`
+	Events   []compiledJSONBindEvent `json:"events"`
+	Metadata map[string]string       `json:"metadata"`
+}
+
+type compiledJSONBindSchema struct {
+	Request struct {
+		Body []compiledJSONBindRecord
+	}
+}
+
+func decodeCompiledJSONBindSchema(t *testing.T, payload string, fast bool) (*compiledJSONBindSchema, error) {
+	t.Helper()
+
+	router := newRouter()
+	compiled := router.compileSchema(&compiledJSONBindSchema{}, Info{})
+	rules := compiled.rules.getReqRules(schemaBody)
+	require.NotNil(t, rules)
+
+	bound := new(compiledJSONBindSchema)
+	request := reflect.ValueOf(bound).Elem().FieldByName(string(schemaReq))
+	compiledRules := compiled.rules
+	if fast {
+		require.Positive(t, compiledRules.jsonBindMaxDepth)
+	} else {
+		compiledRules.jsonBindMaxDepth = 0
+	}
+	ctx := &context{
+		serverOpts: defaultMuxOptions(),
+		opts:       newContextOptions("/compiled-json-bind", "POST"),
+	}
+	ctx.serverOpts.schemaRules.SetRules("/compiled-json-bind", "POST", &compiledRules)
+	err := (&JSONBodyParser{}).ValidateAndDecodeRequest(io.NopCloser(strings.NewReader(payload)), RequestOptions{
+		SchemaRules: rules,
+		ShouldBind:  true,
+		Context:     &parserContext{c: ctx},
+		SchemaPtr:   bound,
+		Body:        &request,
+	})
+	return bound, err
+}
+
+func TestJSONBinding_CompiledSliceOfStructsMatchesGenericWalker(t *testing.T) {
+	validPayload := `[{"id":"one","count":3,"events":[{"at":"2026-10-03T12:00:00.123456789Z","tags":["a","b"],"metrics":{"cpu":45.2,"active":true}}],"metadata":{"source":"web"}}]`
+
+	fastBound, fastErr := decodeCompiledJSONBindSchema(t, validPayload, true)
+	genericBound, genericErr := decodeCompiledJSONBindSchema(t, validPayload, false)
+	require.NoError(t, fastErr)
+	require.NoError(t, genericErr)
+	assert.Equal(t, genericBound, fastBound)
+
+	invalidPayload := `[{"id":"one","count":"not-a-number","events":[],"metadata":{}}]`
+	_, fastErr = decodeCompiledJSONBindSchema(t, invalidPayload, true)
+	_, genericErr = decodeCompiledJSONBindSchema(t, invalidPayload, false)
+	require.Error(t, fastErr)
+	require.Error(t, genericErr)
+	assert.Equal(t, genericErr.Error(), fastErr.Error())
+}
+
+func TestJSONBinding_CompiledPathKeepsComplexSchemasOnGenericWalker(t *testing.T) {
+	t.Run("validation rules", func(t *testing.T) {
+		type record struct {
+			ID string `json:"id" validate:"required"`
+		}
+		type schema struct {
+			Request struct {
+				Body []record
+			}
+		}
+
+		compiled := newRouter().compileSchema(&schema{}, Info{})
+		rules := compiled.rules.getReqRules(schemaBody)
+		require.NotNil(t, rules)
+		assert.Zero(t, compiled.rules.jsonBindMaxDepth)
+	})
+
+	t.Run("pointer fields", func(t *testing.T) {
+		type record struct {
+			ID *string `json:"id"`
+		}
+		type schema struct {
+			Request struct {
+				Body []record
+			}
+		}
+
+		compiled := newRouter().compileSchema(&schema{}, Info{})
+		rules := compiled.rules.getReqRules(schemaBody)
+		require.NotNil(t, rules)
+		assert.Zero(t, compiled.rules.jsonBindMaxDepth)
+	})
 }
