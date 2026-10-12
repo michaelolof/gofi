@@ -274,9 +274,22 @@ func (n *node) insertChild(path, fullPath string, data *routeData) {
 	n.data = data
 }
 
+const maxSkippedNodes = 8
+
+type skippedNode struct {
+	node      *node
+	pathLen   int
+	paramsLen int
+}
+
 // getValue returns the routeData registered with the given path (key). The values of
 // wildcards are saved to a slice.
 func (n *node) getValue(path string, params func() *Params) (data *routeData, tsr bool) {
+	startNode := n
+	fullPath := path
+	appended := 0
+	ambiguous := false
+
 walk:
 	for {
 		prefix := n.path
@@ -289,6 +302,9 @@ walk:
 				// 1. Try static children first.
 				for i, max := 0, len(n.indices); i < max; i++ {
 					if c == n.indices[i] {
+						if n.wildChild != nil {
+							ambiguous = true
+						}
 						n = n.children[i]
 						continue walk
 					}
@@ -310,6 +326,7 @@ walk:
 								Key:   n.path[1:],
 								Value: path[:end],
 							})
+							appended++
 						}
 
 						if end < len(path) {
@@ -319,7 +336,7 @@ walk:
 								continue walk
 							}
 							tsr = (len(path) == end+1)
-							return
+							goto miss
 						}
 
 						if data = n.data; data != nil {
@@ -329,7 +346,7 @@ walk:
 							tsr = (n.path == "/" && n.data != nil)
 						}
 
-						return
+						goto miss
 
 					case catchAll:
 						// catchAll is a two-node structure: first node (empty path,
@@ -355,7 +372,7 @@ walk:
 
 				// Nothing found.
 				tsr = (path == "/" && n.data != nil)
-				return
+				goto miss
 			}
 		} else if path == prefix {
 			// We should have reached the node containing the handle.
@@ -369,7 +386,7 @@ walk:
 			// additional trailing slash
 			if path == "/" && n.wildChild != nil && n.nType != root {
 				tsr = true
-				return
+				goto miss
 			}
 
 			// No handle found. Check if a handle for this path + a
@@ -379,11 +396,11 @@ walk:
 					n = n.children[i]
 					tsr = (len(n.path) == 1 && n.data != nil) ||
 						(n.nType == catchAll && n.children[0].data != nil)
-					return
+					goto miss
 				}
 			}
 
-			return
+			goto miss
 		}
 
 		// Nothing found. We can recommend to redirect to the same URL with an
@@ -391,7 +408,173 @@ walk:
 		tsr = (path == "/") ||
 			(len(prefix) == len(path)+1 && prefix[len(path)] == '/' &&
 				path == prefix[:len(prefix)-1] && n.data != nil)
-		return
+		goto miss
+	}
+
+miss:
+	if !ambiguous {
+		return nil, tsr
+	}
+	if params != nil && appended > 0 {
+		p := params()
+		*p = (*p)[:len(*p)-appended]
+	}
+
+	data, retryTSR := startNode.getValueBacktracking(fullPath, params)
+	if data != nil {
+		return data, false
+	}
+	return nil, tsr || retryTSR
+}
+
+// getValueBacktracking repeats lookup only after the fast path passed over a
+// wildcard sibling and then missed. It keeps a small fixed stack of fallback
+// points so ordinary lookups do not pay to zero that storage.
+func (n *node) getValueBacktracking(fullPath string, params func() *Params) (data *routeData, tsr bool) {
+	var skipped [maxSkippedNodes]skippedNode
+	skippedLen := 0
+	path := fullPath
+	bestTSR := false
+	tryWildcard := false
+
+	var ps *Params
+	baseParamsLen := 0
+	if params != nil {
+		ps = params()
+		baseParamsLen = len(*ps)
+	}
+
+walk:
+	for {
+		prefix := n.path
+		if tryWildcard {
+			tryWildcard = false
+			switch n.nType {
+			case param:
+				end := 0
+				for end < len(path) && path[end] != '/' {
+					end++
+				}
+
+				if ps != nil {
+					*ps = append(*ps, Param{
+						Key:   n.path[1:],
+						Value: path[:end],
+					})
+				}
+
+				if end < len(path) {
+					if len(n.children) > 0 {
+						path = path[end:]
+						n = n.children[0]
+						continue walk
+					}
+					bestTSR = bestTSR || len(path) == end+1
+					goto miss
+				}
+
+				if data = n.data; data != nil {
+					return data, false
+				}
+				if len(n.children) == 1 {
+					n = n.children[0]
+					bestTSR = bestTSR || (n.path == "/" && n.data != nil)
+				}
+				goto miss
+
+			case catchAll:
+				if len(n.children) > 0 {
+					n = n.children[0]
+				}
+				if ps != nil {
+					*ps = append(*ps, Param{
+						Key:   n.path[2:],
+						Value: path[1:],
+					})
+				}
+				return n.data, false
+
+			default:
+				panic("invalid node type")
+			}
+		}
+
+		if len(path) > len(prefix) {
+			if path[:len(prefix)] == prefix {
+				path = path[len(prefix):]
+
+				c := path[0]
+				for i, max := 0, len(n.indices); i < max; i++ {
+					if c == n.indices[i] {
+						if n.wildChild != nil && skippedLen < maxSkippedNodes {
+							paramsLen := 0
+							if ps != nil {
+								paramsLen = len(*ps)
+							}
+							skipped[skippedLen] = skippedNode{
+								node:      n,
+								pathLen:   len(path),
+								paramsLen: paramsLen,
+							}
+							skippedLen++
+						}
+						n = n.children[i]
+						continue walk
+					}
+				}
+
+				if n.wildChild == nil {
+					bestTSR = bestTSR || (path == "/" && n.data != nil)
+					goto miss
+				}
+				n = n.wildChild
+				tryWildcard = true
+				continue walk
+			}
+		} else if path == prefix {
+			if data = n.data; data != nil {
+				return data, false
+			}
+
+			if path == "/" && n.wildChild != nil && n.nType != root {
+				bestTSR = true
+				goto miss
+			}
+
+			for i, max := 0, len(n.indices); i < max; i++ {
+				if n.indices[i] == '/' {
+					child := n.children[i]
+					bestTSR = bestTSR ||
+						(len(child.path) == 1 && child.data != nil) ||
+						(child.nType == catchAll && child.children[0].data != nil)
+					goto miss
+				}
+			}
+			goto miss
+		}
+
+		bestTSR = bestTSR ||
+			path == "/" ||
+			(len(prefix) == len(path)+1 && prefix[len(path)] == '/' &&
+				path == prefix[:len(prefix)-1] && n.data != nil)
+
+	miss:
+		if skippedLen == 0 {
+			if ps != nil {
+				*ps = (*ps)[:baseParamsLen]
+			}
+			return nil, bestTSR
+		}
+
+		skippedLen--
+		checkpoint := skipped[skippedLen]
+		if ps != nil {
+			*ps = (*ps)[:checkpoint.paramsLen]
+		}
+		n = checkpoint.node.wildChild
+		path = fullPath[len(fullPath)-checkpoint.pathLen:]
+		tryWildcard = true
+		continue walk
 	}
 }
 

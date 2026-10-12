@@ -24,6 +24,11 @@ When multiple patterns could match a request path, Gofi uses the following prior
 2. **Named parameter** (`:name`) — matched only when no static child matches.
 3. **Catch-all** (`*name`) — matched at the end of the path after all other options are exhausted.
 
+Priority is based on a successful **complete route match**, not only the next
+byte. Gofi tries a matching static branch first. If that branch later
+dead-ends, lookup returns to the same segment boundary and tries the named
+parameter sibling.
+
 ### Example
 
 Given these registered routes:
@@ -57,7 +62,22 @@ r.Get("/matches/:id",  detailHandler)
 r.Get("/matches/live", liveHandler)
 ```
 
-The static segment always wins when it is an exact match. Requests for `/matches/live` are served by `liveHandler`; all other `/matches/<value>` requests reach `detailHandler`.
+The static segment always wins when it is an exact match. Requests for
+`/matches/live` are served by `liveHandler`; all other
+`/matches/<value>` requests reach `detailHandler`.
+
+This includes values that begin with the same byte or prefix as the static
+route:
+
+| Request | Result |
+|---|---|
+| `/matches/live` | exact static route |
+| `/matches/l` | parameter route with `id=l` |
+| `/matches/liverpool` | parameter route with `id=liverpool` |
+
+Lookup initially considers the static `live` branch for the last two
+requests, then falls back to `:id` when the complete static path does not
+match. Registration order does not affect the result.
 
 ---
 
@@ -77,6 +97,11 @@ GET /users?page=2  →  301 Location: /users/?page=2
 ```
 
 TSR can be suppressed by registering the canonicalised form explicitly (i.e., registering both `/users` and `/users/`).
+
+A redirect recommendation is weaker than a real route match. For example, if
+`/x/static/` and `/x/:id` are registered, `/x/static` reaches the
+parameter route with `id=static` instead of redirecting to `/x/static/`.
+Gofi redirects only after every eligible real route has failed.
 
 ---
 
@@ -134,6 +159,11 @@ r.Configure(gofi.Config{MethodNotAllowed: false})
 r.Get("/users", listHandler)
 // POST /users → 405 Allow: GET
 ```
+
+Correct same-method wildcard fallback runs before this cross-method check. A
+request that previously returned an incorrect 404 or 405 because a static
+branch dead-ended may now reach its registered parameter handler. A genuine
+method mismatch still returns 405.
 
 ---
 

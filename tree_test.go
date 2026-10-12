@@ -129,11 +129,10 @@ func treeMatchCases(t *testing.T, tree *node, cases map[string]string) {
 	}
 }
 
-// --- Phase 1 failing tests: static-vs-param coexistence (Issues #1 and #2) ---
+// --- Static-vs-param coexistence regression tests ---
 
 // TestTree_StaticAndParamSiblings_StaticThenParam registers a static route
 // before a param route at the same level and asserts correct dispatch for both.
-// Currently FAILS — static child is silently overwritten by the param (Issue #1).
 func TestTree_StaticAndParamSiblings_StaticThenParam(t *testing.T) {
 	tree := &node{}
 	tree.addRoute("/matches/live", &routeData{meta: "live"})
@@ -156,7 +155,6 @@ func TestTree_StaticAndParamSiblings_StaticThenParam(t *testing.T) {
 
 // TestTree_StaticAndParamSiblings_ParamThenStatic registers a param route before
 // a static route at the same level and asserts both routes work without panicking.
-// Currently FAILS — panics with "conflicts with existing wildcard" (Issue #2).
 func TestTree_StaticAndParamSiblings_ParamThenStatic(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -177,7 +175,6 @@ func TestTree_StaticAndParamSiblings_ParamThenStatic(t *testing.T) {
 
 // TestTree_MultipleStaticVsParam verifies that multiple static siblings alongside
 // a param route all dispatch correctly regardless of registration order.
-// Currently FAILS — same root cause as Issue #1.
 func TestTree_MultipleStaticVsParam(t *testing.T) {
 	t.Run("StaticFirst", func(t *testing.T) {
 		tree := &node{}
@@ -215,7 +212,6 @@ func TestTree_MultipleStaticVsParam(t *testing.T) {
 
 // TestTree_StaticAndParam_TSR verifies that trailing-slash redirect recommendations
 // (TSR) work correctly when static and param siblings coexist.
-// Currently FAILS — tree state is invalid due to Issue #1.
 func TestTree_StaticAndParam_TSR(t *testing.T) {
 	// :id/ (param with trailing slash) alongside a static /live (no trailing slash).
 	tree := &node{}
@@ -247,7 +243,6 @@ func TestTree_StaticAndParam_TSR(t *testing.T) {
 
 // TestTree_NestedStaticAndParam verifies that static and param siblings coexist
 // correctly at non-root nesting levels.
-// Currently FAILS — same root cause as Issue #1.
 func TestTree_NestedStaticAndParam(t *testing.T) {
 	tree := &node{}
 	tree.addRoute("/api/v1/users/me/posts", &routeData{meta: "my-posts"})
@@ -258,6 +253,268 @@ func TestTree_NestedStaticAndParam(t *testing.T) {
 		"/api/v1/users/gordon/posts": "user-posts",
 		"/api/v1/users/123/posts":    "user-posts",
 	})
+}
+
+func assertTreeLookup(t *testing.T, tree *node, path, wantMeta string, wantTSR bool, wantParams Params) {
+	t.Helper()
+	ps := make(Params, 0, tree.maxParams)
+	data, tsr := tree.getValue(path, func() *Params { return &ps })
+
+	if wantMeta == "" {
+		if data != nil {
+			t.Fatalf("path %q: expected no route, got %q", path, data.meta)
+		}
+	} else {
+		if data == nil {
+			t.Fatalf("path %q: expected route %q, got nil", path, wantMeta)
+		}
+		if got := data.meta.(string); got != wantMeta {
+			t.Fatalf("path %q: got route %q, want %q", path, got, wantMeta)
+		}
+	}
+	if tsr != wantTSR {
+		t.Fatalf("path %q: got TSR %v, want %v", path, tsr, wantTSR)
+	}
+	if len(ps) != len(wantParams) {
+		t.Fatalf("path %q: got params %#v, want %#v", path, ps, wantParams)
+	}
+	for i := range wantParams {
+		if ps[i] != wantParams[i] {
+			t.Fatalf("path %q: got params %#v, want %#v", path, ps, wantParams)
+		}
+	}
+}
+
+func TestTree_StaticDeadEndFallsBackToParam(t *testing.T) {
+	orders := []struct {
+		name   string
+		routes []struct {
+			path string
+			meta string
+		}
+	}{
+		{
+			name: "static-first",
+			routes: []struct {
+				path string
+				meta string
+			}{
+				{path: "/users/me", meta: "static"},
+				{path: "/users/:id", meta: "param"},
+			},
+		},
+		{
+			name: "param-first",
+			routes: []struct {
+				path string
+				meta string
+			}{
+				{path: "/users/:id", meta: "param"},
+				{path: "/users/me", meta: "static"},
+			},
+		},
+	}
+
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			tree := &node{}
+			for _, route := range order.routes {
+				tree.addRoute(route.path, &routeData{meta: route.meta})
+			}
+
+			assertTreeLookup(t, tree, "/users/me", "static", false, nil)
+			assertTreeLookup(t, tree, "/users/mike", "param", false, Params{{Key: "id", Value: "mike"}})
+			assertTreeLookup(t, tree, "/users/m", "param", false, Params{{Key: "id", Value: "m"}})
+			assertTreeLookup(t, tree, "/users/123", "param", false, Params{{Key: "id", Value: "123"}})
+		})
+	}
+}
+
+func TestTree_StaticDeadEndAfterLongerCommonPrefixFallsBack(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/users/metrics", &routeData{meta: "metrics"})
+	tree.addRoute("/users/:id", &routeData{meta: "param"})
+
+	assertTreeLookup(t, tree, "/users/metric-x", "param", false, Params{{Key: "id", Value: "metric-x"}})
+}
+
+func TestTree_NestedStaticDeadEndBacktracks(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/users/:id/posts/latest", &routeData{meta: "latest"})
+	tree.addRoute("/users/:id/posts/:post", &routeData{meta: "post"})
+
+	assertTreeLookup(t, tree, "/users/mike/posts/latest", "latest", false, Params{{Key: "id", Value: "mike"}})
+	assertTreeLookup(t, tree, "/users/mike/posts/lunch", "post", false, Params{
+		{Key: "id", Value: "mike"},
+		{Key: "post", Value: "lunch"},
+	})
+}
+
+func TestTree_BacktracksAcrossMultipleAmbiguousNodes(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/a/foo/bar/static", &routeData{meta: "deep-static"})
+	tree.addRoute("/a/foo/:second/end", &routeData{meta: "inner-param"})
+	tree.addRoute("/a/:first/bar/else", &routeData{meta: "outer-param"})
+
+	assertTreeLookup(t, tree, "/a/foo/bar/else", "outer-param", false, Params{
+		{Key: "first", Value: "foo"},
+	})
+}
+
+func TestTree_BacktrackingDiscardsAbandonedParams(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/a/foo/:second/static", &routeData{meta: "inner-static"})
+	tree.addRoute("/a/foo/:second/:third/end", &routeData{meta: "inner-param"})
+	tree.addRoute("/a/:first/bar/baz", &routeData{meta: "outer-param"})
+
+	assertTreeLookup(t, tree, "/a/foo/bar/baz", "outer-param", false, Params{
+		{Key: "first", Value: "foo"},
+	})
+}
+
+func TestTree_BacktrackingWithNilParams(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/users/me", &routeData{meta: "static"})
+	tree.addRoute("/users/:id", &routeData{meta: "param"})
+
+	data, tsr := tree.getValue("/users/mike", nil)
+	if data == nil || data.meta.(string) != "param" {
+		t.Fatalf("expected param route with nil params callback, got %#v", data)
+	}
+	if tsr {
+		t.Fatal("real match unexpectedly returned a TSR recommendation")
+	}
+}
+
+func TestTree_BacktrackingTSRPrecedence(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/x/static/", &routeData{meta: "static-slash"})
+	tree.addRoute("/x/:id", &routeData{meta: "param"})
+
+	assertTreeLookup(t, tree, "/x/static", "param", false, Params{{Key: "id", Value: "static"}})
+}
+
+func TestTree_BacktrackingPreservesTSRWhenNoMatch(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/events/exports/", &routeData{meta: "exports-slash"})
+	tree.addRoute("/events/:event/records", &routeData{meta: "records"})
+
+	assertTreeLookup(t, tree, "/events/exports", "", true, nil)
+}
+
+func TestTree_BacktrackingUnicodeValue(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/users/memo", &routeData{meta: "static"})
+	tree.addRoute("/users/:id", &routeData{meta: "param"})
+
+	assertTreeLookup(t, tree, "/users/mé", "param", false, Params{{Key: "id", Value: "mé"}})
+}
+
+func buildAmbiguousDepthTree(depth int, matchingDeepestFallback bool) (*node, string) {
+	tree := &node{}
+	staticParts := make([]string, 0, depth)
+
+	for i := 0; i < depth; i++ {
+		prefix := ""
+		if len(staticParts) > 0 {
+			prefix = "/" + strings.Join(staticParts, "/")
+		}
+		tail := "/never"
+		if matchingDeepestFallback && i == depth-1 {
+			tail = "/stale"
+		}
+		tree.addRoute(prefix+"/:p"+string(rune('a'+i))+tail, &routeData{meta: "fallback"})
+		staticParts = append(staticParts, "s"+string(rune('a'+i)))
+	}
+
+	staticPrefix := "/" + strings.Join(staticParts, "/")
+	tree.addRoute(staticPrefix+"/static", &routeData{meta: "static"})
+	return tree, staticPrefix + "/stale"
+}
+
+func TestTree_BacktrackingEightCheckpoints(t *testing.T) {
+	tree, path := buildAmbiguousDepthTree(maxSkippedNodes, true)
+	assertTreeLookup(t, tree, path, "fallback", false, Params{
+		{Key: "ph", Value: "sh"},
+	})
+}
+
+func TestTree_BacktrackingCheckpointOverflowIsSafe(t *testing.T) {
+	tree, path := buildAmbiguousDepthTree(maxSkippedNodes+1, false)
+	ps := make(Params, 0, tree.maxParams)
+	data, _ := tree.getValue(path, func() *Params { return &ps })
+	if data != nil && data.meta == nil {
+		t.Fatal("overflow-shaped lookup returned corrupt route data")
+	}
+	for _, p := range ps {
+		if p.Key == "" {
+			t.Fatalf("overflow-shaped lookup left corrupt params: %#v", ps)
+		}
+	}
+}
+
+func TestRouter_WildcardBacktrackingStatusAndTSR(t *testing.T) {
+	r := newRouter()
+	r.Get("/users/me", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "static")
+	}})
+	r.Get("/users/:id", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "param:"+c.Param("id"))
+	}})
+	r.Get("/x/static/", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "slash")
+	}})
+	r.Get("/x/:id", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "dynamic:"+c.Param("id"))
+	}})
+
+	tests := []struct {
+		path       string
+		statusCode int
+		body       string
+	}{
+		{path: "/users/me", statusCode: 200, body: "static"},
+		{path: "/users/mike", statusCode: 200, body: "param:mike"},
+		{path: "/x/static", statusCode: 200, body: "dynamic:static"},
+		{path: "/missing", statusCode: 404},
+	}
+
+	for _, test := range tests {
+		resp, err := r.Test(TestOptions{Method: "GET", Path: test.path})
+		if err != nil {
+			t.Fatalf("%s: unexpected request error: %v", test.path, err)
+		}
+		if resp.StatusCode != test.statusCode {
+			t.Fatalf("%s: got status %d, want %d", test.path, resp.StatusCode, test.statusCode)
+		}
+		if test.body != "" && string(resp.Body) != test.body {
+			t.Fatalf("%s: got body %q, want %q", test.path, resp.Body, test.body)
+		}
+	}
+}
+
+func TestRouter_WildcardBacktrackingPrecedesMethodNotAllowed(t *testing.T) {
+	r := newRouter()
+	r.Get("/events/exports/:export", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "export:"+c.Param("export"))
+	}})
+	r.Get("/events/:event", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "event:"+c.Param("event"))
+	}})
+	r.Post("/events/exports", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(201, "created")
+	}})
+
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/events/exports"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("got status %d, want 200", resp.StatusCode)
+	}
+	if got := string(resp.Body); got != "event:exports" {
+		t.Fatalf("got body %q, want %q", got, "event:exports")
+	}
 }
 
 // --- Regression guards: panics that MUST still fire after the fix ---
