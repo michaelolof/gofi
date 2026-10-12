@@ -2,7 +2,6 @@ package gofi
 
 import (
 	"errors"
-	"strings"
 
 	"github.com/michaelolof/gofi/cont"
 )
@@ -309,9 +308,10 @@ func runValidation(val any, typ errorType, schema schemaField, keypath string, r
 	return errors.Join(errs...)
 }
 
-// runValidationLazy is like runValidation but defers building the dot-joined keypath
-// until a failure is detected — zero allocation on the happy path.
-func runValidationLazy(val any, typ errorType, schema schemaField, keys []string, rules []ruleOpts) error {
+// runValidationLazy is like runValidation but defers building the key path
+// until a failure is detected. The JSON walker reuses one path stack across
+// all recursive frames, so successful requests do not allocate path slices.
+func runValidationLazy(val any, typ errorType, schema schemaField, path *requestPath, rules []ruleOpts) error {
 	if len(rules) == 0 {
 		return nil
 	}
@@ -319,7 +319,7 @@ func runValidationLazy(val any, typ errorType, schema schemaField, keys []string
 	var errs []error
 	for _, rule := range rules {
 		if err := rule.dator(val); err != nil {
-			errs = append(errs, newErrReport(typ, schema, strings.Join(keys, "."), rule.rule, err))
+			errs = append(errs, newErrReport(typ, schema, path.String(), rule.rule, err))
 		}
 	}
 

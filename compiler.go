@@ -99,6 +99,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					name := getFieldName(rqf)
 					ruleDefs := s.getFieldRuleDefs(rqf, name, val)
 					optsObj.bodySchema = s.getTypeInfo(rqf.Type, val, name, ruleDefs)
+					ruleDefs.jsonBindMaxDepth = compileJSONBindMaxDepth(ruleDefs)
 					sRules.setReq(sf.Name, ruleDefs)
 				}
 			}
@@ -245,7 +246,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 						allowZero = true
 					}
 
-					if (ruleName == "max" || ruleName == "lte") && len(options) > 1 {
+					if (ruleName == "max" || ruleName == "lte") && len(options) > 0 {
 						flt, err := strconv.ParseFloat(options[0], 64)
 						if err == nil {
 							max = &flt

@@ -3,6 +3,7 @@ package gofi
 import (
 	"bufio"
 	stdcontext "context"
+	"fmt"
 	"net/http"
 	"reflect"
 
@@ -337,7 +338,73 @@ var walkFinished = walkFinishStatus{}
 
 const DEFAULT_ARRAY_SIZE = 50
 
-func bindValOnElem(strct *reflect.Value, val any) error {
+// setConvertedReflectValue uses typed setters for the primitive conversions
+// performed on nearly every JSON field. Uncommon conversions retain the
+// existing SafeConvert fallback and its error behavior.
+func setConvertedReflectValue(dst reflect.Value, val any) error {
+	src := reflect.ValueOf(val)
+	if !src.IsValid() {
+		return fmt.Errorf("cannot convert invalid value to %v", dst.Type())
+	}
+
+	switch dst.Kind() {
+	case reflect.String:
+		if src.Kind() == reflect.String {
+			dst.SetString(src.String())
+			return nil
+		}
+	case reflect.Bool:
+		if src.Kind() == reflect.Bool {
+			dst.SetBool(src.Bool())
+			return nil
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		switch src.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			dst.SetInt(src.Int())
+			return nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			dst.SetInt(int64(src.Uint()))
+			return nil
+		case reflect.Float32, reflect.Float64:
+			dst.SetInt(int64(src.Float()))
+			return nil
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		switch src.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			dst.SetUint(uint64(src.Int()))
+			return nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			dst.SetUint(src.Uint())
+			return nil
+		case reflect.Float32, reflect.Float64:
+			dst.SetUint(uint64(src.Float()))
+			return nil
+		}
+	case reflect.Float32, reflect.Float64:
+		switch src.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			dst.SetFloat(float64(src.Int()))
+			return nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			dst.SetFloat(float64(src.Uint()))
+			return nil
+		case reflect.Float32, reflect.Float64:
+			dst.SetFloat(src.Float())
+			return nil
+		}
+	}
+
+	v, err := utils.SafeConvert(src, dst.Type())
+	if err != nil {
+		return err
+	}
+	dst.Set(v)
+	return nil
+}
+
+func bindValOnElem(strct reflect.Value, val any) error {
 	if val == nil {
 		return nil
 	}
@@ -350,7 +417,7 @@ func bindValOnElem(strct *reflect.Value, val any) error {
 			slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 			for _, item := range v {
 				ssf := reflect.New(istrct).Elem()
-				if err := bindValOnElem(&ssf, item); err != nil {
+				if err := bindValOnElem(ssf, item); err != nil {
 					return err
 				}
 				slice = reflect.Append(slice, ssf)
@@ -368,7 +435,7 @@ func bindValOnElem(strct *reflect.Value, val any) error {
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct.Elem()).Elem()
-					if err := bindValOnElem(&ssf, item); err != nil {
+					if err := bindValOnElem(ssf, item); err != nil {
 						return err
 					}
 					slice = reflect.Append(slice, ssf.Addr())
@@ -380,7 +447,7 @@ func bindValOnElem(strct *reflect.Value, val any) error {
 				slice := reflect.MakeSlice(reflect.SliceOf(istrct), 0, len(v))
 				for _, item := range v {
 					ssf := reflect.New(istrct).Elem()
-					if err := bindValOnElem(&ssf, item); err != nil {
+					if err := bindValOnElem(ssf, item); err != nil {
 						return err
 					}
 					slice = reflect.Append(slice, ssf)
@@ -391,12 +458,7 @@ func bindValOnElem(strct *reflect.Value, val any) error {
 		}
 
 	default:
-		v, err := utils.SafeConvert(reflect.ValueOf(val), strct.Type())
-		if err != nil {
-			return err
-		}
-		strct.Set(v)
-		return nil
+		return setConvertedReflectValue(strct, val)
 	}
 
 	return nil

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/michaelolof/gofi/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCookieRequest(t *testing.T) {
@@ -1758,6 +1761,151 @@ func TestEmbeddedStruct_BodyBinding(t *testing.T) {
 	assert.Nil(t, err)
 }
 
+func TestJSONBinding_CompiledFieldIndexes(t *testing.T) {
+	type PromotedFields struct {
+		Promoted string `json:"promoted" validate:"required"`
+	}
+	type nestedFields struct {
+		Count int `json:"count" validate:"required"`
+	}
+	type testSchema struct {
+		Request struct {
+			Body struct {
+				Flat    string       `json:"flat" validate:"required"`
+				Renamed string       `json:"renamed_value" validate:"required"`
+				Ignored string       `json:"-"`
+				Nested  nestedFields `json:"nested" validate:"required"`
+				PromotedFields
+				Optional *string `json:"optional"`
+			} `validate:"required"`
+		}
+	}
+
+	t.Run("binds flat nested promoted renamed and optional fields", func(t *testing.T) {
+		handler := RouteOptions{
+			Schema: &testSchema{},
+			Handler: func(c Context) error {
+				bound, err := ValidateAndBind[testSchema](c)
+				require.NoError(t, err)
+				require.NotNil(t, bound)
+				assert.Equal(t, "flat-value", bound.Request.Body.Flat)
+				assert.Equal(t, "renamed-value", bound.Request.Body.Renamed)
+				assert.Empty(t, bound.Request.Body.Ignored)
+				assert.Equal(t, 7, bound.Request.Body.Nested.Count)
+				assert.Equal(t, "embedded-value", bound.Request.Body.Promoted)
+				require.NotNil(t, bound.Request.Body.Optional)
+				assert.Equal(t, "optional-value", *bound.Request.Body.Optional)
+				return nil
+			},
+		}
+
+		_, err := NewRouter().Inject(InjectOptions{
+			Method: "POST",
+			Path:   "/indexed-fields",
+			Body: strings.NewReader(`{
+				"flat":"flat-value",
+				"renamed_value":"renamed-value",
+				"Ignored":"must-not-bind",
+				"nested":{"count":7},
+				"promoted":"embedded-value",
+				"optional":"optional-value"
+			}`),
+			Handler: &handler,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("keeps absent optional embedded pointers nil", func(t *testing.T) {
+		type OptionalPromotedFields struct {
+			Value string `json:"optional_promoted"`
+		}
+		type optionalEmbeddedSchema struct {
+			Request struct {
+				Body struct {
+					*OptionalPromotedFields
+				} `validate:"required"`
+			}
+		}
+
+		handler := RouteOptions{
+			Schema: &optionalEmbeddedSchema{},
+			Handler: func(c Context) error {
+				bound, err := ValidateAndBind[optionalEmbeddedSchema](c)
+				require.NoError(t, err)
+				require.NotNil(t, bound)
+				assert.Nil(t, bound.Request.Body.OptionalPromotedFields)
+				return nil
+			},
+		}
+
+		_, err := NewRouter().Inject(InjectOptions{
+			Method:  "POST",
+			Path:    "/indexed-fields-optional",
+			Body:    strings.NewReader(`{}`),
+			Handler: &handler,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("returns a controlled error for a nil embedded pointer", func(t *testing.T) {
+		type PointerPromotedFields struct {
+			Value string `json:"pointer_promoted"`
+		}
+		type pointerEmbeddedSchema struct {
+			Request struct {
+				Body struct {
+					*PointerPromotedFields
+				} `validate:"required"`
+			}
+		}
+
+		var bindingErr error
+		handler := RouteOptions{
+			Schema: &pointerEmbeddedSchema{},
+			Handler: func(c Context) error {
+				_, bindingErr = ValidateAndBind[pointerEmbeddedSchema](c)
+				return nil
+			},
+		}
+
+		_, err := NewRouter().Inject(InjectOptions{
+			Method:  "POST",
+			Path:    "/indexed-fields-nil-embedded",
+			Body:    strings.NewReader(`{"pointer_promoted":"value"}`),
+			Handler: &handler,
+		})
+		require.NoError(t, err)
+		require.Error(t, bindingErr)
+		assert.Contains(t, bindingErr.Error(), "nil or invalid parent")
+	})
+}
+
+func TestRequestFieldByIndex_InvalidPathReturnsError(t *testing.T) {
+	type target struct {
+		Value string
+	}
+
+	value := reflect.ValueOf(&target{}).Elem()
+	field, err := requestFieldByIndex(value, []int{1})
+	assert.Error(t, err)
+	assert.False(t, field.IsValid())
+}
+
+func TestRequestFieldByIndex_InitializedPointerEmbed(t *testing.T) {
+	type embedded struct {
+		Value string
+	}
+	type target struct {
+		*embedded
+	}
+
+	value := reflect.ValueOf(&target{embedded: &embedded{}}).Elem()
+	field, err := requestFieldByIndex(value, []int{0, 0})
+	require.NoError(t, err)
+	field.SetString("bound")
+	assert.Equal(t, "bound", value.Interface().(target).Value)
+}
+
 // =============================================================================
 // Multipart required file-field validation tests
 // =============================================================================
@@ -1808,7 +1956,9 @@ type multipartMultiFileSchema struct {
 func buildMultipartBody(boundary string, parts [][]string) []byte {
 	var buf bytes.Buffer
 	for _, p := range parts {
-		buf.WriteString("--" + boundary + "\r\n")
+		buf.WriteString("--")
+		buf.WriteString(boundary)
+		buf.WriteString("\r\n")
 		if len(p) == 3 {
 			// File upload
 			buf.WriteString(fmt.Sprintf(
@@ -1824,7 +1974,9 @@ func buildMultipartBody(boundary string, parts [][]string) []byte {
 			))
 		}
 	}
-	buf.WriteString("--" + boundary + "--\r\n")
+	buf.WriteString("--")
+	buf.WriteString(boundary)
+	buf.WriteString("--\r\n")
 	return buf.Bytes()
 }
 
@@ -3035,4 +3187,473 @@ func TestTimeDecode_RFC3339Nano(t *testing.T) {
 	})
 	assert.Nil(t, err)
 	assert.Equal(t, 200, rec.StatusCode)
+}
+
+type exactSliceSizingItem struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func bindExactSliceSizingSchema[T any](t *testing.T, payload string) (*T, error) {
+	t.Helper()
+
+	var bound *T
+	var bindErr error
+	router := NewRouter()
+	_, err := router.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/bind",
+		Body:   strings.NewReader(payload),
+		Handler: &RouteOptions{
+			Schema: new(T),
+			Handler: func(c Context) error {
+				bound, bindErr = ValidateAndBind[T](c)
+				return nil
+			},
+		},
+	})
+	require.NoError(t, err)
+	return bound, bindErr
+}
+
+func TestJSONBinding_ExactNonPrimitiveSliceSizing(t *testing.T) {
+	t.Run("empty optional slice", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.NotNil(t, bound.Request.Body.Items)
+		assert.Len(t, bound.Request.Body.Items, 0)
+		assert.Equal(t, 0, cap(bound.Request.Body.Items))
+	})
+
+	t.Run("empty required slice", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[]}`)
+		require.Error(t, err)
+		assert.Nil(t, bound)
+		assert.Contains(t, err.Error(), "items.0")
+	})
+
+	t.Run("one element ignores declared maximum for capacity", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"present,max=50"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Equal(t, []exactSliceSizingItem{{Name: "one"}}, bound.Request.Body.Items)
+		assert.Equal(t, 1, cap(bound.Request.Body.Items))
+	})
+
+	t.Run("nested two element slice", func(t *testing.T) {
+		type group struct {
+			Items []exactSliceSizingItem `json:"items" validate:"required,max=10"`
+		}
+		type schema struct {
+			Request struct {
+				Body struct {
+					Groups []group `json:"groups" validate:"required,max=10"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"groups":[{"items":[{"name":"one"},{"name":"two"}]}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		require.Len(t, bound.Request.Body.Groups, 1)
+		assert.Equal(t, 1, cap(bound.Request.Body.Groups))
+		assert.Len(t, bound.Request.Body.Groups[0].Items, 2)
+		assert.Equal(t, 2, cap(bound.Request.Body.Groups[0].Items))
+	})
+
+	t.Run("slice at maximum", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"required,max=2"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Len(t, bound.Request.Body.Items, 2)
+		assert.Equal(t, 2, cap(bound.Request.Body.Items))
+	})
+
+	t.Run("slice beyond maximum", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []exactSliceSizingItem `json:"items" validate:"required,max=2"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"},{"name":"three"}]}`)
+		require.Error(t, err)
+		assert.Nil(t, bound)
+		assert.Contains(t, err.Error(), "maximum limit of 2.000000")
+	})
+
+	t.Run("pointer to slice", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items *[]exactSliceSizingItem `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		require.NotNil(t, bound.Request.Body.Items)
+		assert.Equal(t, []exactSliceSizingItem{{Name: "one"}}, *bound.Request.Body.Items)
+		assert.Equal(t, 1, cap(*bound.Request.Body.Items))
+	})
+
+	t.Run("slice of pointers", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items []*exactSliceSizingItem `json:"items" validate:"required,max=10"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		require.Len(t, bound.Request.Body.Items, 2)
+		assert.Equal(t, 2, cap(bound.Request.Body.Items))
+		require.NotNil(t, bound.Request.Body.Items[0])
+		require.NotNil(t, bound.Request.Body.Items[1])
+		assert.Equal(t, "one", bound.Request.Body.Items[0].Name)
+		assert.Equal(t, "two", bound.Request.Body.Items[1].Name)
+	})
+
+	t.Run("fixed length array", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Items [2]exactSliceSizingItem `json:"items" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		bound, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Equal(t, [2]exactSliceSizingItem{{Name: "one"}, {Name: "two"}}, bound.Request.Body.Items)
+	})
+}
+
+type validateOnlyCollectionItem struct {
+	Name string `json:"name" validate:"required"`
+}
+
+type validateOnlyRequiredCollectionSchema struct {
+	Request struct {
+		Body struct {
+			Items []validateOnlyCollectionItem `json:"items" validate:"required,min=1,max=2"`
+		} `validate:"required"`
+	}
+}
+
+type validateOnlyPresentCollectionSchema struct {
+	Request struct {
+		Body struct {
+			Items []validateOnlyCollectionItem `json:"items" validate:"present"`
+		} `validate:"required"`
+	}
+}
+
+func runValidateOnlyCollectionRequest(t *testing.T, schema any, payload string) (*InjectResponse, error) {
+	t.Helper()
+
+	var validationErr error
+	router := NewRouter()
+	response, err := router.Inject(InjectOptions{
+		Method: "POST",
+		Path:   "/validate",
+		Body:   strings.NewReader(payload),
+		Handler: &RouteOptions{
+			Schema: schema,
+			Handler: func(c Context) error {
+				validationErr = Validate(c)
+				if validationErr != nil {
+					return c.SendString(400, validationErr.Error())
+				}
+				return c.SendString(200, "OK")
+			},
+		},
+	})
+	require.NoError(t, err)
+	return response, validationErr
+}
+
+func TestValidateOnly_NonPrimitiveCollections(t *testing.T) {
+	t.Run("valid nested collection", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[{"name":"one"},{"name":"two"}]}`)
+		assert.NoError(t, validationErr)
+		assert.Equal(t, 200, response.StatusCode)
+		assert.Equal(t, "OK", string(response.Body))
+	})
+
+	t.Run("required rejects an empty collection", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "items.0")
+	})
+
+	t.Run("min rejects a collection that is too short", func(t *testing.T) {
+		type minSchema struct {
+			Request struct {
+				Body struct {
+					Items []validateOnlyCollectionItem `json:"items" validate:"present,min=2"`
+				} `validate:"required"`
+			}
+		}
+
+		response, validationErr := runValidateOnlyCollectionRequest(t, &minSchema{}, `{"items":[{"name":"one"}]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "minimum")
+	})
+
+	t.Run("max rejects a collection that is too long", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[{"name":"one"},{"name":"two"},{"name":"three"}]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "maximum")
+	})
+
+	t.Run("present accepts an empty collection", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyPresentCollectionSchema{}, `{"items":[]}`)
+		assert.NoError(t, validationErr)
+		assert.Equal(t, 200, response.StatusCode)
+		assert.Equal(t, "OK", string(response.Body))
+	})
+
+	t.Run("present rejects a missing collection without panic", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyPresentCollectionSchema{}, `{}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "present")
+	})
+
+	t.Run("nested item validation still runs", func(t *testing.T) {
+		response, validationErr := runValidateOnlyCollectionRequest(t, &validateOnlyRequiredCollectionSchema{}, `{"items":[{}]}`)
+		assert.Error(t, validationErr)
+		assert.Equal(t, 400, response.StatusCode)
+		assert.Contains(t, string(response.Body), "items.0.name")
+	})
+}
+
+func TestJSONBinding_WalkerPathStackPreservesErrorPaths(t *testing.T) {
+	t.Run("nested array indexes", func(t *testing.T) {
+		type item struct {
+			Value string `json:"value" validate:"required"`
+		}
+		type group struct {
+			Items []item `json:"items" validate:"required"`
+		}
+		type schema struct {
+			Request struct {
+				Body struct {
+					Groups []group `json:"groups" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		_, err := bindExactSliceSizingSchema[schema](t, `{"groups":[{"items":[{"value":"ok"}]},{"items":[{}]}]}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "groups.1.items.0.value")
+	})
+
+	t.Run("map keys", func(t *testing.T) {
+		type entry struct {
+			Value string `json:"value" validate:"required"`
+		}
+		type schema struct {
+			Request struct {
+				Body struct {
+					Entries map[string]entry `json:"entries" validate:"required"`
+				} `validate:"required"`
+			}
+		}
+
+		_, err := bindExactSliceSizingSchema[schema](t, `{"entries":{"alpha":{}}}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "entries.alpha.value")
+	})
+}
+
+func TestJSONBinding_WalkerPathGrowsAndReusesStorage(t *testing.T) {
+	var path requestPath
+	parts := make([]string, 0, 12)
+	for index := 0; index < 11; index++ {
+		part := fmt.Sprintf("field%d", index)
+		parts = append(parts, part)
+		path.pushField(part)
+	}
+	path.pushIndex(12)
+	parts = append(parts, "12")
+
+	assert.Equal(t, strings.Join(parts, "."), path.String())
+	retainedCapacity := cap(path.segments)
+	assert.GreaterOrEqual(t, retainedCapacity, len(parts))
+
+	for len(path.segments) > 0 {
+		path.pop()
+	}
+	assert.Empty(t, path.String())
+	assert.Empty(t, path.segments)
+
+	path.pushField("reused")
+	assert.Equal(t, "reused", path.String())
+	assert.Equal(t, retainedCapacity, cap(path.segments))
+}
+
+func TestJSONBinding_FixedArrayExcessItemsRemainValidated(t *testing.T) {
+	type item struct {
+		Name string `json:"name" validate:"required"`
+	}
+	type schema struct {
+		Request struct {
+			Body struct {
+				Items [1]item `json:"items" validate:"required"`
+			} `validate:"required"`
+		}
+	}
+
+	_, err := bindExactSliceSizingSchema[schema](t, `{"items":[{"name":"one"},{}]}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "items.1.name")
+}
+
+type compiledJSONBindMetric struct {
+	CPU    float64 `json:"cpu"`
+	Active bool    `json:"active"`
+}
+
+type compiledJSONBindEvent struct {
+	At      time.Time              `json:"at"`
+	Tags    []string               `json:"tags"`
+	Metrics compiledJSONBindMetric `json:"metrics"`
+}
+
+type compiledJSONBindRecord struct {
+	ID       string                  `json:"id"`
+	Count    int                     `json:"count"`
+	Events   []compiledJSONBindEvent `json:"events"`
+	Metadata map[string]string       `json:"metadata"`
+}
+
+type compiledJSONBindSchema struct {
+	Request struct {
+		Body []compiledJSONBindRecord
+	}
+}
+
+func decodeCompiledJSONBindSchema(t *testing.T, payload string, fast bool) (*compiledJSONBindSchema, error) {
+	t.Helper()
+
+	router := newRouter()
+	compiled := router.compileSchema(&compiledJSONBindSchema{}, Info{})
+	rules := compiled.rules.getReqRules(schemaBody)
+	require.NotNil(t, rules)
+
+	bound := new(compiledJSONBindSchema)
+	request := reflect.ValueOf(bound).Elem().FieldByName(string(schemaReq))
+	if fast {
+		require.Positive(t, rules.jsonBindMaxDepth)
+	} else {
+		rules.jsonBindMaxDepth = 0
+	}
+	ctx := &context{
+		serverOpts: defaultMuxOptions(),
+		opts:       newContextOptions("/compiled-json-bind", "POST"),
+	}
+	err := (&JSONBodyParser{}).ValidateAndDecodeRequest(io.NopCloser(strings.NewReader(payload)), RequestOptions{
+		SchemaRules: rules,
+		ShouldBind:  true,
+		Context:     &parserContext{c: ctx},
+		SchemaPtr:   bound,
+		Body:        &request,
+	})
+	return bound, err
+}
+
+func TestJSONBinding_CompiledSliceOfStructsMatchesGenericWalker(t *testing.T) {
+	validPayload := `[{"id":"one","count":3,"events":[{"at":"2026-10-03T12:00:00.123456789Z","tags":["a","b"],"metrics":{"cpu":45.2,"active":true}}],"metadata":{"source":"web"}}]`
+
+	fastBound, fastErr := decodeCompiledJSONBindSchema(t, validPayload, true)
+	genericBound, genericErr := decodeCompiledJSONBindSchema(t, validPayload, false)
+	require.NoError(t, fastErr)
+	require.NoError(t, genericErr)
+	assert.Equal(t, genericBound, fastBound)
+
+	invalidPayload := `[{"id":"one","count":"not-a-number","events":[],"metadata":{}}]`
+	_, fastErr = decodeCompiledJSONBindSchema(t, invalidPayload, true)
+	_, genericErr = decodeCompiledJSONBindSchema(t, invalidPayload, false)
+	require.Error(t, fastErr)
+	require.Error(t, genericErr)
+	assert.Equal(t, genericErr.Error(), fastErr.Error())
+}
+
+func TestJSONBinding_CompiledPathKeepsComplexSchemasOnGenericWalker(t *testing.T) {
+	t.Run("validation rules", func(t *testing.T) {
+		type record struct {
+			ID string `json:"id" validate:"required"`
+		}
+		type schema struct {
+			Request struct {
+				Body []record
+			}
+		}
+
+		compiled := newRouter().compileSchema(&schema{}, Info{})
+		rules := compiled.rules.getReqRules(schemaBody)
+		require.NotNil(t, rules)
+		assert.Zero(t, rules.jsonBindMaxDepth)
+	})
+
+	t.Run("pointer fields", func(t *testing.T) {
+		type record struct {
+			ID *string `json:"id"`
+		}
+		type schema struct {
+			Request struct {
+				Body []record
+			}
+		}
+
+		compiled := newRouter().compileSchema(&schema{}, Info{})
+		rules := compiled.rules.getReqRules(schemaBody)
+		require.NotNil(t, rules)
+		assert.Zero(t, rules.jsonBindMaxDepth)
+	})
 }

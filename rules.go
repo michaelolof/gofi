@@ -65,6 +65,7 @@ type RuleDef struct {
 	max                  *float64
 	required             bool
 	present              bool
+	jsonBindMaxDepth     uint8
 
 	tags         map[string][]string
 	accessor     fieldAccessor
