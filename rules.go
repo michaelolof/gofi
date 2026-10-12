@@ -65,6 +65,7 @@ type RuleDef struct {
 	max                  *float64
 	required             bool
 	present              bool
+	jsonBindMaxDepth     uint8
 
 	tags         map[string][]string
 	accessor     fieldAccessor
@@ -219,8 +220,6 @@ type schemaRules struct {
 	websocket  *compiledWebSocketContract
 	schemaPool *sync.Pool
 	schemaType reflect.Type
-
-	jsonBindMaxDepth uint8
 }
 
 func newSchemaRules(typ reflect.Type) schemaRules {

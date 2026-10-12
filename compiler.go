@@ -99,7 +99,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					name := getFieldName(rqf)
 					ruleDefs := s.getFieldRuleDefs(rqf, name, val)
 					optsObj.bodySchema = s.getTypeInfo(rqf.Type, val, name, ruleDefs)
-					sRules.jsonBindMaxDepth = compileJSONBindMaxDepth(ruleDefs)
+					ruleDefs.jsonBindMaxDepth = compileJSONBindMaxDepth(ruleDefs)
 					sRules.setReq(sf.Name, ruleDefs)
 				}
 			}

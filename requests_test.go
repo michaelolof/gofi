@@ -3511,6 +3511,32 @@ func TestJSONBinding_WalkerPathStackPreservesErrorPaths(t *testing.T) {
 	})
 }
 
+func TestJSONBinding_WalkerPathGrowsAndReusesStorage(t *testing.T) {
+	var path requestPath
+	parts := make([]string, 0, 12)
+	for index := 0; index < 11; index++ {
+		part := fmt.Sprintf("field%d", index)
+		parts = append(parts, part)
+		path.pushField(part)
+	}
+	path.pushIndex(12)
+	parts = append(parts, "12")
+
+	assert.Equal(t, strings.Join(parts, "."), path.String())
+	retainedCapacity := cap(path.segments)
+	assert.GreaterOrEqual(t, retainedCapacity, len(parts))
+
+	for len(path.segments) > 0 {
+		path.pop()
+	}
+	assert.Empty(t, path.String())
+	assert.Empty(t, path.segments)
+
+	path.pushField("reused")
+	assert.Equal(t, "reused", path.String())
+	assert.Equal(t, retainedCapacity, cap(path.segments))
+}
+
 func TestJSONBinding_FixedArrayExcessItemsRemainValidated(t *testing.T) {
 	type item struct {
 		Name string `json:"name" validate:"required"`
@@ -3562,17 +3588,15 @@ func decodeCompiledJSONBindSchema(t *testing.T, payload string, fast bool) (*com
 
 	bound := new(compiledJSONBindSchema)
 	request := reflect.ValueOf(bound).Elem().FieldByName(string(schemaReq))
-	compiledRules := compiled.rules
 	if fast {
-		require.Positive(t, compiledRules.jsonBindMaxDepth)
+		require.Positive(t, rules.jsonBindMaxDepth)
 	} else {
-		compiledRules.jsonBindMaxDepth = 0
+		rules.jsonBindMaxDepth = 0
 	}
 	ctx := &context{
 		serverOpts: defaultMuxOptions(),
 		opts:       newContextOptions("/compiled-json-bind", "POST"),
 	}
-	ctx.serverOpts.schemaRules.SetRules("/compiled-json-bind", "POST", &compiledRules)
 	err := (&JSONBodyParser{}).ValidateAndDecodeRequest(io.NopCloser(strings.NewReader(payload)), RequestOptions{
 		SchemaRules: rules,
 		ShouldBind:  true,
@@ -3614,7 +3638,7 @@ func TestJSONBinding_CompiledPathKeepsComplexSchemasOnGenericWalker(t *testing.T
 		compiled := newRouter().compileSchema(&schema{}, Info{})
 		rules := compiled.rules.getReqRules(schemaBody)
 		require.NotNil(t, rules)
-		assert.Zero(t, compiled.rules.jsonBindMaxDepth)
+		assert.Zero(t, rules.jsonBindMaxDepth)
 	})
 
 	t.Run("pointer fields", func(t *testing.T) {
@@ -3630,6 +3654,6 @@ func TestJSONBinding_CompiledPathKeepsComplexSchemasOnGenericWalker(t *testing.T
 		compiled := newRouter().compileSchema(&schema{}, Info{})
 		rules := compiled.rules.getReqRules(schemaBody)
 		require.NotNil(t, rules)
-		assert.Zero(t, compiled.rules.jsonBindMaxDepth)
+		assert.Zero(t, rules.jsonBindMaxDepth)
 	})
 }

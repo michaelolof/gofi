@@ -7,18 +7,6 @@ import (
 	"github.com/valyala/fastjson"
 )
 
-func requestJSONBindMaxDepth(ctx ParserContext) uint8 {
-	parserCtx, ok := ctx.(*parserContext)
-	if !ok || parserCtx.c == nil {
-		return 0
-	}
-	rules := parserCtx.c.rules()
-	if rules == nil {
-		return 0
-	}
-	return rules.jsonBindMaxDepth
-}
-
 // compileJSONBindMaxDepth checks the profiled common shape once during schema
 // registration. A positive result enables direct binding and also records the
 // maximum schema depth so the runtime path can preserve MaxDepth behavior.

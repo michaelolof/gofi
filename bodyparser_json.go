@@ -59,7 +59,9 @@ func (p *requestPath) pushIndex(index int) {
 }
 
 func (p *requestPath) pop() {
-	p.segments = p.segments[:len(p.segments)-1]
+	last := len(p.segments) - 1
+	p.segments[last] = requestPathSegment{}
+	p.segments = p.segments[:last]
 }
 
 func (p *requestPath) String() string {
@@ -182,7 +184,7 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 	// directly from fastjson nodes without the generic walker's interface
 	// conversions and per-node feature checks. A mismatch falls back to the
 	// generic walker so supported values and errors remain unchanged.
-	jsonBindMaxDepth := requestJSONBindMaxDepth(opts.Context)
+	jsonBindMaxDepth := opts.SchemaRules.jsonBindMaxDepth
 	if walkOpts.ShouldBind && walkOpts.HasBody && jsonBindMaxDepth > 0 {
 		maxDepth := j.MaxDepth
 		if maxDepth == 0 {
@@ -196,7 +198,7 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		}
 	}
 
-	path := requestPath{segments: make([]requestPathSegment, 0, 8)}
+	var path requestPath
 	status, err := j.walkStruct(pv, schemaBody, walkOpts, &path)
 	if err != nil {
 		return err
