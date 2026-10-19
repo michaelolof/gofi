@@ -33,7 +33,9 @@ type Router interface {
 	// Use appends one or more middleware onto the router stack
 	Use(middlewares ...MiddlewareFunc)
 
-	// UseErrorHandler sets the general error handler for the router
+	// UseErrorHandler sets the general error handler for the router, including
+	// native request-read failures. For those failures the request may be incomplete;
+	// middleware has not run and route parameters/metadata are unavailable.
 	UseErrorHandler(func(err error, c Context))
 
 	// Inject allows you to inject a request handler into the router and get a response.

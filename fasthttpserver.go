@@ -22,15 +22,20 @@ type FasthttpServer struct {
 
 // NewFasthttpServer creates a FasthttpServer backed by a new serveMux.
 func NewFasthttpServer() *FasthttpServer {
-	m := newRouter()
+	return newRouter().newFasthttpServer()
+}
+
+// newFasthttpServer keeps all native listener paths wired identically.
+func (m *serveMux) newFasthttpServer() *FasthttpServer {
 	return &FasthttpServer{
 		mux: m,
 		server: &fasthttp.Server{
 			Handler:            m.handleFastHTTP,
+			ErrorHandler:       m.handleTransportError,
 			Name:               "gofi",
 			DisableKeepalive:   false,
 			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: 4 * 1024 * 1024, // 4 MB default
+			MaxRequestBodySize: m.opts.bodyLimit,
 		},
 	}
 }
