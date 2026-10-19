@@ -16,3 +16,14 @@ func (e *HTTPError) Error() string {
 func NewHTTPError(code int, message string) *HTTPError {
 	return &HTTPError{Code: code, Message: message}
 }
+
+// transportError exposes a safe HTTP error while retaining the read failure.
+// Keep HTTPError unchanged so existing constructors and struct literals work.
+type transportError struct {
+	*HTTPError
+	cause error
+}
+
+func (e *transportError) Unwrap() []error {
+	return []error{e.HTTPError, e.cause}
+}

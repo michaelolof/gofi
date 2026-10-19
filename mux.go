@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	stdcontext "context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -259,6 +261,33 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 	s.runNotFound(ctx, c, path, method)
 }
 
+// handleTransportError handles requests rejected before routing can run. The
+// request may be incomplete, so only router-wide settings are initialized.
+func (s *serveMux) handleTransportError(ctx *fasthttp.RequestCtx, err error) {
+	code := http.StatusBadRequest
+	var smallBuffer *fasthttp.ErrSmallBuffer
+	var netErr net.Error
+	switch {
+	case errors.Is(err, fasthttp.ErrBodyTooLarge):
+		code = http.StatusRequestEntityTooLarge
+	case errors.As(err, &smallBuffer):
+		code = http.StatusRequestHeaderFieldsTooLarge
+	case errors.As(err, &netErr) && netErr.Timeout():
+		code = http.StatusRequestTimeout
+	}
+
+	c := s.acquireContext(ctx)
+	defer s.releaseContext(c)
+	c.setContextSettings(contextOptions{}, nil, s.globalStore, s.opts)
+	// The default interceptor writes a JSON envelope via SendBytes. Set its
+	// content type here; custom interceptors can override it through Context.
+	ctx.Response.Header.SetContentType("application/json")
+	s.opts.errHandler(&transportError{NewHTTPError(code, http.StatusText(code)), err}, c)
+	if c.rw != nil {
+		c.rw.syncHeaders()
+	}
+}
+
 // dummyLogger implements fasthttp.Logger
 type dummyLogger struct{}
 
@@ -376,16 +405,7 @@ func (s *serveMux) Static(prefix, root string) {
 
 // Listen starts the server on the given address using fasthttp.
 func (s *serveMux) Listen(addr string) error {
-	srv := &FasthttpServer{
-		mux: s,
-		server: &fasthttp.Server{
-			Handler:            s.handleFastHTTP,
-			Name:               "gofi",
-			DisableKeepalive:   false,
-			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: s.opts.bodyLimit,
-		},
-	}
+	srv := s.newFasthttpServer()
 
 	s.serverMu.Lock()
 	s.activeServer = srv
@@ -396,16 +416,7 @@ func (s *serveMux) Listen(addr string) error {
 
 // ListenTLS starts an HTTPS server on the given address.
 func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
-	srv := &FasthttpServer{
-		mux: s,
-		server: &fasthttp.Server{
-			Handler:            s.handleFastHTTP,
-			Name:               "gofi",
-			DisableKeepalive:   false,
-			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: s.opts.bodyLimit,
-		},
-	}
+	srv := s.newFasthttpServer()
 
 	s.serverMu.Lock()
 	s.activeServer = srv
@@ -416,16 +427,7 @@ func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
 
 // ListenTLSMutual starts an HTTPS server providing mutual TLS (mTLS) authentication.
 func (s *serveMux) ListenTLSMutual(addr, certFile, keyFile, clientCertFile string) error {
-	srv := &FasthttpServer{
-		mux: s,
-		server: &fasthttp.Server{
-			Handler:            s.handleFastHTTP,
-			Name:               "gofi",
-			DisableKeepalive:   false,
-			ReduceMemoryUsage:  false,
-			MaxRequestBodySize: s.opts.bodyLimit,
-		},
-	}
+	srv := s.newFasthttpServer()
 
 	s.serverMu.Lock()
 	s.activeServer = srv
