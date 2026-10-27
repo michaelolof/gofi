@@ -1597,3 +1597,45 @@ func TestSecurityNewTimeout(t *testing.T) {
 		t.Fatalf("want 503 for the timeout and for the full in-flight limit, got %d and %d", first.StatusCode, second.StatusCode)
 	}
 }
+
+// IP-05: bounded streams.
+func TestSecurityStreamOptions(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	errs := make(chan error, 2)
+	s.Router().Get("/bytes", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		return gofi.Stream(c, gofi.StreamOptions{MaxBytes: 10, OnError: func(err error) { errs <- err }},
+			func(ctx stdcontext.Context, w *bufio.Writer) error {
+				for {
+					if _, err := w.WriteString("0123456789"); err != nil {
+						return err
+					}
+					if err := w.Flush(); err != nil {
+						return err
+					}
+				}
+			})
+	}})
+	s.Router().Get("/duration", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		return gofi.Stream(c, gofi.StreamOptions{MaxDuration: 50 * time.Millisecond, OnError: func(err error) { errs <- err }},
+			func(ctx stdcontext.Context, w *bufio.Writer) error {
+				<-ctx.Done()
+				return ctx.Err()
+			})
+	}})
+	addr := startServer(t, s)
+
+	if _, body := httpGet(t, addr, "/bytes"); len(body) != 10 {
+		t.Errorf("MaxBytes: want 10 bytes, got %d", len(body))
+	}
+	if err := <-errs; !errors.Is(err, gofi.ErrStreamLimit) {
+		t.Errorf("MaxBytes: want ErrStreamLimit, got %v", err)
+	}
+	start := time.Now()
+	httpGet(t, addr, "/duration")
+	if err := <-errs; !errors.Is(err, stdcontext.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Errorf("MaxDuration: want deadline exceeded promptly, got %v after %v", err, time.Since(start))
+	}
+	if err := gofi.Stream(nil, gofi.StreamOptions{MaxBytes: -1}, nil); err == nil {
+		t.Error("negative MaxBytes accepted")
+	}
+}
