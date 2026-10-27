@@ -646,3 +646,122 @@ func TestSecurityNumericBindingIsExact(t *testing.T) {
 		}
 	}
 }
+
+// F-05, F-06, F-07: cache isolation, eligibility, replay and size limits.
+func TestSecurityCacheBoundaries(t *testing.T) {
+	newRouter := func(cfg middleware.CacheConfig, handler gofi.HandlerFunc) gofi.Router {
+		r := gofi.NewRouter()
+		r.Use(middleware.Cache(cfg))
+		r.Get("/r", gofi.RouteOptions{Handler: handler})
+		return r
+	}
+	echo := func(c gofi.Context) error {
+		return c.SendString(200, string(c.Request().Context().Host())+"|"+c.Query("x")+"|"+c.HeaderVal("Origin"))
+	}
+	req := func(r gofi.Router, query string, headers map[string]string) string {
+		path := "/r"
+		if query != "" {
+			path += "?" + query
+		}
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: path, Headers: headers})
+		return resp.BodyString()
+	}
+
+	t.Run("host is part of the key", func(t *testing.T) {
+		r := newRouter(middleware.CacheConfig{}, echo)
+		r.Test(gofi.TestOptions{Method: "GET", Path: "/r"})
+		// Test always sends Host: localhost; a second Host header overrides it.
+		if got := req(r, "", map[string]string{"Host": "tenant-b"}); !strings.HasPrefix(got, "tenant-b|") {
+			t.Fatalf("response cached across hosts: %q", got)
+		}
+	})
+
+	t.Run("repeated parameters keep their order", func(t *testing.T) {
+		var calls atomic.Int32
+		r := newRouter(middleware.CacheConfig{}, func(c gofi.Context) error {
+			calls.Add(1)
+			return echo(c)
+		})
+		req(r, "x=first&x=second", nil)
+		if got := req(r, "x=second&x=first", nil); !strings.Contains(got, "|second|") || calls.Load() != 2 {
+			t.Fatalf("reordered parameters shared an entry: %q (calls=%d)", got, calls.Load())
+		}
+	})
+
+	t.Run("Vary partitions entries", func(t *testing.T) {
+		r := newRouter(middleware.CacheConfig{}, func(c gofi.Context) error {
+			c.Writer().Header().Set("Vary", "Origin")
+			return echo(c)
+		})
+		req(r, "", map[string]string{"Origin": "https://a.example"})
+		if got := req(r, "", map[string]string{"Origin": "https://b.example"}); !strings.HasSuffix(got, "https://b.example") {
+			t.Fatalf("Vary: Origin ignored: %q", got)
+		}
+	})
+
+	bypass := map[string]gofi.HandlerFunc{
+		"Set-Cookie": func(c gofi.Context) error {
+			c.Writer().Header().Add("Set-Cookie", "session=abc")
+			return c.SendString(200, "personal")
+		},
+		"private": func(c gofi.Context) error {
+			c.Writer().Header().Set("Cache-Control", "private")
+			return c.SendString(200, "personal")
+		},
+		"no-store": func(c gofi.Context) error {
+			c.Request().Context().Response.Header.Set("Cache-Control", "no-store")
+			return c.SendString(200, "personal")
+		},
+		"Vary *": func(c gofi.Context) error {
+			c.Writer().Header().Set("Vary", "*")
+			return c.SendString(200, "personal")
+		},
+		"redirect": func(c gofi.Context) error {
+			c.Writer().Header().Set("Location", "/elsewhere")
+			return c.SendString(http.StatusFound, "")
+		},
+	}
+	for name, handler := range bypass {
+		t.Run("bypass "+name, func(t *testing.T) {
+			var calls atomic.Int32
+			r := newRouter(middleware.CacheConfig{CacheHeader: true}, func(c gofi.Context) error {
+				calls.Add(1)
+				return handler(c)
+			})
+			req(r, "", nil)
+			resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/r"})
+			if calls.Load() != 2 {
+				t.Fatalf("response was cached")
+			}
+			if cc := resp.Header("Cache-Control"); strings.Contains(cc, "public") {
+				t.Fatalf("restrictive response marked public: %q", cc)
+			}
+		})
+	}
+
+	t.Run("replays safe headers only", func(t *testing.T) {
+		r := newRouter(middleware.CacheConfig{}, func(c gofi.Context) error {
+			c.Writer().Header().Set("ETag", `"v1"`)
+			c.Writer().Header().Set("X-Request-Specific", "first")
+			return c.SendString(200, "body")
+		})
+		req(r, "", nil)
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/r"})
+		if resp.Header("ETag") != `"v1"` || resp.HasHeader("X-Request-Specific") {
+			t.Fatalf("unexpected replayed headers: %v", resp.HeaderMap)
+		}
+	})
+
+	t.Run("oversize responses are never stored", func(t *testing.T) {
+		var calls atomic.Int32
+		r := newRouter(middleware.CacheConfig{MaxBytes: 64}, func(c gofi.Context) error {
+			calls.Add(1)
+			return c.SendString(200, strings.Repeat("a", 128))
+		})
+		req(r, "", nil)
+		req(r, "", nil)
+		if calls.Load() != 2 {
+			t.Fatalf("response larger than MaxBytes was cached")
+		}
+	})
+}
