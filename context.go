@@ -146,6 +146,8 @@ type context struct {
 	clientIP string
 	scheme   string
 	host     string
+	// err is the error rendered by the router's error handler, if any.
+	err error
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
@@ -162,6 +164,7 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.clientIP = ""
 	c.scheme = ""
 	c.host = ""
+	c.err = nil
 	c.rulesOverride = nil
 
 	// Reset adapters in-place instead of nil-ing to avoid re-allocation

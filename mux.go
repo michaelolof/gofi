@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/michaelolof/gofi/validators/rules"
@@ -74,6 +75,9 @@ type routerLifecycle struct {
 	// base is the parent of every request context. Shutdown cancels it; a
 	// server that starts afterwards installs a fresh one.
 	base atomic.Pointer[lifecycleContext]
+	// onComplete receives final request events (OnRequestComplete). It is
+	// set before sealing and read-only afterwards.
+	onComplete func(RequestEvent)
 }
 
 type lifecycleContext struct {
@@ -200,30 +204,57 @@ func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 // handleFastHTTP is the main fasthttp request handler.
 // Called by fasthttp.Server for each incoming connection.
 func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
-	var current *context
-	defer recoverDispatch(ctx, "request dispatch", &current)
-	s.dispatch(ctx, &current)
+	st := dispatchState{start: time.Now()}
+	defer s.finishDispatch(ctx, &st)
+	s.dispatch(ctx, &st)
 }
 
-// dispatch routes one request. Callers own panic recovery; dispatch records
-// the context it acquires in *current so recovery can cancel it.
-func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
+// dispatchState carries one request's outcome from dispatch to
+// finishDispatch.
+type dispatchState struct {
+	ctx      *context
+	start    time.Time
+	matched  bool
+	panicked bool
+}
+
+// finishDispatch is deferred around dispatch. It contains panics, emits the
+// request's final event, and only then returns the context to the pool.
+func (s *serveMux) finishDispatch(ctx *fasthttp.RequestCtx, st *dispatchState) {
+	if r := recover(); r != nil {
+		st.panicked = true
+		if st.ctx != nil {
+			st.ctx.cancelContext()
+		}
+		logRecoveredPanic("request dispatch", r)
+		writeInternalServerError(ctx)
+	}
+	s.emitRequestEvent(ctx, st)
+	// A panicking context may be inconsistent and is not reused; a hijacked
+	// one belongs to the connection handler.
+	if st.ctx != nil && !st.panicked && !ctx.Hijacked() {
+		s.releaseContext(st.ctx)
+	}
+}
+
+// dispatch routes one request. It records the context it acquires in st;
+// the caller owns panic recovery and releases the context.
+func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, st *dispatchState) {
 	method := b2s(ctx.Method())
 	path := b2s(ctx.Path())
 
 	if rejected := s.rejectRequest(ctx, method); rejected != nil {
 		c := s.acquireContext(ctx)
-		*current = c
+		st.ctx = c
 		c.setContextSettings(contextOptions{}, nil, s.globalStore, s.opts)
-		s.opts.errHandler(rejected, c)
+		s.renderError(rejected, c)
 		c.finishWriter()
-		s.releaseContext(c)
 		return
 	}
 
 	if root := s.trees[method]; root != nil {
 		c := s.acquireContext(ctx)
-		*current = c
+		st.ctx = c
 
 		routeData, tsr := root.getValue(path, func() *Params {
 			if cap(c.params) < int(s.maxParams) {
@@ -233,21 +264,19 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
 		})
 
 		if routeData != nil {
+			st.matched = true
 			c.setContextSettings(newContextOptions(routeData.pattern, method), s.routeMeta, s.globalStore, s.opts)
 			c.handlers = routeData.handlers
 			c.handlerIdx = -1
 
 			// Start the middleware/handler chain
 			if err := c.Next(); err != nil {
-				s.opts.errHandler(err, c)
+				s.renderError(err, c)
 			}
 
 			// Sync any headers set via the adapter writer to fasthttp response
 			c.finishWriter()
 
-			if !ctx.Hijacked() {
-				s.releaseContext(c)
-			}
 			return
 		} else if method != http.MethodConnect && path != "/" {
 			if tsr {
@@ -277,12 +306,9 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
 				c.handlers = allHandlers
 				c.handlerIdx = -1
 				if err := c.Next(); err != nil {
-					s.opts.errHandler(err, c)
+					s.renderError(err, c)
 				}
 				c.finishWriter()
-				if !ctx.Hijacked() {
-					s.releaseContext(c)
-				}
 				return
 			}
 		}
@@ -301,22 +327,19 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
 				c.handlers = allHandlers
 				c.handlerIdx = -1
 				if err := c.Next(); err != nil {
-					s.opts.errHandler(err, c)
+					s.renderError(err, c)
 				}
 				c.finishWriter()
-				if !ctx.Hijacked() {
-					s.releaseContext(c)
-				}
 				return
 			}
 		}
-		s.runNotFound(ctx, c, path, method)
+		s.runNotFound(c, path, method)
 		return
 	}
 
 	// No tree registered for this method — still run global middleware.
 	c := s.acquireContext(ctx)
-	*current = c
+	st.ctx = c
 
 	// 405 check: is this path registered under a different method?
 	if s.opts.methodNotAllowed {
@@ -331,17 +354,20 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
 			c.handlers = allHandlers
 			c.handlerIdx = -1
 			if err := c.Next(); err != nil {
-				s.opts.errHandler(err, c)
+				s.renderError(err, c)
 			}
 			c.finishWriter()
-			if !ctx.Hijacked() {
-				s.releaseContext(c)
-			}
 			return
 		}
 	}
 
-	s.runNotFound(ctx, c, path, method)
+	s.runNotFound(c, path, method)
+}
+
+// renderError records err as the request's outcome and runs the error handler.
+func (s *serveMux) renderError(err error, c *context) {
+	c.err = err
+	s.opts.errHandler(err, c)
 }
 
 // rejectRequest applies the router's request-target policy before routing.
@@ -402,8 +428,9 @@ func (s *serveMux) handleTransportError(ctx *fasthttp.RequestCtx, err error) {
 	// The default interceptor writes a JSON envelope via SendBytes. Set its
 	// content type here; custom interceptors can override it through Context.
 	ctx.Response.Header.SetContentType("application/json")
-	s.opts.errHandler(&transportError{NewHTTPError(code, http.StatusText(code)), err}, c)
+	s.renderError(&transportError{NewHTTPError(code, http.StatusText(code)), err}, c)
 	c.finishWriter()
+	s.emitRequestEvent(ctx, &dispatchState{ctx: c, start: c.fctx.Time()})
 	s.releaseContext(c)
 }
 
@@ -449,7 +476,7 @@ func (s *serveMux) allowedMethods(path, requestedMethod string) string {
 
 // runNotFound runs the global middleware chain terminated by a 404 handler.
 // This ensures middleware (e.g. CORS) always executes even when no route is matched.
-func (s *serveMux) runNotFound(ctx *fasthttp.RequestCtx, c *context, path, method string) {
+func (s *serveMux) runNotFound(c *context, path, method string) {
 	c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
 
 	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
@@ -462,14 +489,10 @@ func (s *serveMux) runNotFound(ctx *fasthttp.RequestCtx, c *context, path, metho
 	c.handlerIdx = -1
 
 	if err := c.Next(); err != nil {
-		s.opts.errHandler(err, c)
+		s.renderError(err, c)
 	}
 
 	c.finishWriter()
-
-	if !ctx.Hijacked() {
-		s.releaseContext(c)
-	}
 }
 
 func (s *serveMux) GlobalStore() GofiStore {
@@ -746,20 +769,22 @@ func (s *serveMux) Test(opts TestOptions) (resp *InjectResponse, err error) {
 	func() {
 		// Mirror live dispatch: a recovered panic produces the same generic
 		// response, and Test additionally reports it to the caller.
+		st := dispatchState{start: time.Now()}
 		defer func() {
 			if r := recover(); r != nil {
+				st.panicked = true
 				err = NewHTTPError(500, fmt.Sprintf("panic recovered in Test: %v", r))
 				writeInternalServerError(&fctx)
 			}
-		}()
-
-		var current *context
-		defer func() {
-			if current != nil {
-				current.cancelContext()
+			s.emitRequestEvent(&fctx, &st)
+			if st.ctx != nil {
+				st.ctx.cancelContext()
+				if !st.panicked && !fctx.Hijacked() {
+					s.releaseContext(st.ctx)
+				}
 			}
 		}()
-		s.dispatch(&fctx, &current)
+		s.dispatch(&fctx, &st)
 	}()
 
 	headerMap := make(http.Header)

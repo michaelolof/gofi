@@ -1711,3 +1711,50 @@ func TestSecurityForwardedAndHosts(t *testing.T) {
 		}
 	}
 }
+
+// IP-19: one final event per request, with the final status.
+func TestSecurityRequestEvents(t *testing.T) {
+	r := gofi.NewRouter()
+	var events []gofi.RequestEvent
+	if err := gofi.OnRequestComplete(r, func(ev gofi.RequestEvent) { events = append(events, ev) }); err != nil {
+		t.Fatal(err)
+	}
+	r.Get("/users/:id", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	r.Get("/fail", gofi.RouteOptions{Handler: func(c gofi.Context) error { return gofi.NewHTTPError(503, "down") }})
+	r.Get("/boom", gofi.RouteOptions{Handler: func(c gofi.Context) error { panic("boom") }})
+
+	r.Test(gofi.TestOptions{Method: "GET", Path: "/users/7"})
+	r.Test(gofi.TestOptions{Method: "GET", Path: "/fail"})
+	r.Test(gofi.TestOptions{Method: "GET", Path: "/boom"})
+	r.Test(gofi.TestOptions{Method: "GET", Path: "/missing"})
+
+	if len(events) != 4 {
+		t.Fatalf("want 4 events, got %d: %+v", len(events), events)
+	}
+	if e := events[0]; e.Status != 200 || e.Pattern != "/users/:id" || e.Path != "/users/7" {
+		t.Errorf("matched route event: %+v", e)
+	}
+	if e := events[1]; e.Status != 503 || e.Err == nil {
+		t.Errorf("returned error event: %+v", e)
+	}
+	if e := events[2]; e.Status != 500 || !e.Panicked {
+		t.Errorf("panic event: %+v", e)
+	}
+	if e := events[3]; e.Status != 404 || e.Pattern != "" {
+		t.Errorf("not-found event: %+v", e)
+	}
+
+	block := make(chan struct{})
+	q, err := gofi.NewEventQueue(1, func(gofi.RequestEvent) { <-block })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		q.Publish(gofi.RequestEvent{})
+	}
+	if q.Dropped() == 0 {
+		t.Error("full queue did not drop events")
+	}
+	close(block)
+	q.Close()
+}
