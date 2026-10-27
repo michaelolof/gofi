@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"path"
 	"strings"
 	"sync"
@@ -119,15 +120,15 @@ func SwaggerTemplate() DocsUiTemplate {
 			<meta name="viewport" content="width=device-width, initial-scale=1" />
 			<meta name="description" content="SwaggerUI" />
 			<title>SwaggerUI</title>
-			<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css" />
+			<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css" integrity="sha384-+yyzNgM3K92sROwsXxYCxaiLWxWJ0G+v/9A+qIZ2rgefKgkdcmJI+L601cqPD/Ut" crossorigin="anonymous" />
 		</head>
 		<body>
 			<div id="swagger-ui"></div>
-			<script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js" crossorigin></script>
+			<script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js" integrity="sha384-qn5tagrAjZi8cSmvZ+k3zk4+eDEEUcP9myuR2J6V+/H6rne++v6ChO7EeHAEzqxQ" crossorigin="anonymous"></script>
 			<script>
 				window.onload = () => {
 					window.ui = SwaggerUIBundle({
-					url: '%s',
+					url: %s,
 					dom_id: '#swagger-ui',
 					});
 				};
@@ -136,13 +137,17 @@ func SwaggerTemplate() DocsUiTemplate {
 		</html>
 	`
 	return &uiTemplate{
-		html: html,
+		html:   html,
+		escape: jsString,
 	}
 }
 
 func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 	cs := fmt.Sprintf("%q", "{}")
-	srcLink := "https://cdn.jsdelivr.net/npm/@scalar/api-reference"
+	// Pinned with Subresource Integrity; a custom ScriptSrcLink is loaded
+	// without an integrity attribute.
+	srcLink := "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.76.0/dist/browser/standalone.js"
+	srcIntegrity := ` integrity="sha384-JpepQjnR3EY/jA4qZIphNISYIrkHthebkOYe93Zh0X0086IIZovV4yv9ZqTXcSaA" crossorigin="anonymous"`
 	additionalStyle := ""
 	additionalScript := ""
 	if config != nil {
@@ -165,6 +170,7 @@ func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 
 		if config.ScriptSrcLink != "" {
 			srcLink = config.ScriptSrcLink
+			srcIntegrity = ""
 		}
 
 		if config.AdditionalStyle != "" {
@@ -195,7 +201,7 @@ func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 			<script>
 				document.getElementById('api-reference').dataset.configuration = ` + cs + `
 			</script>
-			<script src="` + srcLink + `"></script>
+			<script src="` + html.EscapeString(srcLink) + `"` + srcIntegrity + `></script>
 			` + additionalScript + `
 		</body>
 		</html>`
@@ -243,8 +249,8 @@ func RedoclyTemplate() DocsUiTemplate {
 			</style>
 		</head>
 		<body>
-			<redoc spec-url='%s'></redoc>
-			<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"> </script>
+			<redoc spec-url="%s"></redoc>
+			<script src="https://cdn.jsdelivr.net/npm/redoc@3.0.1/bundles/redoc.standalone.js" integrity="sha384-j07qRKHNNmcwU1/Y1elJc7pDLHXP/QfbQXTtSkbOJ7uYGJikqAzsFVbY2zR9FqOT" crossorigin="anonymous"></script>
 		</body>
 		</html>
 	`
@@ -257,7 +263,7 @@ func RapidDoc() DocsUiTemplate {
 		<html>
 		<head>
 			<meta charset="utf-8"> <!-- Important: rapi-doc uses utf8 characters -->
-			<script type="module" src="https://unpkg.com/rapidoc/dist/rapidoc-min.js"></script>
+			<script type="module" src="https://cdn.jsdelivr.net/npm/rapidoc@11.0.1/dist/rapidoc-min.js" integrity="sha384-fCYjbigC95GwGadnXpdvX5fXvlWRGMWJMOw89RxKHaGluDjZwf0Lu1KfUrE5KyfN" crossorigin="anonymous"></script>
 		</head>
 		<body>
 			<rapi-doc spec-url="%s"> </rapi-doc>
@@ -276,8 +282,8 @@ func StopLight() DocsUiTemplate {
 			<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 			<title>Elements in HTML</title>
 			<!-- Embed elements Elements via Web Component -->
-			<script src="https://unpkg.com/@stoplight/elements/web-components.min.js"></script>
-			<link rel="stylesheet" href="https://unpkg.com/@stoplight/elements/styles.min.css">
+			<script src="https://cdn.jsdelivr.net/npm/@stoplight/elements@9.0.29/web-components.min.js" integrity="sha384-enyjBaVmV00WFIo0D7AIVgtZ/4x0idVNWHotG8WUpvQo9HXgMSGAAW2YEOpiJTpP" crossorigin="anonymous"></script>
+			<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stoplight/elements@9.0.29/styles.min.css" integrity="sha384-iVQBHadsD+eV0M5+ubRCEVXrXEBj+BqcuwjUwPoVJc0Pb1fmrhYSAhL+BFProHdV" crossorigin="anonymous">
 		</head>
 		<body>
 
@@ -294,11 +300,25 @@ func StopLight() DocsUiTemplate {
 
 type uiTemplate struct {
 	html string
+	// escape encodes the spec path for its template context; HTML
+	// attribute escaping by default.
+	escape func(string) string
 }
 
 func (u *uiTemplate) HTML(specPath string) []byte {
 	// specPath = "https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json"
-	return []byte(fmt.Sprintf(u.html, specPath))
+	escape := u.escape
+	if escape == nil {
+		escape = html.EscapeString
+	}
+	return []byte(fmt.Sprintf(u.html, escape(specPath)))
+}
+
+// jsString encodes s as a JavaScript string literal that is safe inside a
+// <script> element: encoding/json escapes quotes, '<', '>' and '&'.
+func jsString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // OpenAPISpec extracts the OpenAPI 3.0.3 specification directly from the Router.

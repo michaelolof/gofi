@@ -1446,3 +1446,24 @@ func TestSecurityAdmissionControl(t *testing.T) {
 		t.Error("zero rate limit accepted")
 	}
 }
+
+// F-22: documentation UIs load pinned assets with SRI and escape the spec path.
+func TestSecurityDocsTemplates(t *testing.T) {
+	hostile := `/q/openapi'"></redoc><script>alert(1)</script>`
+	templates := map[string]gofi.DocsUiTemplate{
+		"swagger":   gofi.SwaggerTemplate(),
+		"scalar":    gofi.ScalarTemplate(nil),
+		"redoc":     gofi.RedoclyTemplate(),
+		"rapidoc":   gofi.RapidDoc(),
+		"stoplight": gofi.StopLight(),
+	}
+	for name, tpl := range templates {
+		page := string(tpl.HTML(hostile))
+		if strings.Contains(page, "<script>alert(1)") {
+			t.Errorf("%s: spec path broke out of its context", name)
+		}
+		if strings.Contains(page, "/latest/") || !strings.Contains(page, `integrity="sha384-`) {
+			t.Errorf("%s: assets are not version-pinned with SRI", name)
+		}
+	}
+}
