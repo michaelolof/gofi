@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -934,3 +935,59 @@ func TestSecurityHeaderModel(t *testing.T) {
 		}
 	})
 }
+
+// F-10: public errors are safe, valid JSON with the right content type.
+func TestSecurityPublicErrors(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(middleware.Recover(middleware.RecoverConfig{Output: discardLogger()}))
+	routes := map[string]gofi.HandlerFunc{
+		"/internal":  func(c gofi.Context) error { return errors.New("pq: password=hunter2 failed") },
+		"/http5xx":   func(c gofi.Context) error { return gofi.NewHTTPError(503, "redis at 10.0.0.5 down") },
+		"/client":    func(c gofi.Context) error { return gofi.NewHTTPError(409, "order already paid") },
+		"/control":   func(c gofi.Context) error { return gofi.NewHTTPError(400, "bad \"x\"\x01\x1b[31m\xff") },
+		"/badstatus": func(c gofi.Context) error { return gofi.NewHTTPError(200, "not an error code") },
+		"/panic":     func(c gofi.Context) error { panic("hunter2") },
+	}
+	for path, h := range routes {
+		r.Get(path, gofi.RouteOptions{Handler: h})
+	}
+	r.Post("/validate", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
+		_, err := gofi.ValidateAndBind[nameSchema](c)
+		return err
+	}})
+
+	cases := []struct {
+		path, method string
+		status       int
+		message      string
+	}{
+		{"/internal", "GET", 500, "Internal Server Error"},
+		{"/http5xx", "GET", 503, "Service Unavailable"},
+		{"/client", "GET", 409, "order already paid"},
+		{"/control", "GET", 400, "bad \"x\"\x01\x1b[31m�"},
+		{"/badstatus", "GET", 500, "Internal Server Error"},
+		{"/panic", "GET", 500, "Internal Server Error"},
+		{"/validate", "POST", 400, ""},
+	}
+	for _, tc := range cases {
+		opts := gofi.TestOptions{Method: tc.method, Path: tc.path}
+		if tc.method == "POST" {
+			opts.Headers = map[string]string{"Content-Type": "application/json"}
+			opts.Body = strings.NewReader(`{}`)
+		}
+		resp, _ := r.Test(opts)
+		body := resp.BodyJSON()
+		if resp.StatusCode != tc.status || body == nil || resp.Header("Content-Type") != "application/json" {
+			t.Errorf("%s: want %d JSON, got %d %q (%q)", tc.path, tc.status, resp.StatusCode, resp.Header("Content-Type"), resp.BodyString())
+			continue
+		}
+		if tc.message != "" && body["message"] != tc.message {
+			t.Errorf("%s: message %q, want %q", tc.path, body["message"], tc.message)
+		}
+		if strings.Contains(resp.BodyString(), "hunter2") || strings.Contains(resp.BodyString(), "10.0.0.5") {
+			t.Errorf("%s leaked an internal detail: %q", tc.path, resp.BodyString())
+		}
+	}
+}
+
+func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }

@@ -180,14 +180,19 @@ You can define a custom error handler for all routes using `UseErrorHandler`:
 
 ```go
 r.UseErrorHandler(func(err error, c gofi.Context) {
-    // Custom error handling logic
+    // Log the full error; send clients only what is safe for them to see.
     log.Printf("Error occurred: %v", err)
-    c.Send(http.StatusInternalServerError, map[string]string{
-        "error": "Internal Server Error",
-        "details": err.Error(),
-    })
+    c.SendString(http.StatusInternalServerError, "Internal Server Error")
 })
 ```
+
+Without a custom handler, Gofi responds with a JSON envelope (`{"status":"error","statusCode":...,"message":...}`, `Content-Type: application/json`):
+
+- request validation errors return `400` with the validation message;
+- a `gofi.NewHTTPError` with a `4xx` code returns that code and its message;
+- any other error, including a `5xx` `HTTPError`, returns its status with the generic status text, and the full error is logged.
+
+A panic in a handler, middleware or error handler is recovered by the router: it is logged and the client receives a generic `500`, even without the `Recover` middleware.
 
 ### Plugins
 
@@ -884,7 +889,7 @@ resp, err := r.Test(gofi.TestOptions{
 })
 ```
 
-If the handler panics, `Test` recovers, invokes the configured error handler, and returns a `500` response alongside a non-nil error.
+If the handler panics, `Test` returns the same generic `500` response a live server sends, alongside a non-nil error describing the panic.
 
 ### TestOptions, InjectOptions & InjectResponse
 

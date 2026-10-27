@@ -1,7 +1,8 @@
 package middleware
 
 import (
-	"fmt"
+	"log"
+	"runtime/debug"
 	"time"
 
 	"github.com/michaelolof/gofi"
@@ -56,7 +57,8 @@ func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					ch <- runResult{err: gofi.NewHTTPError(500, fmt.Sprintf("panic in timeout middleware: %v", r))}
+					log.Printf("gofi/middleware: recovered panic in handler under Timeout: %v\n%s", r, debug.Stack())
+					ch <- runResult{err: gofi.NewHTTPError(500, "Internal Server Error")}
 				}
 			}()
 
