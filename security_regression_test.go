@@ -1327,3 +1327,45 @@ func TestSecurityInjectDoesNotReplaceLiveRules(t *testing.T) {
 		t.Fatalf("Inject replaced the live route's validation: %d %q", resp.StatusCode, resp.BodyString())
 	}
 }
+
+// F-14: global middleware covers trailing-slash redirects.
+func TestSecurityRedirectRunsGlobalMiddleware(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(func(c gofi.Context) error {
+		c.Writer().Header().Set("X-Global", "1")
+		if c.HeaderVal("Authorization") == "" {
+			return gofi.NewHTTPError(http.StatusUnauthorized, "login required")
+		}
+		return c.Next()
+	})
+	r.Get("/users/", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "users") }})
+
+	resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/users"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("redirect bypassed global middleware: %d %v", resp.StatusCode, resp.HeaderMap)
+	}
+	resp, _ = r.Test(gofi.TestOptions{Method: "GET", Path: "/users", Headers: map[string]string{"Authorization": "Bearer x"}})
+	if resp.StatusCode != http.StatusMovedPermanently || resp.Header("X-Global") != "1" {
+		t.Fatalf("authorized redirect: want 301 with global headers, got %d %v", resp.StatusCode, resp.HeaderMap)
+	}
+}
+
+// F-13: wildcard rules match on segment boundaries, longest prefix first.
+func TestSecurityRedirectRulesAreDeterministic(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(middleware.Redirect(middleware.RedirectConfig{Rules: map[string]string{
+		"/docs/*":     "/manual/$1",
+		"/docs/api/*": "/reference/$1",
+	}}))
+	r.Get("/docsearch", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "search") }})
+
+	for i := 0; i < 20; i++ {
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/docs/api/users"})
+		if loc := resp.Header("Location"); loc != "/reference/users" {
+			t.Fatalf("overlapping rules resolved to %q", loc)
+		}
+	}
+	if resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/docsearch"}); resp.BodyString() != "search" {
+		t.Fatalf("/docs/* matched /docsearch: %d %v", resp.StatusCode, resp.HeaderMap)
+	}
+}

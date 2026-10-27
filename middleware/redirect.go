@@ -47,17 +47,7 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 	}
 
 	// Pre-process wildcard rules internally to split exact vs wildcard matching
-	exactRules := make(map[string]string)
-	wildcardRules := make(map[string]string)
-
-	for pattern, replacement := range cfg.Rules {
-		if strings.HasSuffix(pattern, "/*") {
-			prefix := pattern[:len(pattern)-2]
-			wildcardRules[prefix] = replacement
-		} else {
-			exactRules[pattern] = replacement
-		}
-	}
+	exactRules, wildcardRules := compilePrefixRules(cfg.Rules)
 
 	return func(c gofi.Context) error {
 		path := c.Path()
@@ -71,8 +61,10 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 		// 2. Check wildcard matches
 		// E.g., rule "/old/*" -> "/new/$1"
 		// If path is "/old/docs", prefix matched is "/old", capture is "/docs"
-		for prefix, replacement := range wildcardRules {
-			if strings.HasPrefix(path, prefix) {
+		// Rules match on segment boundaries, longest prefix first.
+		if rule, ok := matchPrefixRule(wildcardRules, path); ok {
+			prefix, replacement := rule.prefix, rule.replacement
+			{
 				// The wildcard capture starts right after the prefix
 				capture := path[len(prefix):]
 

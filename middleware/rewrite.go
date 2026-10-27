@@ -19,7 +19,12 @@ var RewriteConfigDefault = RewriteConfig{
 	Rules: nil,
 }
 
-// Rewrite creates a new middleware handler
+// Rewrite creates a new middleware handler.
+//
+// Rewrite runs after routing: it changes the path that downstream handlers
+// see (c.Path()), but the route, its middleware chain and its authorization
+// have already been chosen from the original path. It does not re-route the
+// request to another handler.
 func Rewrite(config ...RewriteConfig) gofi.MiddlewareFunc {
 	// Set default config
 	cfg := RewriteConfigDefault
@@ -36,17 +41,7 @@ func Rewrite(config ...RewriteConfig) gofi.MiddlewareFunc {
 	}
 
 	// Pre-process wildcard rules internally
-	exactRules := make(map[string]string)
-	wildcardRules := make(map[string]string)
-
-	for pattern, replacement := range cfg.Rules {
-		if strings.HasSuffix(pattern, "/*") {
-			prefix := pattern[:len(pattern)-2]
-			wildcardRules[prefix] = replacement
-		} else {
-			exactRules[pattern] = replacement
-		}
-	}
+	exactRules, wildcardRules := compilePrefixRules(cfg.Rules)
 
 	return func(c gofi.Context) error {
 		path := c.Path()
@@ -60,8 +55,10 @@ func Rewrite(config ...RewriteConfig) gofi.MiddlewareFunc {
 		}
 
 		// 2. Check wildcard matches
-		for prefix, replacement := range wildcardRules {
-			if strings.HasPrefix(path, prefix) {
+		// Rules match on segment boundaries, longest prefix first.
+		if rule, ok := matchPrefixRule(wildcardRules, path); ok {
+			prefix, replacement := rule.prefix, rule.replacement
+			{
 				capture := path[len(prefix):]
 				target := strings.ReplaceAll(replacement, "$1", capture)
 				target = strings.ReplaceAll(target, "//", "/")

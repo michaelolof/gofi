@@ -218,7 +218,22 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
 				if qs := ctx.URI().QueryString(); len(qs) > 0 {
 					redirectPath += "?" + b2s(qs)
 				}
-				ctx.Redirect(redirectPath, code)
+				// Run the global middleware chain with the redirect as its
+				// terminal handler, so global policy (authentication, CORS,
+				// logging) covers redirects as it covers 404 and 405.
+				c.setContextSettings(newContextOptions(path, method), s.routeMeta, s.globalStore, s.opts)
+				allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
+				allHandlers = append(allHandlers, s.middlewares...)
+				allHandlers = append(allHandlers, func(c Context) error {
+					ctx.Redirect(redirectPath, code)
+					return nil
+				})
+				c.handlers = allHandlers
+				c.handlerIdx = -1
+				if err := c.Next(); err != nil {
+					s.opts.errHandler(err, c)
+				}
+				c.finishWriter()
 				if !ctx.Hijacked() {
 					s.releaseContext(c)
 				}
