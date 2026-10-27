@@ -121,3 +121,101 @@ func TestSecuritySessionConcurrentWritesAreSerialized(t *testing.T) {
 		}
 	})
 }
+
+// F-18: JSON helpers refresh deadlines per message like the raw helpers.
+func TestSecurityJSONHelpersRefreshDeadlines(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	received := make(chan int, 1)
+	s.Router().Get("/ws", gofiws.DefineWebSocket(gofiws.WebSocketOptions{
+		Runtime: gofiws.RuntimeOptions{ReadTimeout: 200 * time.Millisecond, WriteTimeout: 200 * time.Millisecond},
+		Handler: func(ws *gofiws.Session) error {
+			n := 0
+			for {
+				var msg map[string]int
+				if err := ws.ReadJSON(&msg); err != nil {
+					received <- n
+					return nil
+				}
+				n++
+				if err := ws.WriteJSON(msg); err != nil {
+					received <- -n
+					return nil
+				}
+			}
+		},
+	}))
+	addr := startWSServer(t, s)
+
+	conn, _, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if err := conn.WriteJSON(map[string]int{"i": i}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		var echo map[string]int
+		if err := conn.ReadJSON(&echo); err != nil {
+			t.Fatalf("active session expired after %d messages: %v", i, err)
+		}
+	}
+	conn.Close()
+	if n := <-received; n != 6 {
+		t.Fatalf("session handled %d messages, want 6", n)
+	}
+}
+
+// F-18: draining ends blocked session handlers and refuses new upgrades.
+func TestSecurityDrainEndsSessions(t *testing.T) {
+	registry := gofiws.NewSessionRegistry()
+	s := gofi.NewFasthttpServer()
+	ended := make(chan struct{})
+	s.Router().Get("/ws", gofi.RouteOptions{Handler: gofiws.NewWithSessionAndOptions(func(ws *gofiws.Session) error {
+		defer close(ended)
+		for {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return nil
+			}
+		}
+	}, gofiws.Options{Registry: registry})})
+	addr := startWSServer(t, s)
+
+	conn, _, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for registry.Active() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 2*time.Second)
+	defer cancel()
+	if err := registry.DrainContext(ctx); err != nil {
+		t.Fatalf("drain did not complete: %v", err)
+	}
+	select {
+	case <-ended:
+	default:
+		t.Fatal("DrainContext returned before the session handler ended")
+	}
+	if _, _, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", nil); err == nil {
+		t.Fatal("upgrade accepted while draining")
+	}
+}
+
+func TestSecurityCrossOriginHandshakeKeeps403(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	s.Router().Get("/ws", gofiws.DefineWebSocket(gofiws.WebSocketOptions{
+		Handler: func(ws *gofiws.Session) error { return nil },
+	}))
+	addr := startWSServer(t, s)
+	_, resp, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", map[string][]string{"Origin": {"https://evil.example"}})
+	if err == nil || resp == nil || resp.StatusCode != 403 {
+		code := 0
+		if resp != nil {
+			code = resp.StatusCode
+		}
+		t.Fatalf("cross-origin handshake: want 403, got %d (err %v)", code, err)
+	}
+}

@@ -196,15 +196,16 @@ func (r *SessionRegistry) IsDraining() bool {
 	return r.draining.Load()
 }
 
-// DrainContext marks the registry as draining, closes active sessions, and waits for all to exit.
+// DrainContext marks the registry as draining, closes active sessions, and
+// waits until every session handler has returned or ctx is done. New upgrades
+// are refused once draining starts.
 func (r *SessionRegistry) DrainContext(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
 
-	r.draining.Store(true)
-
 	r.mu.Lock()
+	r.draining.Store(true)
 	current := make([]*Session, 0, len(r.sessions))
 	for s := range r.sessions {
 		current = append(current, s)
@@ -212,31 +213,33 @@ func (r *SessionRegistry) DrainContext(ctx context.Context) error {
 	r.mu.Unlock()
 
 	for _, s := range current {
-		_ = s.Close()
+		s.shutdown()
 	}
 
-	r.mu.Lock()
-	r.sessions = make(map[*Session]struct{})
-	r.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for r.Active() > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
+	return nil
 }
 
+// track registers s unless the registry is draining. The draining check and
+// the insert happen under one lock so a session cannot slip past a drain.
 func (r *SessionRegistry) track(s *Session) bool {
 	if r == nil {
 		return true
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.draining.Load() {
 		return false
 	}
-	r.mu.Lock()
 	r.sessions[s] = struct{}{}
-	r.mu.Unlock()
 	return true
 }
 
@@ -292,7 +295,8 @@ func (s *Session) WriteMessage(mt int, data []byte) error {
 
 // ReadJSON reads a websocket frame, unmarshals JSON into dst, and validates against inbound schema if configured.
 func (s *Session) ReadJSON(dst any) error {
-	_, payload, err := s.conn.ReadMessage()
+	// Read through ReadMessage so ReadTimeout is refreshed per message.
+	_, payload, err := s.ReadMessage()
 	if err != nil {
 		return err
 	}
@@ -319,9 +323,8 @@ func (s *Session) WriteJSON(v any) error {
 		return err
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return s.conn.WriteMessage(TextMessage, payload)
+	// Write through WriteMessage so WriteTimeout is refreshed per message.
+	return s.WriteMessage(TextMessage, payload)
 }
 
 // WriteError validates the payload against the route error contract when available and writes it as a text frame.
@@ -337,9 +340,8 @@ func (s *Session) WriteError(v any) error {
 		return err
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return s.conn.WriteMessage(TextMessage, payload)
+	// Write through WriteMessage so WriteTimeout is refreshed per message.
+	return s.WriteMessage(TextMessage, payload)
 }
 
 // ValidateInbound validates payload against configured inbound schema when set.
@@ -359,8 +361,21 @@ func (s *Session) ValidateOutbound(v any) error {
 }
 
 // Close closes the underlying websocket connection.
+//
+// fasthttp closes a hijacked connection only after the session handler
+// returns, so Close also expires the read and write deadlines: a handler
+// blocked in a read or write returns promptly with an error.
 func (s *Session) Close() error {
+	now := time.Now()
+	_ = s.conn.SetReadDeadline(now)
+	_ = s.conn.SetWriteDeadline(now)
 	return s.conn.Close()
+}
+
+// shutdown sends a "going away" close frame, then closes the session.
+func (s *Session) shutdown() {
+	_ = s.conn.WriteControl(CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"), time.Now().Add(time.Second))
+	_ = s.Close()
 }
 
 // CloseWithReason writes a close control frame with code/reason and then closes the socket.
@@ -370,7 +385,7 @@ func (s *Session) CloseWithReason(code int, reason string) error {
 		deadline = time.Now().Add(s.writeTimeout)
 	}
 	err := s.conn.WriteControl(CloseMessage, websocket.FormatCloseMessage(code, reason), deadline)
-	closeErr := s.conn.Close()
+	closeErr := s.Close()
 	if err != nil {
 		return err
 	}
@@ -503,6 +518,11 @@ func NewWithContextAndOptions(handler func(gofi.Context, *Conn) error, opts Opti
 			}
 			if c.Request().FastHTTPContext().Hijacked() {
 				return err
+			}
+			// Keep the upgrader's own rejection (for example 403 for a
+			// cross-origin handshake) instead of collapsing it to 400.
+			if c.Request().FastHTTPContext().Response.StatusCode() >= 400 {
+				return nil
 			}
 			return c.SendString(http.StatusBadRequest, "websocket handshake failed")
 		}
