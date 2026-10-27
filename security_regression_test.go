@@ -1151,3 +1151,88 @@ func TestSecurityLoggerAndRequestID(t *testing.T) {
 		t.Errorf("safe request ID replaced: %q", id)
 	}
 }
+
+// F-11: CORS varies on Origin, distinguishes preflights, validates config.
+func TestSecurityCORS(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(middleware.CORS(middleware.CORSConfig{AllowOrigins: "https://app.example"}))
+	r.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	r.Options("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "options handler") }})
+
+	for _, origin := range []string{"https://app.example", "https://evil.example"} {
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/x", Headers: map[string]string{"Origin": origin}})
+		if !strings.Contains(resp.Header("Vary"), "Origin") {
+			t.Errorf("origin %s: missing Vary: Origin (%v)", origin, resp.HeaderMap)
+		}
+	}
+	resp, _ := r.Test(gofi.TestOptions{Method: "OPTIONS", Path: "/x", Headers: map[string]string{"Origin": "https://app.example"}})
+	if resp.BodyString() != "options handler" {
+		t.Errorf("ordinary OPTIONS treated as a preflight: %d %q", resp.StatusCode, resp.BodyString())
+	}
+
+	if _, err := middleware.NewCORS(middleware.CORSConfig{AllowOrigins: "*", AllowCredentials: true}); err == nil {
+		t.Error("wildcard origin with credentials accepted")
+	}
+	if _, err := middleware.NewCORS(middleware.CORSConfig{AllowOrigins: "app.example"}); err == nil {
+		t.Error("origin without scheme accepted")
+	}
+	strict, err := middleware.NewCORS(middleware.CORSConfig{AllowOrigins: "https://app.example", AllowMethods: "GET"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := gofi.NewRouter()
+	r2.Use(strict)
+	r2.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	resp, _ = r2.Test(gofi.TestOptions{Method: "OPTIONS", Path: "/x", Headers: map[string]string{
+		"Origin": "https://app.example", "Access-Control-Request-Method": "DELETE", "Access-Control-Request-Headers": "X-Secret"}})
+	if resp.HasHeader("Access-Control-Allow-Methods") || resp.HasHeader("Access-Control-Allow-Headers") {
+		t.Errorf("validated CORS allowed an unlisted method or reflected headers: %v", resp.HeaderMap)
+	}
+}
+
+// F-12: CSRF tokens are bound to a session, expire, and check Origin.
+func TestSecuritySessionBoundCSRF(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	if _, err := middleware.NewCSRF(middleware.CSRFConfig{}, middleware.CSRFSessionOptions{SigningKey: []byte("short"), SessionID: func(gofi.Context) string { return "" }}); err == nil {
+		t.Fatal("short signing key accepted")
+	}
+	csrf, err := middleware.NewCSRF(middleware.CSRFConfig{}, middleware.CSRFSessionOptions{
+		SigningKey: key,
+		SessionID:  func(c gofi.Context) string { return c.HeaderVal("X-Session") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := gofi.NewRouter()
+	r.Use(csrf)
+	r.Get("/form", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "form") }})
+	r.Post("/act", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "done") }})
+
+	tokenFor := func(session string) string {
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/form", Headers: map[string]string{"X-Session": session}})
+		return resp.CookieValue("csrf_")
+	}
+	post := func(session, token string, extra map[string]string) int {
+		headers := map[string]string{"X-Session": session, "X-CSRF-Token": token}
+		for k, v := range extra {
+			headers[k] = v
+		}
+		resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/act", Headers: headers,
+			Cookies: []http.Cookie{{Name: "csrf_", Value: token}}})
+		return resp.StatusCode
+	}
+
+	alice := tokenFor("alice")
+	if code := post("alice", alice, nil); code != 200 {
+		t.Fatalf("valid token rejected: %d", code)
+	}
+	if code := post("mallory", alice, nil); code != http.StatusForbidden {
+		t.Errorf("token from another session accepted: %d", code)
+	}
+	if code := post("alice", alice, map[string]string{"Origin": "https://evil.example"}); code != http.StatusForbidden {
+		t.Errorf("cross-origin unsafe request accepted: %d", code)
+	}
+	if code := post("alice", "v1.1.abc.def", nil); code != http.StatusForbidden {
+		t.Errorf("forged token accepted: %d", code)
+	}
+}
