@@ -64,8 +64,9 @@ func ETag(config ...ETagConfig) gofi.MiddlewareFunc {
 			etag = "W/" + etag
 		}
 
-		// Set ETag header
-		c.Writer().Header().Set("ETag", etag)
+		// Set ETag header natively: the handler may already have committed
+		// the Writer() header view, after which view edits have no effect.
+		fctx.Response.Header.Set("ETag", etag)
 
 		// Check If-None-Match header
 		clientETag := c.HeaderVal("If-None-Match")

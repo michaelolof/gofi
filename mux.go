@@ -734,21 +734,12 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 		}
 	}()
 
-	// Build InjectResponse from fctx
+	// Write adapter headers back exactly as live dispatch does, then build
+	// the InjectResponse from the native response.
+	c.finishWriter()
 	respHeaders := make(http.Header)
 	for key, value := range fctx.Response.Header.All() {
 		respHeaders.Add(string(key), string(value))
-	}
-
-	// Include adapter headers only if they were never synced to fasthttp.
-	// If syncHeaders already ran (e.g. via WriteHeader or Write), the values
-	// are already captured above from fctx.Response.Header.
-	if c.rw != nil && c.rw.headerInit && !c.rw.headerSync {
-		for k, vals := range c.rw.header {
-			for _, v := range vals {
-				respHeaders.Add(k, v)
-			}
-		}
 	}
 
 	resp = &InjectResponse{

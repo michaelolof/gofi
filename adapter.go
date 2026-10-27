@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/michaelolof/gofi/utils"
@@ -17,13 +18,36 @@ type ResponseWriter interface {
 	http.ResponseWriter
 }
 
-// responseWriter implements ResponseWriter by wrapping fasthttp.RequestCtx
+// responseWriter implements ResponseWriter by wrapping fasthttp.RequestCtx.
+//
+// Header() is a view of the response headers: on first access it is filled
+// with the headers already set on the native response, except headers the
+// transport manages (Content-Length, Connection, Date, Server, Trailer,
+// Transfer-Encoding) and native cookies. The view is written back once, on the
+// first Write or WriteHeader or when the request finishes, as net/http
+// commits headers. Only keys changed through the view are written back:
+// a changed key replaces the native values of that name, a deleted key removes
+// them, and Set-Cookie values are always added. Edits made through the view
+// after it is written back have no effect.
 type responseWriter struct {
 	ctx            *fasthttp.RequestCtx
 	header         http.Header
-	headerSync     bool // whether headers have been synced to fasthttp
-	headerInit     bool // whether header map was allocated
-	rejectedHeader bool // whether a header containing CR, LF or NUL was dropped
+	initial        http.Header // native headers copied into header on first access
+	headerSync     bool        // whether headers have been synced to fasthttp
+	headerInit     bool        // whether header map was allocated
+	rejectedHeader bool        // whether a header containing CR, LF or NUL was dropped
+}
+
+// transportManagedHeaders are owned by fasthttp's response framing and are
+// not exposed through, or written back from, the Header() view.
+var transportManagedHeaders = map[string]bool{
+	"Connection":        true,
+	"Content-Length":    true,
+	"Date":              true,
+	"Server":            true,
+	"Set-Cookie":        true,
+	"Trailer":           true,
+	"Transfer-Encoding": true,
 }
 
 func newResponseWriter(ctx *fasthttp.RequestCtx) *responseWriter {
@@ -39,11 +63,21 @@ func (w *responseWriter) reset(ctx *fasthttp.RequestCtx) {
 	w.headerInit = false
 	w.rejectedHeader = false
 	w.header = nil
+	w.initial = nil
 }
 
 func (w *responseWriter) Header() http.Header {
 	if !w.headerInit {
 		w.header = make(http.Header)
+		w.initial = make(http.Header)
+		for key, value := range w.ctx.Response.Header.All() {
+			name := http.CanonicalHeaderKey(string(key))
+			if transportManagedHeaders[name] {
+				continue
+			}
+			w.header.Add(name, string(value))
+			w.initial.Add(name, string(value))
+		}
 		w.headerInit = true
 	}
 	return w.header
@@ -68,17 +102,30 @@ func (w *responseWriter) syncHeaders() {
 		return // no headers ever set, or already flushed to fasthttp
 	}
 	w.headerSync = true
+	native := &w.ctx.Response.Header
+	for key := range w.initial {
+		if _, ok := w.header[key]; !ok {
+			native.Del(key)
+		}
+	}
 	for key, vals := range w.header {
 		if !validHeaderField(key) {
 			w.rejectedHeader = true
 			continue
+		}
+		cookies := http.CanonicalHeaderKey(key) == "Set-Cookie"
+		if !cookies && slices.Equal(vals, w.initial[key]) {
+			continue // unchanged through the view; keep later native writes
+		}
+		if !cookies {
+			native.Del(key)
 		}
 		for _, val := range vals {
 			if !validHeaderField(val) {
 				w.rejectedHeader = true
 				continue
 			}
-			w.ctx.Response.Header.Add(key, val)
+			native.Add(key, val)
 		}
 	}
 }

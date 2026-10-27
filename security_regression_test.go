@@ -859,3 +859,78 @@ func TestSecurityCopiedContextIsUsable(t *testing.T) {
 		t.Fatal("copied context goroutine did not finish")
 	}
 }
+
+// F-16: one header model across native and Writer() access.
+func TestSecurityHeaderModel(t *testing.T) {
+	run := func(t *testing.T, handler gofi.HandlerFunc, mws ...gofi.MiddlewareFunc) *gofi.InjectResponse {
+		t.Helper()
+		r := gofi.NewRouter()
+		r.Use(mws...)
+		r.Get("/h", gofi.RouteOptions{Handler: handler})
+		resp, err := r.Test(gofi.TestOptions{Method: "GET", Path: "/h"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	t.Run("view sees native headers and replaces without duplicating", func(t *testing.T) {
+		resp := run(t, func(c gofi.Context) error {
+			c.Request().Context().Response.Header.Set("X-Frame-Options", "DENY")
+			if got := c.Writer().Header().Get("X-Frame-Options"); got != "DENY" {
+				return fmt.Errorf("view did not see native header: %q", got)
+			}
+			c.Writer().Header().Set("X-Frame-Options", "SAMEORIGIN")
+			return c.SendString(200, "ok")
+		})
+		if v := resp.HeaderMap.Values("X-Frame-Options"); len(v) != 1 || v[0] != "SAMEORIGIN" {
+			t.Fatalf("want one SAMEORIGIN value, got %v (body %q)", v, resp.BodyString())
+		}
+	})
+
+	t.Run("delete through the view removes the native header", func(t *testing.T) {
+		resp := run(t, func(c gofi.Context) error {
+			c.Request().Context().Response.Header.Set("X-Debug", "1")
+			c.Writer().Header().Del("X-Debug")
+			return c.SendString(200, "ok")
+		})
+		if resp.HasHeader("X-Debug") {
+			t.Fatalf("deleted header still sent: %v", resp.HeaderMap)
+		}
+	})
+
+	t.Run("unchanged view keys do not overwrite later native writes", func(t *testing.T) {
+		resp := run(t, func(c gofi.Context) error {
+			c.Request().Context().Response.Header.Set("X-Version", "1")
+			_ = c.Writer().Header()
+			c.Request().Context().Response.Header.Set("X-Version", "2")
+			return c.SendString(200, "ok")
+		})
+		if v := resp.HeaderMap.Values("X-Version"); len(v) != 1 || v[0] != "2" {
+			t.Fatalf("stale view value overwrote native header: %v", v)
+		}
+	})
+
+	t.Run("multiple cookies are preserved", func(t *testing.T) {
+		resp := run(t, func(c gofi.Context) error {
+			c.Request().Context().Response.Header.Add("Set-Cookie", "native=1")
+			c.Writer().Header().Add("Set-Cookie", "a=1")
+			c.Writer().Header().Add("Set-Cookie", "b=2")
+			return c.SendString(200, "ok")
+		})
+		if n := len(resp.Cookies()); n != 3 {
+			t.Fatalf("want 3 cookies, got %d: %v", n, resp.HeaderMap.Values("Set-Cookie"))
+		}
+	})
+
+	t.Run("ETag survives a committed view", func(t *testing.T) {
+		resp := run(t, func(c gofi.Context) error {
+			c.Writer().WriteHeader(200)
+			_, err := c.Writer().Write([]byte("body"))
+			return err
+		}, middleware.ETag())
+		if resp.Header("ETag") == "" {
+			t.Fatalf("ETag lost after the handler wrote through Writer(): %v", resp.HeaderMap)
+		}
+	})
+}
