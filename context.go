@@ -232,6 +232,7 @@ func (c *context) Copy() Context {
 		bindedCacheResult: c.bindedCacheResult,
 		handlerIdx:        c.handlerIdx,
 		fctx:              new(fasthttp.RequestCtx),
+		base:              c.base,
 		// The copy has no TLS connection, so carry the resolved client IP and
 		// scheme across explicitly.
 		clientIP: strings.Clone(ClientIP(c)),
@@ -373,6 +374,18 @@ func (c *context) Context() stdcontext.Context {
 		return c.stdCtx
 	}
 	return c.fctx
+}
+
+// ServerContext returns a context that is cancelled only when the router's
+// server shuts down. Work that outlives the request, such as a WebSocket
+// session or a background job started from a handler, should derive its own
+// cancellable context from it rather than from c.Context(), which ends with
+// the request.
+func ServerContext(c Context) stdcontext.Context {
+	if cc, ok := c.(*context); ok && cc.base != nil {
+		return cc.base
+	}
+	return stdcontext.Background()
 }
 
 // SetRequestContext replaces the Go context that c.Context() returns for the

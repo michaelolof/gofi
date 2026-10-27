@@ -231,9 +231,14 @@ func (s *serveMux) finishDispatch(ctx *fasthttp.RequestCtx, st *dispatchState) {
 	}
 	s.emitRequestEvent(ctx, st)
 	// A panicking context may be inconsistent and is not reused; a hijacked
-	// one belongs to the connection handler.
-	if st.ctx != nil && !st.panicked && !ctx.Hijacked() {
-		s.releaseContext(st.ctx)
+	// one belongs to the connection handler, which uses ServerContext rather
+	// than the request context, so the request context ends here.
+	if st.ctx != nil && !st.panicked {
+		if ctx.Hijacked() {
+			st.ctx.cancelContext()
+		} else {
+			s.releaseContext(st.ctx)
+		}
 	}
 }
 

@@ -219,3 +219,70 @@ func TestSecurityCrossOriginHandshakeKeeps403(t *testing.T) {
 		t.Fatalf("cross-origin handshake: want 403, got %d (err %v)", code, err)
 	}
 }
+
+// IP-18: session context ends at server shutdown; the registry caps sessions.
+func TestSecuritySessionDoneOnShutdown(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	observed := make(chan struct{})
+	s.Router().Get("/ws", gofiws.DefineWebSocket(gofiws.WebSocketOptions{
+		Handler: func(ws *gofiws.Session) error {
+			if ws.Context().Context().Err() != nil {
+				return nil // must not be cancelled when the upgrade request ends
+			}
+			<-ws.Done()
+			close(observed)
+			return nil
+		},
+	}))
+	addr := startWSServer(t, s)
+	conn, _, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+	go func() {
+		ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), time.Second)
+		defer cancel()
+		_ = s.ShutdownWithContext(ctx)
+	}()
+	select {
+	case <-observed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not observe server shutdown")
+	}
+}
+
+func TestSecuritySessionLimit(t *testing.T) {
+	if _, err := gofiws.NewSessionRegistryWithLimit(0); err == nil {
+		t.Fatal("zero limit accepted")
+	}
+	registry, err := gofiws.NewSessionRegistryWithLimit(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := gofi.NewFasthttpServer()
+	s.Router().Get("/ws", gofiws.DefineWebSocket(gofiws.WebSocketOptions{
+		Runtime: gofiws.RuntimeOptions{Registry: registry},
+		Handler: func(ws *gofiws.Session) error {
+			for {
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return nil
+				}
+			}
+		},
+	}))
+	addr := startWSServer(t, s)
+	first, _, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	for registry.Active() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, resp, err := fasthttpws.DefaultDialer.Dial("ws://"+addr+"/ws", nil)
+	if err == nil || resp == nil || resp.StatusCode != 503 {
+		t.Fatalf("second session admitted past the limit (err %v)", err)
+	}
+}

@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -112,6 +113,8 @@ type SessionRegistry struct {
 	mu       sync.Mutex
 	sessions map[*Session]struct{}
 	draining atomic.Bool
+	// max bounds concurrent sessions; zero means unlimited.
+	max int
 }
 
 var (
@@ -181,6 +184,28 @@ func NewSessionRegistry() *SessionRegistry {
 	return &SessionRegistry{sessions: make(map[*Session]struct{})}
 }
 
+// NewSessionRegistryWithLimit creates a registry that admits at most max
+// concurrent sessions. Upgrades beyond it are refused with 503 before the
+// handshake.
+func NewSessionRegistryWithLimit(max int) (*SessionRegistry, error) {
+	if max <= 0 {
+		return nil, errors.New("gofi/websocket: session limit must be positive")
+	}
+	r := NewSessionRegistry()
+	r.max = max
+	return r, nil
+}
+
+// full reports whether the registry is at its session limit.
+func (r *SessionRegistry) full() bool {
+	if r == nil || r.max == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.sessions) >= r.max
+}
+
 // Active returns the current number of tracked active websocket sessions.
 func (r *SessionRegistry) Active() int {
 	r.mu.Lock()
@@ -236,7 +261,7 @@ func (r *SessionRegistry) track(s *Session) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.draining.Load() {
+	if r.draining.Load() || (r.max > 0 && len(r.sessions) >= r.max) {
 		return false
 	}
 	r.sessions[s] = struct{}{}
@@ -268,6 +293,12 @@ var structValidatorCache sync.Map // map[reflect.Type]*cachedStructValidator
 // Context returns the request context snapshot associated with the ws session.
 func (s *Session) Context() gofi.Context {
 	return s.ctx
+}
+
+// Done is closed when the session ends or the server shuts down. Long-running
+// session loops and work started for the session should stop when it closes.
+func (s *Session) Done() <-chan struct{} {
+	return s.ctx.Context().Done()
 }
 
 // Conn returns the underlying websocket connection for low-level operations.
@@ -435,6 +466,9 @@ func NewWithContextAndOptions(handler func(gofi.Context, *Conn) error, opts Opti
 		if opts.Registry != nil && opts.Registry.IsDraining() {
 			return c.SendString(http.StatusServiceUnavailable, "websocket server draining")
 		}
+		if opts.Registry.full() {
+			return c.SendString(http.StatusServiceUnavailable, "websocket session limit reached")
+		}
 
 		if !websocket.FastHTTPIsWebSocketUpgrade(c.Request().FastHTTPContext()) {
 			return c.SendString(http.StatusUpgradeRequired, "websocket upgrade required")
@@ -453,10 +487,15 @@ func NewWithContextAndOptions(handler func(gofi.Context, *Conn) error, opts Opti
 		}
 
 		cc := c.Copy()
+		// The session context ends when the session ends or the server shuts
+		// down; it does not end with the HTTP upgrade request.
+		sessionCtx, cancelSession := context.WithCancel(gofi.ServerContext(c))
+		_ = gofi.SetRequestContext(cc, sessionCtx)
 		err := upgrader.Upgrade(c.Request().FastHTTPContext(), func(conn *websocket.Conn) {
 			// The session runs on fasthttp's hijack goroutine, after HTTP
 			// middleware (including Recover) has returned. Contain panics here.
 			// This deferred call runs last, after the cleanup below.
+			defer cancelSession()
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("gofi/websocket: recovered panic in session handler: %v\n%s", r, debug.Stack())
@@ -513,6 +552,7 @@ func NewWithContextAndOptions(handler func(gofi.Context, *Conn) error, opts Opti
 		})
 
 		if err != nil {
+			cancelSession()
 			if opts.Hooks.OnUpgradeError != nil {
 				opts.Hooks.OnUpgradeError(c, err)
 			}
