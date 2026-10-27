@@ -248,6 +248,16 @@ func (n *node) insertChild(path, fullPath string, data *routeData) {
 
 			n.path = path[:i]
 
+			// Reach the catch-all only through the '/' edge before it, as httprouter
+			// does. Hung directly off a static prefix such as "/app", it would also
+			// match "/application" and block static siblings such as "/apple".
+			if len(n.path) > 0 {
+				edge := &node{priority: 1, maxParams: 1}
+				n.indices += "/"
+				n.children = append(n.children, edge)
+				n = edge
+			}
+
 			// First node: catchAll node with empty path
 			child := &node{
 				nType: catchAll,
@@ -349,6 +359,11 @@ walk:
 						goto miss
 
 					case catchAll:
+						// A catch-all only covers whole segments: the rest of the
+						// path must start at the '/' that precedes "*name".
+						if path[0] != '/' {
+							goto miss
+						}
 						// catchAll is a two-node structure: first node (empty path,
 						// no data), second node (path="/*name", has data).
 						if len(n.children) > 0 {
@@ -412,12 +427,14 @@ walk:
 	}
 
 miss:
-	if !ambiguous {
-		return nil, tsr
-	}
+	// Drop params from the abandoned walk, so a miss leaves the caller's params
+	// as they were (middleware on a 404 or 405 must not see them).
 	if params != nil && appended > 0 {
 		p := params()
 		*p = (*p)[:len(*p)-appended]
+	}
+	if !ambiguous {
+		return nil, tsr
 	}
 
 	data, retryTSR := startNode.getValueBacktracking(fullPath, params)
@@ -483,6 +500,9 @@ walk:
 				goto miss
 
 			case catchAll:
+				if len(path) == 0 || path[0] != '/' {
+					goto miss
+				}
 				if len(n.children) > 0 {
 					n = n.children[0]
 				}

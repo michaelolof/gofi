@@ -352,7 +352,7 @@ Gofi supports three kinds of path segments:
 |--------|---------|-------------|
 | Static | `/users/me` | Matched exactly. |
 | Named parameter | `/users/:id` | Matches any single segment. Value read via `c.PathParam("id")`. |
-| Catch-all | `/files/*filepath` | Matches the remainder of the path (including sub-segments). Value read via `c.PathParam("filepath")`. |
+| Catch-all | `/files/*filepath` | Matches `/files/` and everything below it (including sub-segments), never `/filesx`. Value read via `c.PathParam("filepath")`, without the leading `/`. |
 
 ### Match priority
 

@@ -834,3 +834,211 @@ func TestRouter_405_MethodNotAllowed(t *testing.T) {
 		}
 	})
 }
+
+// --- Catch-all segment boundary ---
+//
+// A catch-all "/<prefix>/*name" covers "/<prefix>/" and everything below it,
+// never a request that merely starts with the prefix text ("/<prefix>foo").
+
+func TestTree_CatchAllStopsAtSegmentBoundary(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/src/*filepath", &routeData{meta: "catchall"})
+
+	assertTreeLookup(t, tree, "/src/a/b", "catchall", false, Params{{Key: "filepath", Value: "a/b"}})
+	assertTreeLookup(t, tree, "/src/", "catchall", false, Params{{Key: "filepath", Value: ""}})
+	assertTreeLookup(t, tree, "/srcfoo", "", false, nil)
+	assertTreeLookup(t, tree, "/srcx/y", "", false, nil)
+	assertTreeLookup(t, tree, "/src", "", false, nil)
+}
+
+func TestTree_CatchAllBesideBarePrefix(t *testing.T) {
+	orders := map[string][]string{
+		"bare-first":     {"/app", "/app/*filepath"},
+		"catchall-first": {"/app/*filepath", "/app"},
+	}
+
+	for name, routes := range orders {
+		t.Run(name, func(t *testing.T) {
+			tree := &node{}
+			for _, route := range routes {
+				tree.addRoute(route, &routeData{meta: route})
+			}
+
+			assertTreeLookup(t, tree, "/app", "/app", false, nil)
+			assertTreeLookup(t, tree, "/app/x", "/app/*filepath", false, Params{{Key: "filepath", Value: "x"}})
+			assertTreeLookup(t, tree, "/application", "", false, nil)
+		})
+	}
+}
+
+func TestTree_CatchAllBesideStaticSharingPrefixText(t *testing.T) {
+	orders := map[string][]string{
+		"catchall-first": {"/app/*filepath", "/apple"},
+		"static-first":   {"/apple", "/app/*filepath"},
+	}
+
+	for name, routes := range orders {
+		t.Run(name, func(t *testing.T) {
+			tree := &node{}
+			for _, route := range routes {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("registering %q panicked: %v", route, r)
+						}
+					}()
+					tree.addRoute(route, &routeData{meta: route})
+				}()
+			}
+
+			assertTreeLookup(t, tree, "/apple", "/apple", false, nil)
+			assertTreeLookup(t, tree, "/app/x", "/app/*filepath", false, Params{{Key: "filepath", Value: "x"}})
+			assertTreeLookup(t, tree, "/appx", "", false, nil)
+		})
+	}
+}
+
+func TestTree_CatchAllAfterParamUnchanged(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/files/:dir/*filepath", &routeData{meta: "catchall"})
+
+	assertTreeLookup(t, tree, "/files/js/a.js", "catchall", false, Params{
+		{Key: "dir", Value: "js"},
+		{Key: "filepath", Value: "a.js"},
+	})
+
+	var ps Params
+	if d, _ := tree.getValue("/files/js", func() *Params { return &ps }); d != nil {
+		t.Errorf("path %q: expected no route, got %q", "/files/js", d.meta)
+	}
+}
+
+func TestTree_BacktrackingIntoCatchAllUnchanged(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/users/me/settings", &routeData{meta: "static"})
+	tree.addRoute("/users/:id/*rest", &routeData{meta: "catchall"})
+
+	assertTreeLookup(t, tree, "/users/me/other", "catchall", false, Params{
+		{Key: "id", Value: "me"},
+		{Key: "rest", Value: "other"},
+	})
+	assertTreeLookup(t, tree, "/users/me/settings", "static", false, nil)
+}
+
+func TestTree_CatchAllConflictsStillPanic(t *testing.T) {
+	cases := [][2]string{
+		{"/app/*filepath", "/app/foo"},
+		{"/app/*filepath", "/app/:id"},
+		{"/app/*filepath", "/app/*other"},
+		{"/files/static.txt", "/files/*path"},
+	}
+
+	for _, routes := range cases {
+		t.Run(routes[0]+" then "+routes[1], func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("registering %q after %q should panic", routes[1], routes[0])
+				}
+			}()
+
+			tree := &node{}
+			tree.addRoute(routes[0], &routeData{})
+			tree.addRoute(routes[1], &routeData{})
+		})
+	}
+}
+
+func TestRouter_CatchAllNearMissIsNotFound(t *testing.T) {
+	t.Run("no 405 from another method's catch-all", func(t *testing.T) {
+		r := newRouter()
+		ok := func(c Context) error { return c.SendString(200, "ok") }
+		r.Get("/app", RouteOptions{Handler: ok})
+		r.Get("/app/*filepath", RouteOptions{Handler: ok})
+		r.Head("/app/*filepath", RouteOptions{Handler: ok})
+
+		resp, err := r.Test(TestOptions{Method: "GET", Path: "/application"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 404 {
+			t.Errorf("expected 404, got %d", resp.StatusCode)
+		}
+		if allow := resp.HeaderMap.Get("Allow"); allow != "" {
+			t.Errorf("expected no Allow header, got %q", allow)
+		}
+	})
+
+	t.Run("catch-all handler does not run", func(t *testing.T) {
+		r := newRouter()
+		called := false
+		r.Get("/assets/*filepath", RouteOptions{Handler: func(c Context) error {
+			called = true
+			return c.SendString(200, "asset")
+		}})
+
+		resp, err := r.Test(TestOptions{Method: "GET", Path: "/assetsfoo"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 404 {
+			t.Errorf("expected 404, got %d", resp.StatusCode)
+		}
+		if called {
+			t.Error("catch-all handler ran for /assetsfoo")
+		}
+	})
+}
+
+// --- A miss leaves params untouched ---
+
+func TestTree_MissLeavesParamsUntouched(t *testing.T) {
+	cases := []struct {
+		routes []string
+		path   string
+	}{
+		{routes: []string{"/users/:id/posts"}, path: "/users/42/comments"},
+		{routes: []string{"/users/:id/posts/:post"}, path: "/users/42/posts/7/x"},
+		{routes: []string{"/users/:id/posts"}, path: "/users/42/"},
+		{routes: []string{"/users/me/settings", "/users/:id/posts"}, path: "/users/me/other"},
+	}
+
+	for _, test := range cases {
+		t.Run(test.path, func(t *testing.T) {
+			tree := &node{}
+			for _, route := range test.routes {
+				tree.addRoute(route, &routeData{meta: route})
+			}
+
+			ps := Params{{Key: "outer", Value: "kept"}}
+			if d, _ := tree.getValue(test.path, func() *Params { return &ps }); d != nil {
+				t.Fatalf("path %q: expected no route, got %q", test.path, d.meta)
+			}
+			if len(ps) != 1 || ps[0] != (Param{Key: "outer", Value: "kept"}) {
+				t.Errorf("path %q: params after miss = %#v, want only the caller's", test.path, ps)
+			}
+		})
+	}
+}
+
+func TestRouter_NotFoundMiddlewareSeesNoStaleParams(t *testing.T) {
+	r := newRouter()
+	seen := "unset"
+	r.Use(func(c Context) error {
+		seen = c.Param("id")
+		return c.Next()
+	})
+	r.Get("/users/:id/posts", RouteOptions{Handler: func(c Context) error {
+		return c.SendString(200, "ok")
+	}})
+
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/users/42/comments"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+	if seen != "" {
+		t.Errorf("middleware on a 404 saw id=%q, want empty", seen)
+	}
+}
