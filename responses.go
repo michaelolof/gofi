@@ -140,9 +140,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 			if err != nil {
 				return err
 			}
-
-			c.fctx.Response.Header.Set(key, val)
-			return nil
+			return c.setSchemaHeader(key, val)
 		}
 
 		if spec, ok := c.serverOpts.customSpecs.Find(string(val.format)); ok {
@@ -172,7 +170,9 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 					return err
 				}
 
-				c.fctx.Response.Header.Set(key, fmt.Sprintf("%v", hv))
+				if err := c.setSchemaHeader(key, fmt.Sprintf("%v", hv)); err != nil {
+					return err
+				}
 
 			case val.format == utils.TimeObjectFormat:
 				switch hf.Kind() {
@@ -191,7 +191,9 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return err
 					}
 
-					c.fctx.Response.Header.Set(key, tv.Format(val.pattern))
+					if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
+						return err
+					}
 
 				case reflect.Struct:
 					tv, ok := hv.(time.Time)
@@ -208,12 +210,24 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return err
 					}
 
-					c.fctx.Response.Header.Set(key, tv.Format(val.pattern))
+					if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
 
+	return nil
+}
+
+// setSchemaHeader writes a schema-defined response header, rejecting names
+// and values that contain CR, LF or NUL.
+func (c *context) setSchemaHeader(key, val string) error {
+	if !validHeaderField(key) || !validHeaderField(val) {
+		return newErrReport(ResponseErr, schemaHeaders, key, "header", errors.New("header contains CR, LF or NUL"))
+	}
+	c.fctx.Response.Header.Set(key, val)
 	return nil
 }
 

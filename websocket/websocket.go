@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"reflect"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,7 +47,14 @@ type RuntimeOptions struct {
 
 // Session wraps a websocket connection with the request context snapshot.
 // This keeps route params, headers, and stores accessible during ws lifecycle.
+//
+// Session write helpers (WriteMessage, WriteJSON, WriteError) are safe to call
+// from multiple goroutines; they are serialized internally. Reads must happen
+// on one goroutine at a time. Direct use of Conn() bypasses this protection:
+// the underlying connection supports one concurrent writer and one concurrent
+// reader, and panics on concurrent writes.
 type Session struct {
+	writeMu        sync.Mutex
 	conn           *Conn
 	ctx            gofi.Context
 	inboundSchema  any
@@ -273,6 +282,8 @@ func (s *Session) ReadMessage() (int, []byte, error) {
 
 // WriteMessage writes a frame to the websocket connection.
 func (s *Session) WriteMessage(mt int, data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if s.writeTimeout > 0 {
 		_ = s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 	}
@@ -308,6 +319,8 @@ func (s *Session) WriteJSON(v any) error {
 		return err
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.conn.WriteMessage(TextMessage, payload)
 }
 
@@ -324,6 +337,8 @@ func (s *Session) WriteError(v any) error {
 		return err
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.conn.WriteMessage(TextMessage, payload)
 }
 
@@ -424,6 +439,18 @@ func NewWithContextAndOptions(handler func(gofi.Context, *Conn) error, opts Opti
 
 		cc := c.Copy()
 		err := upgrader.Upgrade(c.Request().FastHTTPContext(), func(conn *websocket.Conn) {
+			// The session runs on fasthttp's hijack goroutine, after HTTP
+			// middleware (including Recover) has returned. Contain panics here.
+			// This deferred call runs last, after the cleanup below.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("gofi/websocket: recovered panic in session handler: %v\n%s", r, debug.Stack())
+					if opts.Hooks.OnSessionError != nil {
+						opts.Hooks.OnSessionError(cc, fmt.Errorf("websocket session panicked: %v", r))
+					}
+				}
+			}()
+
 			if opts.MaxMessageBytes > 0 {
 				conn.SetReadLimit(int64(opts.MaxMessageBytes))
 			}

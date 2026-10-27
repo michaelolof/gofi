@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log"
 	"path"
 	"strings"
 
@@ -35,7 +36,12 @@ var StaticConfigDefault = StaticConfig{
 	Compress: false,
 }
 
-// Static creates a new middleware handler for serving static files
+// Static creates a new middleware handler for serving static files.
+//
+// Paths with any segment beginning with "." (such as /.env or /.git/config)
+// are never served. Directory requests that have no index file fall through to
+// the next handler instead of answering with a redirect or 403. Configure Root
+// explicitly: without it the working directory is served.
 func Static(config ...StaticConfig) gofi.MiddlewareFunc {
 	// Set default config
 	cfg := StaticConfigDefault
@@ -51,6 +57,14 @@ func Static(config ...StaticConfig) gofi.MiddlewareFunc {
 			cfg.Index = StaticConfigDefault.Index
 		}
 	}
+
+	if len(config) == 0 || config[0].Root == "" {
+		log.Printf("gofi/middleware: Static has no Root and serves the working directory; set StaticConfig.Root to a directory that contains only public files")
+	}
+
+	// Match the prefix on segment boundaries: "/public" serves "/public" and
+	// "/public/...", never "/publicity".
+	prefix := strings.TrimSuffix(cfg.Prefix, "/")
 
 	// Internal fasthttp FS handler setup
 	fs := &fasthttp.FS{
@@ -73,37 +87,46 @@ func Static(config ...StaticConfig) gofi.MiddlewareFunc {
 		// Explicit path traversal sanitization before prefix matching
 		path := pathClean(c.Path())
 
-		// If a Prefix is configured, only serve files if the path starts with it
-		if cfg.Prefix != "" {
-			if !strings.HasPrefix(path, cfg.Prefix) {
+		if prefix != "" {
+			if path != prefix && !strings.HasPrefix(path, prefix+"/") {
 				return c.Next()
 			}
-
-			// Strip the prefix for the actual file lookup
-			path = strings.TrimPrefix(path, cfg.Prefix)
-			// Ensure it still starts with a slash
-			if !strings.HasPrefix(path, "/") {
-				path = "/" + path
+			path = strings.TrimPrefix(path, prefix)
+			if path == "" {
+				path = "/"
 			}
+		}
 
-			// Temporarily modify the request context so fasthttp.FS sees the stripped path
-			c.Request().Context().Request.URI().SetPath(path)
+		// pathClean has removed "." and ".." segments, so any remaining "/."
+		// starts a hidden file or directory name.
+		if strings.Contains(path, "/.") {
+			return c.Next()
+		}
+
+		fctx := c.Request().Context()
+		uri := fctx.Request.URI()
+		var originalPath []byte
+		if prefix != "" {
+			// Save the raw path before rewriting so the fallback restores the
+			// request exactly; reading c.Path() afterwards would see the rewrite.
+			originalPath = append(originalPath, uri.PathOriginal()...)
+			uri.SetPath(path)
 		}
 
 		// Delegate to fasthttp.FS handler
-		fsHandler(c.Request().Context())
+		fsHandler(fctx)
 
-		// If fasthttp setting status to 404 meaning file not found, we proceed to next route/middleware
-		// instead of hard stopping so the router can try to match other things
-		if c.Request().Context().Response.StatusCode() == fasthttp.StatusNotFound {
-			// Restore the original path so downstream handlers see the correct path
-			if cfg.Prefix != "" {
-				c.Request().Context().Request.URI().SetPath(c.Path())
+		// Missing files and directory outcomes (redirect to a trailing slash,
+		// or a forbidden directory index) fall through to the next handler so
+		// routes are not shadowed by files or directories.
+		switch fctx.Response.StatusCode() {
+		case fasthttp.StatusNotFound, fasthttp.StatusForbidden, fasthttp.StatusFound, fasthttp.StatusMovedPermanently:
+			if prefix != "" {
+				uri.SetPathBytes(originalPath)
 			}
-
-			// Reset the response body since the FS handler would have written "404 Not Found"
-			c.Request().Context().Response.ResetBody()
-
+			fctx.Response.ResetBody()
+			fctx.Response.Header.Del("Location")
+			fctx.Response.SetStatusCode(fasthttp.StatusOK)
 			return c.Next()
 		}
 

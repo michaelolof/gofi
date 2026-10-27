@@ -4,6 +4,7 @@ import (
 	"bufio"
 	stdcontext "context"
 	"fmt"
+	"log"
 	"net/http"
 	"reflect"
 
@@ -221,6 +222,20 @@ func (c *context) Copy() Context {
 	}
 
 	return cc
+}
+
+// finishWriter flushes adapter headers into the response. If a header was
+// rejected for containing CR, LF or NUL, the response fails with a generic 500
+// instead of being sent without it.
+func (c *context) finishWriter() {
+	if c.rw == nil {
+		return
+	}
+	c.rw.syncHeaders()
+	if c.rw.rejectedHeader {
+		log.Println("gofi: rejected a response header containing CR, LF or NUL")
+		writeInternalServerError(c.fctx)
+	}
 }
 
 func (c *context) GetSchemaRules(pattern, method string) any {

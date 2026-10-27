@@ -12,8 +12,15 @@ func (c *context) SetBodyStreamWriter(sw func(w *bufio.Writer) error) error {
 	errCh := make(chan error, 1)
 
 	c.fctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		// The producer runs on its own goroutine, outside the dispatch recovery.
+		defer func() {
+			if r := recover(); r != nil {
+				logRecoveredPanic("stream producer", r)
+				errCh <- errors.New("gofi: stream producer panicked")
+			}
+			close(errCh)
+		}()
 		errCh <- sw(w)
-		close(errCh)
 	})
 
 	return <-errCh

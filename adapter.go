@@ -19,10 +19,11 @@ type ResponseWriter interface {
 
 // responseWriter implements ResponseWriter by wrapping fasthttp.RequestCtx
 type responseWriter struct {
-	ctx        *fasthttp.RequestCtx
-	header     http.Header
-	headerSync bool // whether headers have been synced to fasthttp
-	headerInit bool // whether header map was allocated
+	ctx            *fasthttp.RequestCtx
+	header         http.Header
+	headerSync     bool // whether headers have been synced to fasthttp
+	headerInit     bool // whether header map was allocated
+	rejectedHeader bool // whether a header containing CR, LF or NUL was dropped
 }
 
 func newResponseWriter(ctx *fasthttp.RequestCtx) *responseWriter {
@@ -36,6 +37,7 @@ func (w *responseWriter) reset(ctx *fasthttp.RequestCtx) {
 	w.ctx = ctx
 	w.headerSync = false
 	w.headerInit = false
+	w.rejectedHeader = false
 	w.header = nil
 }
 
@@ -67,10 +69,24 @@ func (w *responseWriter) syncHeaders() {
 	}
 	w.headerSync = true
 	for key, vals := range w.header {
+		if !validHeaderField(key) {
+			w.rejectedHeader = true
+			continue
+		}
 		for _, val := range vals {
+			if !validHeaderField(val) {
+				w.rejectedHeader = true
+				continue
+			}
 			w.ctx.Response.Header.Add(key, val)
 		}
 	}
+}
+
+// validHeaderField reports whether a header name or value is free of CR, LF
+// and NUL, which would otherwise allow response splitting.
+func validHeaderField(s string) bool {
+	return strings.IndexAny(s, "\r\n\x00") < 0
 }
 
 // Request wraps a fasthttp.RequestCtx to provide *http.Request-like access for backward compatibility.
@@ -313,7 +329,11 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
 }
 
 // WrapMiddleware converts a standard net/http middleware into a Gofi MiddlewareFunc.
-// This enables backward compatibility with existing net/http middleware libraries.
+//
+// The wrapped middleware receives a server-style *http.Request carrying the
+// method, target, headers, host, remote address and TLS state. Changes it makes
+// to that request, including a replacement request or context passed to the
+// next handler, are not propagated to downstream Gofi handlers.
 func WrapMiddleware(mw func(http.Handler) http.Handler) MiddlewareFunc {
 	return func(c Context) error {
 		var innerErr error
@@ -330,7 +350,11 @@ func WrapMiddleware(mw func(http.Handler) http.Handler) MiddlewareFunc {
 			return c.Next()
 		}
 
-		wrapped.ServeHTTP(rw, nil)
+		r, err := convertFasthttpToHTTPRequest(c)
+		if err != nil {
+			return NewHTTPError(http.StatusBadRequest, http.StatusText(http.StatusBadRequest))
+		}
+		wrapped.ServeHTTP(rw, r)
 		return innerErr
 	}
 }

@@ -404,7 +404,7 @@ func TestNativeListenerConstructionWiring(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected invalid address to fail")
 			}
-			s := m.activeServer
+			s := m.lifecycle.server()
 			if s == nil || s.server.ErrorHandler == nil || s.server.MaxRequestBodySize != 32 {
 				t.Fatal("native listener is missing shared server configuration")
 			}

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/url"
 	"strings"
 
 	"github.com/michaelolof/gofi"
@@ -75,8 +76,10 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 				// The wildcard capture starts right after the prefix
 				capture := path[len(prefix):]
 
-				// Apply capture to replacement template
-				target := strings.ReplaceAll(replacement, "$1", capture)
+				// Apply capture to replacement template. The capture comes from the
+				// decoded request path, so re-escape it: CR/LF would otherwise split
+				// the response, and '\', '?' or '#' would change the target's meaning.
+				target := strings.ReplaceAll(replacement, "$1", escapeRedirectCapture(capture))
 
 				// Strip double slashes just in case the template was "/new$1" and capture was "/docs"
 				target = strings.ReplaceAll(target, "//", "/")
@@ -88,4 +91,10 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 
 		return c.Next()
 	}
+}
+
+// escapeRedirectCapture percent-encodes a decoded path capture for use in a
+// Location header, keeping '/' separators.
+func escapeRedirectCapture(capture string) string {
+	return (&url.URL{Path: capture}).EscapedPath()
 }

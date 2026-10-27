@@ -16,6 +16,22 @@ type User struct {
 
 When you call `gofi.ValidateAndBind[T](c)`, Gofi validates the input data against these rules. If validation fails, it returns a structured error detailing which fields failed and why.
 
+## Result lifetime
+
+The `*T` returned by `gofi.ValidateAndBind` is request-scoped. Gofi reuses the struct for a later request once the current request finishes, so a pointer retained after the handler returns can show another request's data. Path parameter strings bound into it point into the request buffer and change on the next request over the same connection.
+
+Use the result freely inside the handler and in synchronous calls. To hand data to a goroutine, queue or cache, copy what you need first:
+
+```go
+s, err := gofi.ValidateAndBind[OrderSchema](c)
+if err != nil {
+    return err
+}
+order := s.Request.Body             // copy the value, not the pointer
+id := strings.Clone(s.Request.Path.ID) // clone bound path parameters
+go fulfil(id, order)
+```
+
 ## Validation Only (No Binding)
 
 If you only want to validate the request without binding the data to a struct (for example, if you want to inspect `c.Request()` manually afterwards), you can use `gofi.Validate(c)`.

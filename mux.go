@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"strings"
@@ -57,8 +58,15 @@ type serveMux struct {
 	ctxPool           *sync.Pool
 	maxParams         uint8
 
+	// lifecycle is shared by a root router and every child created through
+	// With, Route or Group, so a server started on any of them is visible to
+	// Shutdown on all of them.
+	lifecycle *routerLifecycle
+}
+
+type routerLifecycle struct {
+	mu           sync.Mutex
 	activeServer *FasthttpServer
-	serverMu     sync.Mutex
 }
 
 func NewRouter() Router {
@@ -136,6 +144,11 @@ func (s *serveMux) Use(middlewares ...MiddlewareFunc) {
 
 func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 	newMux := *s
+	// The child owns a copy of the inherited global middleware. Sharing the
+	// parent's backing array would let a later Use on one router overwrite
+	// middleware another router appended at the same index.
+	newMux.middlewares = make(Middlewares, len(s.middlewares))
+	copy(newMux.middlewares, s.middlewares)
 	newMux.inlineMiddlewares = make(Middlewares, len(s.inlineMiddlewares), len(s.inlineMiddlewares)+len(middlewares))
 	copy(newMux.inlineMiddlewares, s.inlineMiddlewares)
 	newMux.inlineMiddlewares = append(newMux.inlineMiddlewares, middlewares...)
@@ -146,6 +159,12 @@ func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 // handleFastHTTP is the main fasthttp request handler.
 // Called by fasthttp.Server for each incoming connection.
 func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
+	defer recoverDispatch(ctx, "request dispatch")
+	s.dispatch(ctx)
+}
+
+// dispatch routes one request. Callers own panic recovery.
+func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
 	method := b2s(ctx.Method())
 	path := b2s(ctx.Path())
 
@@ -170,9 +189,7 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 			}
 
 			// Sync any headers set via the adapter writer to fasthttp response
-			if c.rw != nil {
-				c.rw.syncHeaders()
-			}
+			c.finishWriter()
 
 			if !ctx.Hijacked() {
 				s.releaseContext(c)
@@ -217,9 +234,7 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 				if err := c.Next(); err != nil {
 					s.opts.errHandler(err, c)
 				}
-				if c.rw != nil {
-					c.rw.syncHeaders()
-				}
+				c.finishWriter()
 				if !ctx.Hijacked() {
 					s.releaseContext(c)
 				}
@@ -248,9 +263,7 @@ func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
 			if err := c.Next(); err != nil {
 				s.opts.errHandler(err, c)
 			}
-			if c.rw != nil {
-				c.rw.syncHeaders()
-			}
+			c.finishWriter()
 			if !ctx.Hijacked() {
 				s.releaseContext(c)
 			}
@@ -276,16 +289,16 @@ func (s *serveMux) handleTransportError(ctx *fasthttp.RequestCtx, err error) {
 		code = http.StatusRequestTimeout
 	}
 
+	defer recoverDispatch(ctx, "transport error handler")
+
 	c := s.acquireContext(ctx)
-	defer s.releaseContext(c)
 	c.setContextSettings(contextOptions{}, nil, s.globalStore, s.opts)
 	// The default interceptor writes a JSON envelope via SendBytes. Set its
 	// content type here; custom interceptors can override it through Context.
 	ctx.Response.Header.SetContentType("application/json")
 	s.opts.errHandler(&transportError{NewHTTPError(code, http.StatusText(code)), err}, c)
-	if c.rw != nil {
-		c.rw.syncHeaders()
-	}
+	c.finishWriter()
+	s.releaseContext(c)
 }
 
 // dummyLogger implements fasthttp.Logger
@@ -341,9 +354,7 @@ func (s *serveMux) runNotFound(ctx *fasthttp.RequestCtx, c *context, path, metho
 		s.opts.errHandler(err, c)
 	}
 
-	if c.rw != nil {
-		c.rw.syncHeaders()
-	}
+	c.finishWriter()
 
 	if !ctx.Hijacked() {
 		s.releaseContext(c)
@@ -385,8 +396,8 @@ func (s *serveMux) Static(prefix, root string) {
 		prefix += "/"
 	}
 
-	fs := http.FileServer(http.Dir(root))
-	handler := http.StripPrefix(prefix, fs)
+	fileServer := http.FileServer(publicFileSystem{http.Dir(root)})
+	handler := http.StripPrefix(prefix, fileServer)
 
 	s.method("GET", prefix+"*filepath", RouteOptions{
 		Handler: func(c Context) error {
@@ -396,20 +407,52 @@ func (s *serveMux) Static(prefix, root string) {
 			if !ok {
 				rw = newHTTPResponseWriterShim(c)
 			}
-			r := convertFasthttpToHTTPRequest(c)
+			r, err := convertFasthttpToHTTPRequest(c)
+			if err != nil {
+				return NewHTTPError(http.StatusBadRequest, http.StatusText(http.StatusBadRequest))
+			}
 			handler.ServeHTTP(rw, r)
 			return nil
 		},
 	})
 }
 
+// publicFileSystem hides dotfiles and directory listings from Router.Static.
+// Any path segment beginning with "." is reported as missing, and a directory
+// is reported as missing unless it has an index.html for http.FileServer.
+type publicFileSystem struct {
+	fs http.FileSystem
+}
+
+func (p publicFileSystem) Open(name string) (http.File, error) {
+	if strings.Contains(name, "/.") || strings.HasPrefix(name, ".") {
+		return nil, fs.ErrNotExist
+	}
+	f, err := p.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		index, err := p.fs.Open(strings.TrimSuffix(name, "/") + "/index.html")
+		if err != nil {
+			f.Close()
+			return nil, fs.ErrNotExist
+		}
+		index.Close()
+	}
+	return f, nil
+}
+
 // Listen starts the server on the given address using fasthttp.
 func (s *serveMux) Listen(addr string) error {
 	srv := s.newFasthttpServer()
 
-	s.serverMu.Lock()
-	s.activeServer = srv
-	s.serverMu.Unlock()
+	s.lifecycle.setActiveServer(srv)
 
 	return srv.Listen(listenAddr(addr))
 }
@@ -418,9 +461,7 @@ func (s *serveMux) Listen(addr string) error {
 func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
 	srv := s.newFasthttpServer()
 
-	s.serverMu.Lock()
-	s.activeServer = srv
-	s.serverMu.Unlock()
+	s.lifecycle.setActiveServer(srv)
 
 	return srv.ListenTLS(addr, certFile, keyFile)
 }
@@ -429,31 +470,37 @@ func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
 func (s *serveMux) ListenTLSMutual(addr, certFile, keyFile, clientCertFile string) error {
 	srv := s.newFasthttpServer()
 
-	s.serverMu.Lock()
-	s.activeServer = srv
-	s.serverMu.Unlock()
+	s.lifecycle.setActiveServer(srv)
 
 	return srv.ListenTLSMutual(addr, certFile, keyFile, clientCertFile)
 }
 
 // Shutdown gracefully shuts down the server.
 func (s *serveMux) Shutdown() error {
-	s.serverMu.Lock()
-	defer s.serverMu.Unlock()
-	if s.activeServer != nil {
-		return s.activeServer.Shutdown()
+	if srv := s.lifecycle.server(); srv != nil {
+		return srv.Shutdown()
 	}
 	return nil
 }
 
 // ShutdownWithContext gracefully shuts down the server with a timeout context.
 func (s *serveMux) ShutdownWithContext(ctx stdcontext.Context) error {
-	s.serverMu.Lock()
-	defer s.serverMu.Unlock()
-	if s.activeServer != nil {
-		return s.activeServer.ShutdownWithContext(ctx)
+	if srv := s.lifecycle.server(); srv != nil {
+		return srv.ShutdownWithContext(ctx)
 	}
 	return nil
+}
+
+func (l *routerLifecycle) setActiveServer(srv *FasthttpServer) {
+	l.mu.Lock()
+	l.activeServer = srv
+	l.mu.Unlock()
+}
+
+func (l *routerLifecycle) server() *FasthttpServer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.activeServer
 }
 
 // Handler returns the raw fasthttp.RequestHandler for this router.
@@ -549,17 +596,16 @@ func (s *serveMux) Test(opts TestOptions) (resp *InjectResponse, err error) {
 	}
 
 	func() {
+		// Mirror live dispatch: a recovered panic produces the same generic
+		// response, and Test additionally reports it to the caller.
 		defer func() {
 			if r := recover(); r != nil {
 				err = NewHTTPError(500, fmt.Sprintf("panic recovered in Test: %v", r))
-				c := s.acquireContext(&fctx)
-				defer s.releaseContext(c)
-				c.setContextSettings(newContextOptions(path, opts.Method), s.routeMeta, s.globalStore, s.opts)
-				s.opts.errHandler(err, c)
+				writeInternalServerError(&fctx)
 			}
 		}()
 
-		s.handleFastHTTP(&fctx)
+		s.dispatch(&fctx)
 	}()
 
 	headerMap := make(http.Header)
@@ -813,6 +859,7 @@ func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, glo
 		inlineMiddlewares: make(Middlewares, 0),
 		opts:              opts,
 		rOpts:             nil,
+		lifecycle:         &routerLifecycle{},
 		ctxPool: &sync.Pool{
 			New: func() interface{} {
 				return &context{
@@ -849,9 +896,31 @@ func (w *httpResponseWriterShim) WriteHeader(statusCode int) {
 	w.c.Writer().WriteHeader(statusCode)
 }
 
-// convertFasthttpToHTTPRequest builds a *http.Request from the context for net/http bridge usage.
-func convertFasthttpToHTTPRequest(c Context) *http.Request {
+// convertFasthttpToHTTPRequest builds a server-style *http.Request from the
+// context for net/http bridge usage. It returns an error instead of a nil
+// request when the request target cannot be represented as a net/url URL
+// (for example an invalid percent escape).
+func convertFasthttpToHTTPRequest(c Context) (*http.Request, error) {
 	req := c.Request()
-	r, _ := http.NewRequest(req.Method, req.URL.String(), req.Body)
-	return r
+	fctx := req.FastHTTPContext()
+	r, err := http.NewRequestWithContext(c.Context(), req.Method, req.URL.String(), req.Body)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range fctx.Request.Header.All() {
+		r.Header.Add(string(key), string(value))
+	}
+	// Match net/http server requests, which carry Host outside the header map.
+	r.Header.Del("Host")
+	r.Host = string(fctx.Host())
+	r.RequestURI = string(fctx.RequestURI())
+	r.RemoteAddr = fctx.RemoteAddr().String()
+	r.ContentLength = int64(fctx.Request.Header.ContentLength())
+	if r.ContentLength < 0 {
+		r.ContentLength = 0
+	}
+	if fctx.IsTLS() {
+		r.TLS = fctx.TLSConnectionState()
+	}
+	return r, nil
 }

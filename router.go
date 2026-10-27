@@ -26,8 +26,9 @@ type Router interface {
 	// Route mounts a sub-Router along a `pattern` string.
 	Route(pattern string, fn func(r Router)) Router
 
-	// Group adds a new inline router along the current routing path
-	// with a fresh middleware stack for the inline router
+	// Group adds a new inline router along the current routing path. The
+	// inline router starts with a copy of the current middleware stack;
+	// middleware it adds does not affect the parent or sibling routers.
 	Group(fn func(r Router)) Router
 
 	// Use appends one or more middleware onto the router stack

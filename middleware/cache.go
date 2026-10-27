@@ -210,6 +210,12 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 		// 2. Cache miss, continue request down the chain
 		err := c.Next()
 
+		// A returned error has not been rendered yet: the response still holds
+		// fasthttp's default 200 and an empty body. Never store it.
+		if err != nil {
+			return err
+		}
+
 		// 3. Store response into cache after handler returns
 		fctx := c.Request().Context()
 		statusCode := fctx.Response.StatusCode()
