@@ -14,6 +14,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/michaelolof/gofi/validators/rules"
@@ -69,6 +70,7 @@ type serveMux struct {
 type routerLifecycle struct {
 	mu           sync.Mutex
 	activeServer *FasthttpServer
+	sealed       atomic.Bool
 }
 
 func NewRouter() Router {
@@ -141,6 +143,10 @@ func (s *serveMux) Group(fn func(r Router)) Router {
 }
 
 func (s *serveMux) Use(middlewares ...MiddlewareFunc) {
+	s.lifecycle.mustBeOpen("Use")
+	if n := s.routeCount(); n > 0 {
+		log.Printf("gofi: Use called after %d route(s) were registered; middleware applies only to routes registered afterwards", n)
+	}
 	s.middlewares = append(s.middlewares, middlewares...)
 }
 
@@ -376,18 +382,21 @@ func (s *serveMux) Meta() RouterMeta {
 }
 
 func (s *serveMux) UseErrorHandler(handler func(err error, c Context)) {
+	s.lifecycle.mustBeOpen("UseErrorHandler")
 	if handler != nil {
 		s.opts.errHandler = handler
 	}
 }
 
 func (s *serveMux) RegisterSpec(list ...CustomSpec) {
+	s.lifecycle.mustBeOpen("RegisterSpec")
 	for _, v := range list {
 		s.opts.customSpecs[v.SpecID()] = v
 	}
 }
 
 func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
+	s.lifecycle.mustBeOpen("RegisterBodyParser")
 	if len(list) > 0 {
 		s.opts.bodyParsers = append(list, s.opts.bodyParsers...)
 	}
@@ -490,6 +499,40 @@ func (s *serveMux) ShutdownWithContext(ctx stdcontext.Context) error {
 	return nil
 }
 
+// seal marks the router as serving. Registration mutates maps and slices
+// that requests read without locks, so it must finish before serving starts.
+func (l *routerLifecycle) seal() {
+	l.sealed.Store(true)
+}
+
+func (l *routerLifecycle) mustBeOpen(what string) {
+	if l.sealed.Load() {
+		panic("gofi: " + what + " called after the router started serving; register routes, middleware and configuration before Listen, ListenTLS, ListenTLSMutual or Handler")
+	}
+}
+
+func (s *serveMux) routeCount() int {
+	n := 0
+	for _, root := range s.trees {
+		if root != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// Seal stops further registration on r and on every router derived from it.
+// Listen, ListenTLS, ListenTLSMutual and Handler seal automatically; call
+// Seal earlier to catch late registration in tests or setup code.
+func Seal(r Router) error {
+	m, ok := r.(*serveMux)
+	if !ok {
+		return errors.New("gofi: Seal supports routers created by gofi only")
+	}
+	m.lifecycle.seal()
+	return nil
+}
+
 func (l *routerLifecycle) setActiveServer(srv *FasthttpServer) {
 	l.mu.Lock()
 	l.activeServer = srv
@@ -503,13 +546,18 @@ func (l *routerLifecycle) server() *FasthttpServer {
 }
 
 // Handler returns the raw fasthttp.RequestHandler for this router.
+//
+// Calling Handler seals the router: later route, middleware or configuration
+// registration panics.
 func (s *serveMux) Handler() fasthttp.RequestHandler {
+	s.lifecycle.seal()
 	return s.handleFastHTTP
 }
 
 type ValidatorContext = rules.ValidatorContext
 
 func (s *serveMux) RegisterValidator(list ...Validator) {
+	s.lifecycle.mustBeOpen("RegisterValidator")
 	for _, v := range list {
 		s.opts.customValidators[v.Name()] = v.Rule
 	}
@@ -693,20 +741,18 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 		c.params = append(c.params, Param{Key: name, Value: value})
 	}
 
-	// Compile schema if present
-	if def.Schema != nil {
-		rules := s.compileSchema(def.Schema, def.Info)
-		rules.specs.normalize(opts.Method, opts.Path)
-		s.opts.schemaRules.SetRules(opts.Path, opts.Method, &rules.rules)
-	}
-
+	// Compile schema and metadata for this call only. Inject never writes to
+	// the router's rule or metadata maps, which live routes read.
 	var routeMeta metaMap
 	if opts.Handler.Meta != nil {
-		v := map[string]any{strings.ToLower(opts.Method): opts.Handler.Meta}
-		s.routeMeta[opts.Path] = v
-		routeMeta = s.routeMeta
+		routeMeta = metaMap{opts.Path: {strings.ToLower(opts.Method): opts.Handler.Meta}}
 	}
 	c.setContextSettings(newContextOptions(opts.Path, opts.Method), routeMeta, s.globalStore, s.opts)
+	if def.Schema != nil {
+		compiled := s.compileSchema(def.Schema, def.Info)
+		compiled.specs.normalize(opts.Method, opts.Path)
+		c.rulesOverride = &compiled.rules
+	}
 
 	// Build flat chain: middlewares + handler
 	allHandlers := make([]HandlerFunc, 0, len(s.middlewares)+1)
@@ -752,6 +798,7 @@ func ListenAndServe(addr string, r Router) error {
 }
 
 func (s *serveMux) method(method string, path string, opts RouteOptions) {
+	s.lifecycle.mustBeOpen("route registration")
 	if s.prefix != "" {
 		path = joinPath(s.prefix, path)
 	}
@@ -831,6 +878,7 @@ func newRouter() *serveMux {
 }
 
 func (s *serveMux) Configure(config Config) {
+	s.lifecycle.mustBeOpen("Configure")
 	if config.BodyLimit > 0 {
 		s.opts.bodyLimit = config.BodyLimit
 	}

@@ -121,6 +121,13 @@ func TestSecurityHandlerAndErrorHandlerPanicsAreContained(t *testing.T) {
 		r.Get("/panic", gofi.RouteOptions{Handler: func(c gofi.Context) error { panic("secret-db-password") }})
 		r.Get("/error", gofi.RouteOptions{Handler: func(c gofi.Context) error { return errors.New("boom") }})
 		r.Get("/ok", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+		// The error handler itself panics for /error.
+		r.UseErrorHandler(func(err error, c gofi.Context) {
+			if err.Error() == "boom" {
+				panic("error handler failed")
+			}
+			_ = c.SendString(500, "handled")
+		})
 		addr := startServer(t, s)
 
 		out := rawRequest(t, addr, get("/panic"))
@@ -131,7 +138,6 @@ func TestSecurityHandlerAndErrorHandlerPanicsAreContained(t *testing.T) {
 			t.Fatalf("server did not recover after handler panic: %q", out)
 		}
 
-		r.UseErrorHandler(func(err error, c gofi.Context) { panic("error handler failed") })
 		if out := rawRequest(t, addr, get("/error")); !strings.HasPrefix(out, "HTTP/1.1 500") {
 			t.Fatalf("error-handler panic: want 500, got %q", out)
 		}
@@ -1261,5 +1267,63 @@ func TestSecurityRouterStaticConfinementAndStreaming(t *testing.T) {
 	out = rawRequest(t, addr, "GET /static/app.js HTTP/1.1\r\nHost: x\r\nRange: bytes=2-4\r\nConnection: close\r\n\r\n")
 	if !strings.HasPrefix(out, "HTTP/1.1 206") || !strings.HasSuffix(out, "234") {
 		t.Fatalf("range request not honoured: %q", out)
+	}
+}
+
+// F-24, F-31: registration ends when serving starts; handlers cannot write
+// shared router state.
+func TestSecuritySealingAndSharedState(t *testing.T) {
+	r := gofi.NewRouter()
+	child := r.Route("/api", nil)
+	r.GlobalStore().Set("config", "v1")
+	r.Get("/x", gofi.RouteOptions{Meta: "meta", Handler: func(c gofi.Context) error {
+		if _, ok := c.GlobalStore().(gofi.GofiStore); ok {
+			return errors.New("global store is writable from a handler")
+		}
+		if v, _ := c.GlobalStore().Get("config"); v != "v1" {
+			return fmt.Errorf("global store read failed: %v", v)
+		}
+		all := r.Meta().All()
+		all["/x"]["get"] = "changed"
+		if v, _ := r.Meta().Route("/x", "GET"); v != "meta" {
+			return fmt.Errorf("route metadata changed through All(): %v", v)
+		}
+		return c.SendString(200, "ok")
+	}})
+	_ = r.Handler()
+
+	if resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/x"}); resp.StatusCode != 200 {
+		t.Fatalf("shared state check failed: %q", resp.BodyString())
+	}
+	mustPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s after Handler() did not panic", name)
+			}
+		}()
+		fn()
+	}
+	mustPanic("Get", func() { r.Get("/late", gofi.RouteOptions{Handler: func(c gofi.Context) error { return nil }}) })
+	mustPanic("child Get", func() { child.Get("/late", gofi.RouteOptions{Handler: func(c gofi.Context) error { return nil }}) })
+	mustPanic("Use", func() { r.Use(func(c gofi.Context) error { return c.Next() }) })
+}
+
+func TestSecurityInjectDoesNotReplaceLiveRules(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
+		if _, err := gofi.ValidateAndBind[nameSchema](c); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}})
+	loose := gofi.RouteOptions{Schema: &struct{}{}, Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }}
+	if _, err := r.Inject(gofi.InjectOptions{Method: "POST", Path: "/n", Handler: &loose}); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/n",
+		Headers: map[string]string{"Content-Type": "application/json"}, Body: strings.NewReader(`{}`)})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Inject replaced the live route's validation: %d %q", resp.StatusCode, resp.BodyString())
 	}
 }

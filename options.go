@@ -97,6 +97,7 @@ func NewFasthttpServerWithOptions(opts ServerOptions) (*FasthttpServer, error) {
 // before serving, so Router().Configure calls made after construction take
 // effect. With ServerOptions, the router may lower but not raise the ceiling.
 func (s *FasthttpServer) applyRouterConfig() error {
+	s.mux.lifecycle.seal()
 	limit := s.mux.opts.bodyLimit
 	if s.bodyCeiling > 0 && (limit <= 0 || limit > s.bodyCeiling) {
 		limit = s.bodyCeiling

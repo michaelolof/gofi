@@ -194,6 +194,10 @@ Without a custom handler, Gofi responds with a JSON envelope (`{"status":"error"
 
 A panic in a handler, middleware or error handler is recovered by the router: it is logged and the client receives a generic `500`, even without the `Recover` middleware.
 
+### Registration happens before serving
+
+Register routes, middleware, validators, body parsers and configuration before the server starts. `Listen`, `ListenTLS`, `ListenTLSMutual` and `Handler()` seal the router (and every router derived from it with `Route`, `Group` or `With`); later registration panics, because requests read these tables without locks. `gofi.Seal(r)` seals earlier. `Use` applies only to routes registered after it, and logs a warning when routes already exist.
+
 ### Plugins
 
 You can attach shared state or plugins to the router using the `GlobalStore`, which is accessible in all route handlers. The same applies to the per-request `DataStore()`.

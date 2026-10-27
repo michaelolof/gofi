@@ -134,6 +134,9 @@ type context struct {
 	refs atomic.Int32
 	// streamErrHandler receives terminal stream producer errors (OnStreamError).
 	streamErrHandler func(err error)
+	// rulesOverride holds schema rules compiled by Inject, so injected
+	// handlers never replace a live route's rules.
+	rulesOverride *schemaRules
 	// clientIP and scheme are resolved by a TrustPolicy middleware.
 	clientIP string
 	scheme   string
@@ -152,6 +155,7 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.streamErrHandler = nil
 	c.clientIP = ""
 	c.scheme = ""
+	c.rulesOverride = nil
 
 	// Reset adapters in-place instead of nil-ing to avoid re-allocation
 	if c.rw != nil {
@@ -177,6 +181,9 @@ func (c *context) Request() *Request {
 }
 
 func (c *context) GlobalStore() ReadOnlyStore {
+	if gs, ok := c.globalStore.(*gofiStore); ok {
+		return readOnlyStore{gs}
+	}
 	return c.globalStore
 }
 
@@ -382,6 +389,9 @@ func (c *context) setContextSettings(opts contextOptions, routeMeta metaMap, glo
 }
 
 func (c *context) rules() *schemaRules {
+	if c.rulesOverride != nil {
+		return c.rulesOverride
+	}
 	return c.serverOpts.schemaRules.GetRules(c.opts.Pattern, c.opts.Method)
 }
 
