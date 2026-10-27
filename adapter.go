@@ -313,8 +313,18 @@ func (r *Request) PostFormValue(key string) string {
 	return ""
 }
 
-// ParseMultipartForm parses the multipart form data from the request body.
+// ParseMultipartForm parses query and URL-encoded body values into Form and
+// PostForm and, for multipart requests, the multipart form data as well.
+//
+// maxMemory is accepted for net/http compatibility but is not applied:
+// fasthttp has already buffered the request body (bounded by the server body
+// limit) and keeps up to 16 MiB of parts in memory before using temp files.
+// It returns fasthttp.ErrNoMultipartForm for non-multipart requests, after
+// populating Form and PostForm.
 func (r *Request) ParseMultipartForm(maxMemory int64) error {
+	if err := r.ParseForm(); err != nil {
+		return err
+	}
 	if r.parsedMultipart {
 		return nil
 	}
@@ -325,6 +335,12 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
 		return err
 	}
 	r.MultipartForm = form
+	for key, values := range form.Value {
+		for _, value := range values {
+			r.PostForm.Add(key, value)
+			r.Form.Add(key, value)
+		}
+	}
 	return nil
 }
 

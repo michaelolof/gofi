@@ -104,18 +104,18 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 		bsMax = 1048576 // defaultReqSize
 	}
 
-	// Limit body size without depending on net/http
-	limitedBody := io.NopCloser(io.LimitReader(body, bsMax))
-	body = limitedBody
-
 	buf := jsonBodyPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer jsonBodyPool.Put(buf)
 
-	_, err := buf.ReadFrom(body)
+	// Reject, rather than truncate, bodies over the limit.
+	err := LimitBody(buf, body, bsMax)
 	bs := buf.Bytes()
 
-	if err != nil {
+	var tooLarge *HTTPError
+	if errors.As(err, &tooLarge) {
+		return err
+	} else if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "reader", err)
 	} else if len(bs) == 0 && opts.SchemaRules != nil && (opts.SchemaRules.required || opts.SchemaRules.present) {
 		return newErrReport(RequestErr, schemaBody, "", "required", errors.New("request body is required"))

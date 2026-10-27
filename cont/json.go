@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 
@@ -52,6 +53,13 @@ type eof struct{}
 
 var EOF eof
 
+// rangeError reports a JSON number that does not fit the target kind.
+func rangeError(v any, kind reflect.Kind) error {
+	return fmt.Errorf("value %v overflows %s", v, kind)
+}
+
+// GetByKind returns the value at keys cast to kind. Numbers that do not fit
+// kind return an error instead of wrapping.
 func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, keys ...string) (any, error) {
 	obj := p.pv.Get(keys...)
 	if obj == nil || obj.Type() == fastjson.TypeNull {
@@ -76,17 +84,26 @@ func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, ke
 		if err != nil {
 			return nil, err
 		}
+		if v < math.MinInt8 || v > math.MaxInt8 {
+			return nil, rangeError(v, kind)
+		}
 		return int8(v), nil
 	case reflect.Int16:
 		v, err := obj.Int()
 		if err != nil {
 			return nil, err
 		}
+		if v < math.MinInt16 || v > math.MaxInt16 {
+			return nil, rangeError(v, kind)
+		}
 		return int16(v), nil
 	case reflect.Int32:
 		v, err := obj.Int()
 		if err != nil {
 			return nil, err
+		}
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return nil, rangeError(v, kind)
 		}
 		return int32(v), nil
 	case reflect.Int64:
@@ -106,17 +123,26 @@ func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, ke
 		if err != nil {
 			return nil, err
 		}
+		if v > math.MaxUint8 {
+			return nil, rangeError(v, kind)
+		}
 		return uint8(v), nil
 	case reflect.Uint16:
 		v, err := obj.Uint()
 		if err != nil {
 			return nil, err
 		}
+		if v > math.MaxUint16 {
+			return nil, rangeError(v, kind)
+		}
 		return uint16(v), nil
 	case reflect.Uint32:
 		v, err := obj.Uint()
 		if err != nil {
 			return nil, err
+		}
+		if v > math.MaxUint32 {
+			return nil, rangeError(v, kind)
 		}
 		return uint32(v), nil
 	case reflect.Uint64:
@@ -129,6 +155,9 @@ func (p *ParsedJson) GetByKind(kind reflect.Kind, format utils.ObjectFormats, ke
 		v, err := obj.Float64()
 		if err != nil {
 			return nil, err
+		}
+		if math.Abs(v) > math.MaxFloat32 && !math.IsInf(v, 0) {
+			return nil, rangeError(v, kind)
 		}
 		return float32(v), nil
 	case reflect.Float64:
@@ -194,17 +223,26 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 		if err != nil {
 			return nil, err
 		}
+		if v < math.MinInt8 || v > math.MaxInt8 {
+			return nil, rangeError(v, kind)
+		}
 		return int8(v), nil
 	case reflect.Int16:
 		v, err := node.Int()
 		if err != nil {
 			return nil, err
 		}
+		if v < math.MinInt16 || v > math.MaxInt16 {
+			return nil, rangeError(v, kind)
+		}
 		return int16(v), nil
 	case reflect.Int32:
 		v, err := node.Int()
 		if err != nil {
 			return nil, err
+		}
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return nil, rangeError(v, kind)
 		}
 		return int32(v), nil
 	case reflect.Int64:
@@ -224,17 +262,26 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 		if err != nil {
 			return nil, err
 		}
+		if v > math.MaxUint8 {
+			return nil, rangeError(v, kind)
+		}
 		return uint8(v), nil
 	case reflect.Uint16:
 		v, err := node.Uint()
 		if err != nil {
 			return nil, err
 		}
+		if v > math.MaxUint16 {
+			return nil, rangeError(v, kind)
+		}
 		return uint16(v), nil
 	case reflect.Uint32:
 		v, err := node.Uint()
 		if err != nil {
 			return nil, err
+		}
+		if v > math.MaxUint32 {
+			return nil, rangeError(v, kind)
 		}
 		return uint32(v), nil
 	case reflect.Uint64:
@@ -247,6 +294,9 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 		v, err := node.Float64()
 		if err != nil {
 			return nil, err
+		}
+		if math.Abs(v) > math.MaxFloat32 && !math.IsInf(v, 0) {
+			return nil, rangeError(v, kind)
 		}
 		return float32(v), nil
 	case reflect.Float64:

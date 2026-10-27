@@ -32,10 +32,12 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 		bsMax = 10485760 // 10MB
 	}
 
-	// Read body and parse form values manually
-	limited := io.LimitReader(r, bsMax)
-	bodyBytes, err := io.ReadAll(limited)
-	if err != nil {
+	// Read body and parse form values manually, rejecting bodies over the limit
+	bodyBytes, err := ReadBodyLimited(r, bsMax)
+	var tooLarge *HTTPError
+	if errors.As(err, &tooLarge) {
+		return err
+	} else if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
 

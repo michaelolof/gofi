@@ -547,3 +547,102 @@ func TestSecurityCacheBypassesStreams(t *testing.T) {
 		}
 	}
 }
+
+type nameSchema struct {
+	Request struct {
+		Body struct {
+			Name string `json:"name" validate:"required"`
+		}
+	}
+}
+
+// F-08: parsers reject bodies over their limit instead of accepting a prefix.
+func TestSecurityParserLimitsRejectOverflow(t *testing.T) {
+	r := gofi.NewRouter()
+	r.RegisterBodyParser(&gofi.JSONBodyParser{MaxRequestSize: 64}, &gofi.FormBodyParser{MaxRequestSize: 64})
+	handler := func(c gofi.Context) error {
+		s, err := gofi.ValidateAndBind[nameSchema](c)
+		if err != nil {
+			return err
+		}
+		return c.SendString(200, s.Request.Body.Name)
+	}
+	r.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: handler})
+
+	post := func(contentType, body string) *gofi.InjectResponse {
+		resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/n",
+			Headers: map[string]string{"Content-Type": contentType}, Body: strings.NewReader(body)})
+		return resp
+	}
+
+	exact := `{"name":"alice"}` + strings.Repeat(" ", 64-len(`{"name":"alice"}`))
+	if resp := post("application/json", exact); resp.StatusCode != 200 {
+		t.Errorf("JSON at the limit rejected: %d %q", resp.StatusCode, resp.BodyString())
+	}
+	if resp := post("application/json", exact+"X"); resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("JSON one byte over the limit: want 413, got %d %q", resp.StatusCode, resp.BodyString())
+	}
+	if resp := post("application/x-www-form-urlencoded", "name=alice&pad="+strings.Repeat("a", 64)); resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("form over the limit: want 413, got %d %q", resp.StatusCode, resp.BodyString())
+	}
+}
+
+func TestSecurityMultipartLimitApplied(t *testing.T) {
+	r := gofi.NewRouter()
+	r.RegisterBodyParser(&gofi.MultipartBodyParser{MaxRequestSize: 64})
+	r.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
+		if _, err := gofi.ValidateAndBind[nameSchema](c); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}})
+	body := "--b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n" + strings.Repeat("a", 128) + "\r\n--b--\r\n"
+	resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/n",
+		Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=b"}, Body: strings.NewReader(body)})
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("multipart over MaxRequestSize: want 413, got %d %q", resp.StatusCode, resp.BodyString())
+	}
+}
+
+type numberSchema struct {
+	Request struct {
+		Body struct {
+			Small  int8    `json:"small"`
+			Count  uint    `json:"count"`
+			Whole  int     `json:"whole"`
+			Single float32 `json:"single"`
+		}
+	}
+}
+
+// IP-06: numeric binding never wraps, truncates or flips sign.
+func TestSecurityNumericBindingIsExact(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Post("/n", gofi.RouteOptions{Schema: &numberSchema{}, Handler: func(c gofi.Context) error {
+		s, err := gofi.ValidateAndBind[numberSchema](c)
+		if err != nil {
+			return gofi.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		b := s.Request.Body
+		return c.SendString(200, fmt.Sprintf("%d %d %d %v", b.Small, b.Count, b.Whole, b.Single))
+	}})
+	post := func(body string) *gofi.InjectResponse {
+		resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/n",
+			Headers: map[string]string{"Content-Type": "application/json"}, Body: strings.NewReader(body)})
+		return resp
+	}
+
+	if resp := post(`{"small":127,"count":3,"whole":4,"single":1.5}`); resp.StatusCode != 200 || resp.BodyString() != "127 3 4 1.5" {
+		t.Fatalf("valid numbers rejected: %d %q", resp.StatusCode, resp.BodyString())
+	}
+	for _, body := range []string{
+		`{"small":300}`,
+		`{"count":-1}`,
+		`{"whole":1.5}`,
+		`{"single":1e300}`,
+	} {
+		if resp := post(body); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: want rejection, got %d %q", body, resp.StatusCode, resp.BodyString())
+		}
+	}
+}

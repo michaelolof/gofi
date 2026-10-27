@@ -151,6 +151,16 @@ func SafeConvert(v reflect.Value, t reflect.Type) (reflect.Value, error) {
 		return reflect.Value{}, fmt.Errorf("cannot convert invalid value to %v", t)
 	}
 
+	// Numbers convert with range and fraction checks; a plain reflect
+	// conversion would wrap or truncate silently.
+	if KindIsNumber(v.Kind()) && KindIsNumber(t.Kind()) {
+		out := reflect.New(t).Elem()
+		if _, err := SetNumberChecked(out, v); err != nil {
+			return reflect.Value{}, err
+		}
+		return out, nil
+	}
+
 	if v.Type().ConvertibleTo(t) {
 		return v.Convert(t), nil
 	}

@@ -396,41 +396,12 @@ func setConvertedReflectValue(dst reflect.Value, val any) error {
 			dst.SetBool(src.Bool())
 			return nil
 		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		switch src.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			dst.SetInt(src.Int())
-			return nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			dst.SetInt(int64(src.Uint()))
-			return nil
-		case reflect.Float32, reflect.Float64:
-			dst.SetInt(int64(src.Float()))
-			return nil
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		switch src.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			dst.SetUint(uint64(src.Int()))
-			return nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			dst.SetUint(src.Uint())
-			return nil
-		case reflect.Float32, reflect.Float64:
-			dst.SetUint(uint64(src.Float()))
-			return nil
-		}
-	case reflect.Float32, reflect.Float64:
-		switch src.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			dst.SetFloat(float64(src.Int()))
-			return nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			dst.SetFloat(float64(src.Uint()))
-			return nil
-		case reflect.Float32, reflect.Float64:
-			dst.SetFloat(src.Float())
-			return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		// Reject overflow, sign and fractional loss instead of wrapping.
+		if ok, err := utils.SetNumberChecked(dst, src); ok {
+			return err
 		}
 	}
 
