@@ -69,6 +69,14 @@ func defaultErrorHandler(err error, c Context) {
 	}
 }
 
+// StatusForError returns the status code the default error handler sends
+// for err. Logging middleware uses it to report the final status of a request
+// whose handler returned an error.
+func StatusForError(err error) int {
+	code, _ := publicError(err)
+	return code
+}
+
 // publicError maps err to a response status and a message safe to send.
 func publicError(err error) (int, string) {
 	var httpErr *HTTPError

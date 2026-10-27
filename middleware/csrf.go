@@ -247,7 +247,9 @@ func CSRF(config ...CSRFConfig) gofi.MiddlewareFunc {
 		if cfg.CookieHTTPOnly {
 			cookieHeader += "; HttpOnly"
 		}
-		secureCookie := cfg.CookieSecure || c.Request().Context().IsTLS()
+		// Scheme uses a TrustPolicy's resolution behind a TLS-terminating
+		// proxy, or the connection's own TLS state.
+		secureCookie := cfg.CookieSecure || gofi.Scheme(c) == "https"
 		if secureCookie {
 			cookieHeader += "; Secure"
 		}

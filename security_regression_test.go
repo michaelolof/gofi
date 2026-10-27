@@ -1083,3 +1083,71 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// F-09, F-19: client identity starts at the socket peer; logs carry the final
+// status and bounded fields.
+func TestSecurityTrustPolicy(t *testing.T) {
+	newServer := func(policy *gofi.TrustPolicy) string {
+		s := gofi.NewFasthttpServer()
+		if policy != nil {
+			s.Router().Use(policy.Middleware())
+		}
+		s.Router().Get("/ip", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+			return c.SendString(200, gofi.ClientIP(c)+" "+gofi.Scheme(c))
+		}})
+		return startServer(t, s)
+	}
+	ask := func(addr string, headers string) string {
+		out := rawRequest(t, addr, "GET /ip HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"+headers+"\r\n")
+		return out[strings.Index(out, "\r\n\r\n")+4:]
+	}
+
+	untrusted := newServer(nil)
+	if got := ask(untrusted, "X-Forwarded-For: 6.6.6.6\r\nX-Forwarded-Proto: https\r\n"); got != "127.0.0.1 http" {
+		t.Errorf("forwarding headers trusted without a policy: %q", got)
+	}
+
+	policy, err := gofi.NewTrustPolicy(gofi.TrustOptions{TrustedProxies: []string{"127.0.0.1", "10.0.0.0/8"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := newServer(policy)
+	cases := map[string]string{
+		"X-Forwarded-For: 203.0.113.7, 10.0.0.2\r\nX-Forwarded-Proto: https\r\n": "203.0.113.7 https",
+		"X-Forwarded-For: 6.6.6.6, 203.0.113.7\r\n":                              "203.0.113.7 http",
+		"X-Forwarded-For: 203.0.113.7, not-an-ip\r\n":                            "127.0.0.1 http",
+		"": "127.0.0.1 http",
+	}
+	for headers, want := range cases {
+		if got := ask(trusted, headers); got != want {
+			t.Errorf("headers %q: got %q, want %q", headers, got, want)
+		}
+	}
+
+	if _, err := gofi.NewTrustPolicy(gofi.TrustOptions{TrustedProxies: []string{"not-a-cidr"}}); err == nil {
+		t.Error("invalid proxy accepted")
+	}
+}
+
+func TestSecurityLoggerAndRequestID(t *testing.T) {
+	var buf strings.Builder
+	r := gofi.NewRouter()
+	r.Use(middleware.Logger(middleware.LoggerConfig{Format: "${status} ${ip} ${path}\n", Output: log.New(&buf, "", 0)}))
+	r.Use(middleware.RequestID())
+	r.Get("/fail", gofi.RouteOptions{Handler: func(c gofi.Context) error { return gofi.NewHTTPError(503, "down") }})
+	r.Get("/id", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+
+	r.Test(gofi.TestOptions{Method: "GET", Path: "/fail", Headers: map[string]string{"X-Forwarded-For": "6.6.6.6"}})
+	if line := buf.String(); !strings.HasPrefix(line, "503 ") || strings.Contains(line, "6.6.6.6") {
+		t.Errorf("logger reported %q; want the final 503 and no forwarded IP", line)
+	}
+
+	resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/id", Headers: map[string]string{"X-Request-Id": "abc<script>"}})
+	if id := resp.Header("X-Request-Id"); id == "abc<script>" || len(id) != 32 {
+		t.Errorf("unsafe request ID accepted: %q", id)
+	}
+	resp, _ = r.Test(gofi.TestOptions{Method: "GET", Path: "/id", Headers: map[string]string{"X-Request-Id": "trace-123"}})
+	if id := resp.Header("X-Request-Id"); id != "trace-123" {
+		t.Errorf("safe request ID replaced: %q", id)
+	}
+}

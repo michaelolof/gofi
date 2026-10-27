@@ -49,11 +49,11 @@ func RequestID(config ...RequestIDConfig) gofi.MiddlewareFunc {
 	}
 
 	return func(c gofi.Context) error {
-		// Get ID from request
+		// Get ID from request. Accept a client-supplied ID only if it is
+		// short and uses a safe character set; otherwise generate one. The ID
+		// is a correlation hint, never an authenticated identity.
 		rid := c.HeaderVal(cfg.Header)
-
-		// Create new ID if empty
-		if rid == "" {
+		if !validRequestID(rid) {
 			rid = cfg.Generator()
 		}
 
@@ -62,4 +62,22 @@ func RequestID(config ...RequestIDConfig) gofi.MiddlewareFunc {
 
 		return c.Next()
 	}
+}
+
+// maxRequestIDLength bounds client-supplied request IDs.
+const maxRequestIDLength = 128
+
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLength {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', ch == '-', ch == '_', ch == '.', ch == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }

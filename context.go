@@ -134,6 +134,9 @@ type context struct {
 	refs atomic.Int32
 	// streamErrHandler receives terminal stream producer errors (OnStreamError).
 	streamErrHandler func(err error)
+	// clientIP and scheme are resolved by a TrustPolicy middleware.
+	clientIP string
+	scheme   string
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
@@ -147,6 +150,8 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.handlers = nil
 	c.handlerIdx = -1
 	c.streamErrHandler = nil
+	c.clientIP = ""
+	c.scheme = ""
 
 	// Reset adapters in-place instead of nil-ing to avoid re-allocation
 	if c.rw != nil {
@@ -210,6 +215,10 @@ func (c *context) Copy() Context {
 		bindedCacheResult: c.bindedCacheResult,
 		handlerIdx:        c.handlerIdx,
 		fctx:              new(fasthttp.RequestCtx),
+		// The copy has no TLS connection, so carry the resolved client IP and
+		// scheme across explicitly.
+		clientIP: strings.Clone(ClientIP(c)),
+		scheme:   Scheme(c),
 	}
 
 	// Preserve handler chain state so copied contexts can continue middleware flow.
