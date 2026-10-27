@@ -8,6 +8,7 @@ import (
 	"bufio"
 	stdcontext "context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -55,6 +56,20 @@ func rawRequest(t *testing.T, addr, req string) string {
 	}
 	out, _ := io.ReadAll(conn)
 	return string(out)
+}
+
+// httpGet issues a GET through net/http, which decodes chunked bodies.
+func httpGet(t *testing.T, addr, path string) (int, string) {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + addr + path)
+	if err != nil {
+		t.Errorf("GET %s: %v", path, err)
+		return 0, ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }
 
 func get(path string) string {
@@ -380,5 +395,155 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// F-17: streams are delivered incrementally and the handler returns before the
+// producer finishes.
+func TestSecurityLargeStreamIsDelivered(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	handlerReturned := make(chan struct{})
+	s.Router().Get("/big", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		defer close(handlerReturned)
+		return c.SetBodyStreamWriter(func(w *bufio.Writer) error {
+			<-handlerReturned
+			chunk := strings.Repeat("x", 1024)
+			for i := 0; i < 1024; i++ {
+				if _, err := w.WriteString(chunk); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}})
+	addr := startServer(t, s)
+
+	status, body := httpGet(t, addr, "/big")
+	if status != 200 || len(body) != 1<<20 || strings.Count(body, "x") != 1<<20 {
+		t.Fatalf("want the full 1 MiB stream, got %d with %d bytes", status, len(body))
+	}
+}
+
+func TestSecuritySSEEventArrivesBeforeProducerFinishes(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	finish := make(chan struct{})
+	s.Router().Get("/sse", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		c.Request().Context().Response.Header.SetContentType("text/event-stream")
+		return c.SetBodyStreamWriter(func(w *bufio.Writer) error {
+			fmt.Fprint(w, "data: first\n\n")
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			<-finish
+			return nil
+		})
+	}})
+	addr := startServer(t, s)
+	defer close(finish)
+
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	io.WriteString(conn, get("/sse"))
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("first event not delivered while the producer was running: %v", err)
+		}
+		if strings.Contains(line, "data: first") {
+			return
+		}
+	}
+}
+
+func TestSecurityStreamErrorsReachOnStreamError(t *testing.T) {
+	r := gofi.NewRouter()
+	got := make(chan error, 1)
+	r.Get("/s", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		if err := gofi.OnStreamError(c, func(err error) { got <- err }); err != nil {
+			return err
+		}
+		return c.SetBodyStreamWriter(func(w *bufio.Writer) error { return errors.New("upstream closed") })
+	}})
+	if _, err := r.Test(gofi.TestOptions{Method: "GET", Path: "/s"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-got:
+		if err.Error() != "upstream closed" {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream error was not delivered")
+	}
+}
+
+type streamParamSchema struct {
+	Request struct {
+		Path struct {
+			ID string `json:"id"`
+		}
+	}
+}
+
+// IP-05 ownership: a producer keeps its context, parameters and bound result
+// after the handler returns, while other requests reuse pooled contexts.
+func TestSecurityStreamProducerKeepsItsContext(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	r := s.Router()
+	release := make(chan struct{})
+	r.Get("/s/:id", gofi.RouteOptions{Schema: &streamParamSchema{}, Handler: func(c gofi.Context) error {
+		bound, err := gofi.ValidateAndBind[streamParamSchema](c)
+		if err != nil {
+			return err
+		}
+		return c.SetBodyStreamWriter(func(w *bufio.Writer) error {
+			<-release
+			_, err := fmt.Fprintf(w, "param=%s bound=%s", c.Param("id"), bound.Request.Path.ID)
+			return err
+		})
+	}})
+	r.Get("/b/:id", gofi.RouteOptions{Schema: &streamParamSchema{}, Handler: func(c gofi.Context) error {
+		bound, err := gofi.ValidateAndBind[streamParamSchema](c)
+		if err != nil {
+			return err
+		}
+		return c.SendString(200, bound.Request.Path.ID)
+	}})
+	addr := startServer(t, s)
+
+	result := make(chan string, 1)
+	go func() {
+		_, body := httpGet(t, addr, "/s/AAAA")
+		result <- body
+	}()
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 50; i++ {
+		_ = rawRequest(t, addr, get(fmt.Sprintf("/b/Z%03d", i)))
+	}
+	close(release)
+	if out := <-result; out != "param=AAAA bound=AAAA" {
+		t.Fatalf("producer saw another request's state: %q", out)
+	}
+}
+
+func TestSecurityCacheBypassesStreams(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(middleware.Cache(), middleware.ETag())
+	r.Get("/s", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		return c.SetBodyStreamWriter(func(w *bufio.Writer) error {
+			_, err := w.WriteString("streamed")
+			return err
+		})
+	}})
+	for i := 0; i < 2; i++ {
+		resp, err := r.Test(gofi.TestOptions{Method: "GET", Path: "/s"})
+		if err != nil || resp.BodyString() != "streamed" {
+			t.Fatalf("attempt %d: want streamed body, got %q err=%v", i+1, resp.BodyString(), err)
+		}
 	}
 }

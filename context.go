@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"reflect"
+	"sync"
+	"sync/atomic"
 
 	"github.com/michaelolof/gofi/utils"
 	"github.com/valyala/fasthttp"
@@ -44,9 +46,13 @@ type Context interface {
 	SendString(code int, s string) error
 	SendBytes(code int, b []byte) error
 
-	// SetBodyStreamWriter sets a chunked stream writer for the response body
+	// SetBodyStreamWriter registers a chunked stream writer for the response
+	// body and returns without waiting for it. The writer runs on its own
+	// goroutine; the context stays valid for it until it returns. Its error is
+	// delivered to OnStreamError, not returned here.
 	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
-	// SendStream simplifies SSE. Sets headers based on schema definition and takes over the connection.
+	// SendStream simplifies SSE. It validates and sets headers from the schema
+	// definition, then registers sw as SetBodyStreamWriter does.
 	SendStream(code int, s any, sw func(w *bufio.Writer) error) error
 
 	GetSchemaRules(pattern, method string) any
@@ -110,6 +116,14 @@ type context struct {
 	rw                *responseWriter  // cached response writer adapter
 	req               *Request         // cached request adapter
 	jsonParser        *fastjson.Parser // request-bound fastjson parser
+
+	// pool is the pool this context returns to; nil for Copy()-ed contexts.
+	pool *sync.Pool
+	// refs counts holders of a pooled context: dispatch plus every stream
+	// producer still running. The context returns to the pool at zero.
+	refs atomic.Int32
+	// streamErrHandler receives terminal stream producer errors (OnStreamError).
+	streamErrHandler func(err error)
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
@@ -130,6 +144,7 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.params = c.params[:0]
 	c.handlers = nil
 	c.handlerIdx = -1
+	c.streamErrHandler = nil
 
 	// Reset adapters in-place instead of nil-ing to avoid re-allocation
 	if c.rw != nil {
@@ -222,6 +237,14 @@ func (c *context) Copy() Context {
 	}
 
 	return cc
+}
+
+// releaseRef drops one hold on a pooled context and returns it to its pool
+// when no dispatch or stream producer still uses it.
+func (c *context) releaseRef() {
+	if c.refs.Add(-1) == 0 && c.pool != nil {
+		c.pool.Put(c)
+	}
 }
 
 // finishWriter flushes adapter headers into the response. If a header was

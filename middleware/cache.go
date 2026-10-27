@@ -218,6 +218,11 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 
 		// 3. Store response into cache after handler returns
 		fctx := c.Request().Context()
+		// Streamed bodies are produced after the handler returns; reading them
+		// here would block on, or buffer, the whole stream.
+		if fctx.Response.IsBodyStream() {
+			return nil
+		}
 		statusCode := fctx.Response.StatusCode()
 
 		// Only cache successful responses (2xx) or specific responses if needed

@@ -310,11 +310,15 @@ func (s *serveMux) acquireContext(ctx *fasthttp.RequestCtx) *context {
 	c := s.ctxPool.Get().(*context)
 	c.reset(ctx)
 	c.params = c.params[:0]
+	c.refs.Store(1)
 	return c
 }
 
+// releaseContext drops dispatch's hold on c. A stream producer registered
+// during dispatch keeps the context (and its bound result) out of the pool
+// until the producer returns.
 func (s *serveMux) releaseContext(c *context) {
-	s.ctxPool.Put(c)
+	c.releaseRef()
 }
 
 // allowedMethods returns a comma-separated Allow header value listing every
@@ -860,18 +864,19 @@ func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, glo
 		opts:              opts,
 		rOpts:             nil,
 		lifecycle:         &routerLifecycle{},
-		ctxPool: &sync.Pool{
-			New: func() interface{} {
-				return &context{
-					routeMeta:         map[string]map[string]any{},
-					globalStore:       globalStore,
-					serverOpts:        opts,
-					bindedCacheResult: bindedResult{bound: false},
-					params:            make(Params, 0, 10),
-				}
-			},
-		},
 	}
+	pool := &sync.Pool{}
+	pool.New = func() interface{} {
+		return &context{
+			routeMeta:         map[string]map[string]any{},
+			globalStore:       globalStore,
+			serverOpts:        opts,
+			bindedCacheResult: bindedResult{bound: false},
+			params:            make(Params, 0, 10),
+			pool:              pool,
+		}
+	}
+	s.ctxPool = pool
 	return s
 }
 

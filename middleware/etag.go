@@ -45,8 +45,9 @@ func ETag(config ...ETagConfig) gofi.MiddlewareFunc {
 		fctx := c.Request().Context()
 		statusCode := fctx.Response.StatusCode()
 
-		// Mostly check 200 OK since we don't need to tag errors typically
-		if statusCode != 200 {
+		// Mostly check 200 OK since we don't need to tag errors typically.
+		// Streamed bodies cannot be hashed without buffering the whole stream.
+		if statusCode != 200 || fctx.Response.IsBodyStream() {
 			return err
 		}
 

@@ -68,6 +68,12 @@ func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 			// Chain finished before timeout, copy generated response back.
 			origCtx := c.Request().Context()
 			copyCtx := cc.Request().Context()
+			if copyCtx.Response.IsBodyStream() {
+				// A stream cannot be copied back or bounded by this timeout.
+				// Close it so the producer stops, and fail the request.
+				_ = copyCtx.Response.CloseBodyStream()
+				return gofi.NewHTTPError(500, "streaming responses are not supported under the Timeout middleware")
+			}
 			copyCtx.Response.CopyTo(&origCtx.Response)
 			return result.err
 		case <-time.After(cfg.Timeout):

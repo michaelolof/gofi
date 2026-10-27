@@ -658,7 +658,7 @@ func main() {
 
 ## Streaming (Server-Sent Events)
 
-Gofi provides an ergonomic `SendStream` helper that takes the status code, schema definition and securely propagates network disconnects up to the global HTTP error handler.
+Gofi provides an ergonomic `SendStream` helper that takes the status code and schema definition, validates the response headers, and streams each flushed chunk to the client as the callback writes it.
 
 Use streaming when:
 
@@ -704,7 +704,9 @@ Operational notes:
 
 - `SendStream` validates response headers and cookies before the stream body starts.
 - The stream writer is responsible for writing event frames and calling `Flush()`.
-- Write and disconnect errors should be returned from the callback so the caller can observe stream failure.
+- `SendStream` returns as soon as the stream is registered; the callback runs on its own goroutine after the handler returns. The context, path parameters and bound request data stay valid for the callback until it returns.
+- Write and disconnect errors should be returned from the callback. Register `gofi.OnStreamError(c, fn)` before `SendStream` to receive them; otherwise they are logged.
+- Streamed responses bypass the `Cache` and `ETag` middleware and are rejected under `Timeout`.
 - For SSE, the response schema should normally declare `content-type: text/event-stream`.
 
 Recommended build order for a streaming route:
