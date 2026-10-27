@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1637,5 +1638,38 @@ func TestSecurityStreamOptions(t *testing.T) {
 	}
 	if err := gofi.Stream(nil, gofi.StreamOptions{MaxBytes: -1}, nil); err == nil {
 		t.Error("negative MaxBytes accepted")
+	}
+}
+
+// IP-07: stampede control and bounded fills.
+func TestSecurityNewCacheCoalescesAndBoundsFills(t *testing.T) {
+	if _, err := middleware.NewCache(middleware.CacheOptions{MaxWaiters: -1}); err == nil {
+		t.Fatal("negative option accepted")
+	}
+	cache, err := middleware.NewCache(middleware.CacheOptions{CoalesceWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	r := gofi.NewRouter()
+	r.Use(cache)
+	r.Get("/slow", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		calls.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		return c.SendString(200, "value")
+	}})
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/slow"}); resp.BodyString() != "value" {
+				t.Errorf("unexpected body %q", resp.BodyString())
+			}
+		}()
+	}
+	wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Errorf("10 concurrent misses ran the handler %d times, want 1", n)
 	}
 }

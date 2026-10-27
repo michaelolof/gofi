@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
@@ -99,14 +100,53 @@ type cacheEntry struct {
 	size        int64
 }
 
+// CacheOptions configures NewCache.
+type CacheOptions struct {
+	CacheConfig
+	// MaxConcurrentFills bounds responses being copied into the cache at
+	// once. Misses beyond it run the handler but are not stored. Default: 64.
+	MaxConcurrentFills int
+	// CoalesceWait lets concurrent misses for the same key wait up to this
+	// long for the request already filling it, instead of all running the
+	// handler. Zero disables coalescing.
+	CoalesceWait time.Duration
+	// MaxWaiters bounds requests waiting on one key; extra requests run the
+	// handler themselves. Default: 32.
+	MaxWaiters int
+}
+
+// NewCache validates opts and creates a cache middleware with bounded fills
+// and optional stampede control. Admission, keys and replay are as for Cache.
+func NewCache(opts CacheOptions) (gofi.MiddlewareFunc, error) {
+	if opts.Expiration < 0 || opts.MaxConcurrentFills < 0 || opts.CoalesceWait < 0 || opts.MaxWaiters < 0 {
+		return nil, errors.New("gofi/middleware: negative CacheOptions value")
+	}
+	if opts.MaxConcurrentFills == 0 {
+		opts.MaxConcurrentFills = 64
+	}
+	if opts.MaxWaiters == 0 {
+		opts.MaxWaiters = 32
+	}
+	return newCache(opts.CacheConfig, opts.MaxConcurrentFills, opts.CoalesceWait, opts.MaxWaiters), nil
+}
+
+// pendingFill tracks a request filling one cache key.
+type pendingFill struct {
+	done    chan struct{}
+	waiters int
+}
+
 // Cache creates a new middleware handler
 func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
-	// Set default config
 	cfg := CacheConfigDefault
-
 	if len(config) > 0 {
 		cfg = config[0]
+	}
+	return newCache(cfg, 0, 0, 0)
+}
 
+func newCache(cfg CacheConfig, maxFills int, coalesceWait time.Duration, maxWaiters int) gofi.MiddlewareFunc {
+	{
 		if cfg.Expiration == 0 {
 			cfg.Expiration = CacheConfigDefault.Expiration
 		}
@@ -139,6 +179,11 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 	// response varies on.
 	varySpecs := make(map[string][]string)
 	var totalBytes int64
+	var fills chan struct{}
+	if maxFills > 0 {
+		fills = make(chan struct{}, maxFills)
+	}
+	pending := make(map[string]*pendingFill)
 
 	remove := func(key string) {
 		if prev, ok := store[key]; ok {
@@ -177,15 +222,52 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 		baseKey := cfg.KeyGenerator(c)
 		now := time.Now().UnixNano()
 
-		// 1. Check if we have a valid cache entry
-		mu.Lock()
-		key := baseKey + varySuffix(c, varySpecs[baseKey])
-		entry, found := store[key]
-		if found && entry.exp > 0 && entry.exp <= now {
-			remove(key)
-			found = false
+		lookup := func() (cacheEntry, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			key := baseKey + varySuffix(c, varySpecs[baseKey])
+			entry, found := store[key]
+			if found && entry.exp > 0 && entry.exp <= time.Now().UnixNano() {
+				remove(key)
+				found = false
+			}
+			return entry, found
 		}
-		mu.Unlock()
+
+		// 1. Check if we have a valid cache entry
+		entry, found := lookup()
+
+		// Coalesce concurrent misses: wait briefly for the request already
+		// filling this key, then use its entry if it was stored.
+		var fill *pendingFill
+		if !found && coalesceWait > 0 {
+			mu.Lock()
+			if p, ok := pending[baseKey]; ok && p.waiters < maxWaiters {
+				p.waiters++
+				mu.Unlock()
+				timer := time.NewTimer(coalesceWait)
+				select {
+				case <-p.done:
+				case <-timer.C:
+				}
+				timer.Stop()
+				entry, found = lookup()
+			} else if !ok {
+				fill = &pendingFill{done: make(chan struct{})}
+				pending[baseKey] = fill
+				mu.Unlock()
+			} else {
+				mu.Unlock()
+			}
+		}
+		if fill != nil {
+			defer func() {
+				mu.Lock()
+				delete(pending, baseKey)
+				mu.Unlock()
+				close(fill.done)
+			}()
+		}
 
 		if found {
 			fctx := c.Request().Context()
@@ -242,6 +324,16 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 			return nil
 		}
 
+		// Bound concurrent copies into the cache; when full, serve uncached.
+		if fills != nil {
+			select {
+			case fills <- struct{}{}:
+				defer func() { <-fills }()
+			default:
+				return nil
+			}
+		}
+
 		// Copy bytes so we don't hold references to fasthttp's internal buffers
 		newEntry := cacheEntry{
 			body:        append([]byte(nil), body...),
@@ -253,6 +345,7 @@ func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
 		}
 
 		mu.Lock()
+		key := ""
 		if len(vary) == 0 {
 			delete(varySpecs, baseKey)
 		} else {
