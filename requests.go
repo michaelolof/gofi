@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/michaelolof/gofi/cont"
@@ -141,11 +142,10 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 	}
 
 	if shouldBind {
-		if c.rules().schemaPool != nil {
-			schemaPtr = c.rules().schemaPool.Get().(*T)
-		} else {
-			schemaPtr = new(T)
-		}
+		// Each bound result is a fresh allocation owned by the caller. Results
+		// are not recycled: a handler may hand the pointer to a goroutine,
+		// queue or cache that outlives the request.
+		schemaPtr = new(T)
 	}
 
 	if len(c.rules().req) == 0 {
@@ -195,6 +195,11 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 		if pdef := c.rules().getReqRules(schemaPath); pdef != nil && len(pdef.properties) > 0 {
 			for _, def := range pdef.properties {
 				pv := c.params.Get(def.field)
+				if shouldBind {
+					// Path parameters are views into the request buffer; the
+					// bound result must own its bytes.
+					pv = strings.Clone(pv)
+				}
 				if err := doValidateStrAndBind(c, schemaPath, pv, def, shouldBind, reqStruct); err != nil {
 					errs = append(errs, err)
 				}

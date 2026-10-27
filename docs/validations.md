@@ -18,19 +18,9 @@ When you call `gofi.ValidateAndBind[T](c)`, Gofi validates the input data agains
 
 ## Result lifetime
 
-The `*T` returned by `gofi.ValidateAndBind` is request-scoped. Gofi reuses the struct for a later request once the current request finishes, so a pointer retained after the handler returns can show another request's data. Path parameter strings bound into it point into the request buffer and change on the next request over the same connection.
+The `*T` returned by `gofi.ValidateAndBind` belongs to the caller. Each call allocates a new struct, Gofi never reuses it for another request, and bound path parameters are copied into it. You can hand the pointer to a goroutine, queue or cache.
 
-Use the result freely inside the handler and in synchronous calls. To hand data to a goroutine, queue or cache, copy what you need first:
-
-```go
-s, err := gofi.ValidateAndBind[OrderSchema](c)
-if err != nil {
-    return err
-}
-order := s.Request.Body             // copy the value, not the pointer
-id := strings.Clone(s.Request.Path.ID) // clone bound path parameters
-go fulfil(id, order)
-```
+Values read directly from the context are different: `c.Param(name)` returns a view into the request buffer that is only valid until the handler returns (see [Parameter value lifetime](routing.md#parameter-value-lifetime)). For background work that needs the request itself, use `gofi.SnapshotRequest(c, gofi.SnapshotOptions{})`, which returns an immutable copy of the method, path, query, headers, parameters and, optionally, a bounded copy of the body.
 
 ## Validation Only (No Binding)
 

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
@@ -218,23 +217,13 @@ type schemaRules struct {
 	req        map[string]RuleDef
 	responses  map[string]map[string]RuleDef
 	websocket  *compiledWebSocketContract
-	schemaPool *sync.Pool
 	schemaType reflect.Type
 }
 
 func newSchemaRules(typ reflect.Type) schemaRules {
-	var pool *sync.Pool
-	if typ != nil {
-		pool = &sync.Pool{
-			New: func() any {
-				return reflect.New(typ).Interface()
-			},
-		}
-	}
 	return schemaRules{
 		req:        make(map[string]RuleDef),
 		responses:  make(map[string]map[string]RuleDef),
-		schemaPool: pool,
 		schemaType: typ,
 	}
 }

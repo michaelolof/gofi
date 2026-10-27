@@ -765,3 +765,97 @@ func TestSecurityCacheBoundaries(t *testing.T) {
 		}
 	})
 }
+
+// F-26: results and parameters retained by a handler keep their values after
+// later requests, including requests on the same keep-alive connection.
+func TestSecurityRetainedBoundResultIsOwned(t *testing.T) {
+	r := gofi.NewRouter()
+	var kept *nameSchema
+	r.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
+		s, err := gofi.ValidateAndBind[nameSchema](c)
+		if err != nil {
+			return err
+		}
+		if kept == nil {
+			kept = s
+		}
+		return c.SendString(200, s.Request.Body.Name)
+	}})
+	for _, name := range []string{"alice", "bob", "carol"} {
+		r.Test(gofi.TestOptions{Method: "POST", Path: "/n",
+			Headers: map[string]string{"Content-Type": "application/json"}, Body: strings.NewReader(`{"name":"` + name + `"}`)})
+	}
+	if kept.Request.Body.Name != "alice" {
+		t.Fatalf("retained result was reused by a later request: %q", kept.Request.Body.Name)
+	}
+}
+
+func TestSecurityRetainedValuesSurviveKeepAlive(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	type kept struct {
+		bound  string
+		copied string
+		snap   string
+	}
+	var values []kept
+	s.Router().Get("/u/:id", gofi.RouteOptions{Schema: &streamParamSchema{}, Handler: func(c gofi.Context) error {
+		b, err := gofi.ValidateAndBind[streamParamSchema](c)
+		if err != nil {
+			return err
+		}
+		snap, err := gofi.SnapshotRequest(c, gofi.SnapshotOptions{})
+		if err != nil {
+			return err
+		}
+		values = append(values, kept{bound: b.Request.Path.ID, copied: c.Copy().Param("id"), snap: snap.Params.Get("id")})
+		return c.SendString(200, "ok")
+	}})
+	addr := startServer(t, s)
+
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	br := bufio.NewReader(conn)
+	for _, id := range []string{"AAAA", "BBBB"} {
+		fmt.Fprintf(conn, "GET /u/%s HTTP/1.1\r\nHost: x\r\n\r\n", id)
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	if got := values[0]; got.bound != "AAAA" || got.copied != "AAAA" || got.snap != "AAAA" {
+		t.Fatalf("values from the first request changed on keep-alive: %+v", got)
+	}
+}
+
+// F-30: a copied context reports the real peer and is usable as a Go context.
+func TestSecurityCopiedContextIsUsable(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	result := make(chan string, 1)
+	s.Router().Get("/c", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		cc := c.Copy()
+		go func() {
+			select {
+			case <-cc.Request().Context().Done():
+			default:
+			}
+			result <- cc.Request().RemoteAddr
+		}()
+		return c.SendString(200, "ok")
+	}})
+	addr := startServer(t, s)
+	rawRequest(t, addr, get("/c"))
+	select {
+	case ip := <-result:
+		if ip != "127.0.0.1" {
+			t.Fatalf("copied context lost the peer address: %q", ip)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("copied context goroutine did not finish")
+	}
+}

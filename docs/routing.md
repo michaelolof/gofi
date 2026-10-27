@@ -175,6 +175,6 @@ method mismatch still returns 405.
 id := strings.Clone(c.Param("id")) // always safe to retain
 ```
 
-The same applies to path fields bound by `gofi.ValidateAndBind`, and to the bound struct itself; see [Result lifetime](validations.md#result-lifetime).
+Path fields bound by `gofi.ValidateAndBind`, values from `c.Copy().Param(name)` and `gofi.SnapshotRequest` are already copies and safe to retain; see [Result lifetime](validations.md#result-lifetime).
 
 For WebSocket handlers, which take ownership of the connection, the fasthttp request buffer remains pinned for the connection lifetime and param values remain safe to read within the WebSocket goroutine.

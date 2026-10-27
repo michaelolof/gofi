@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -88,7 +89,13 @@ type Context interface {
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
 
-	// Copy creates a deep copy of the Context that is safe to use in a background goroutine.
+	// Copy returns a Context for use after the handler returns, for example in
+	// a background goroutine. It owns copies of the request (method, URI,
+	// headers, body), path parameters, route pattern and peer address, and a
+	// new data store holding the same item values. It is not a deep clone:
+	// values stored in the data store or global store, and a result already
+	// returned by ValidateAndBind, are shared with the original. Its Go
+	// context is context.Background(), and it reports no TLS state.
 	Copy() Context
 }
 
@@ -127,14 +134,6 @@ type context struct {
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
-	if c.bindedCacheResult.bound && c.bindedCacheResult.val != nil {
-		if rules := c.rules(); rules != nil && rules.schemaPool != nil {
-			// Zero out the struct before returning it to the pool
-			reflect.ValueOf(c.bindedCacheResult.val).Elem().SetZero()
-			rules.schemaPool.Put(c.bindedCacheResult.val)
-		}
-	}
-
 	c.fctx = fctx
 	c.stdCtx = nil // cleared on each request; live context reads from fctx lazily
 	c.opts = contextOptions{}
@@ -193,13 +192,19 @@ func (c *context) getParser() *fastjson.Parser {
 }
 
 func (c *context) Copy() Context {
-	// Deep copy to prevent data races when this is used in background goroutines
 	cc := &context{
-		opts:              c.opts,
-		routeMeta:         c.routeMeta,
-		globalStore:       c.globalStore,
-		serverOpts:        c.serverOpts,
-		bindedCacheResult: c.bindedCacheResult, // Be careful here if caching pointers, but mostly it's fine for simple flags
+		// Method and Pattern can be views into the pooled request buffer (the
+		// pattern is the raw path on 404/405 chains); the copy owns them.
+		opts: contextOptions{
+			Pattern: strings.Clone(c.opts.Pattern),
+			Method:  strings.Clone(c.opts.Method),
+		},
+		routeMeta:   c.routeMeta,
+		globalStore: c.globalStore,
+		serverOpts:  c.serverOpts,
+		// Bound results are never recycled, so sharing the pointer cannot
+		// expose another request's data.
+		bindedCacheResult: c.bindedCacheResult,
 		handlerIdx:        c.handlerIdx,
 		fctx:              new(fasthttp.RequestCtx),
 	}
@@ -210,16 +215,19 @@ func (c *context) Copy() Context {
 		copy(cc.handlers, c.handlers)
 	}
 
-	// Copy path parameters
+	// Copy path parameters. Values are views into the request path buffer,
+	// which the next request on the connection overwrites, so clone them.
 	if len(c.params) > 0 {
 		cc.params = make(Params, len(c.params))
-		copy(cc.params, c.params)
+		for i, p := range c.params {
+			cc.params[i] = Param{Key: p.Key, Value: strings.Clone(p.Value)}
+		}
 	}
 
-	// RequestCtx cloning logic (to detach from the sync.Pool lifecycle)
-	// We only copy essential information that a background task might need
-	// like Method, URI, and Request Headers.
-	c.fctx.Request.CopyTo(&cc.fctx.Request)
+	// Detach the request from the pooled RequestCtx. Init copies the request,
+	// keeps the peer address, and attaches fasthttp's placeholder server so
+	// the copy's RequestCtx is safe to use as a context.Context.
+	cc.fctx.Init(&c.fctx.Request, c.fctx.RemoteAddr(), nil)
 
 	// Detach the Go context from the connection lifecycle. The copied context
 	// must not share the original connection's Done channel — the connection
