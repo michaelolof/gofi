@@ -17,6 +17,8 @@ type muxOptions struct {
 	bodyLimit        int  // MaxRequestBodySize
 	methodNotAllowed bool // respond 405 instead of 404 on method mismatch
 	limits           RequestLimits
+	// allowEncodedSeparators accepts %2F, %5C and %00 in request paths.
+	allowEncodedSeparators bool
 }
 
 func defaultMuxOptions() *muxOptions {

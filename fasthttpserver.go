@@ -52,7 +52,7 @@ func (s *FasthttpServer) Listen(addr string) error {
 	if err := s.applyRouterConfig(); err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp4", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,14 @@ func (s *FasthttpServer) ListenTLS(addr, certFile, keyFile string) error {
 	if err := s.applyRouterConfig(); err != nil {
 		return err
 	}
-	return s.server.ListenAndServeTLS(listenAddr(addr), certFile, keyFile)
+	if s.server.TLSConfig == nil {
+		s.server.TLSConfig = serverTLSConfig(nil)
+	}
+	ln, err := net.Listen("tcp", listenAddr(addr))
+	if err != nil {
+		return err
+	}
+	return s.server.ServeTLS(ln, certFile, keyFile)
 }
 
 // ListenTLSMutual starts the fasthttp server with mutual TLS (mTLS) authentication.
@@ -87,14 +94,12 @@ func (s *FasthttpServer) ListenTLSMutual(addr, certFile, keyFile, clientCertFile
 		return fmt.Errorf("gofi: failed to append client cert to pool")
 	}
 
-	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    clientCertPool,
-	}
+	tlsConfig := serverTLSConfig(s.server.TLSConfig)
+	tlsConfig.Certificates = append(tlsConfig.Certificates, cert)
+	tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	tlsConfig.ClientCAs = clientCertPool
 
-	ln, err := net.Listen("tcp4", listenAddr(addr))
+	ln, err := net.Listen("tcp", listenAddr(addr))
 	if err != nil {
 		return err
 	}

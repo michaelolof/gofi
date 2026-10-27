@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"crypto/tls"
 	"fmt"
 	"time"
 )
@@ -30,6 +31,47 @@ type ServerOptions struct {
 	MaxConnsPerIP int
 	// MaxRequestsPerConn closes a keep-alive connection after this many requests.
 	MaxRequestsPerConn int
+	// TLSConfig is cloned and used by ListenTLS. The server enforces TLS 1.2
+	// or later and negotiates HTTP/1.1 only; certificates passed to ListenTLS
+	// are added to the clone.
+	TLSConfig *tls.Config
+	// Router configures the server's router.
+	Router RouterOptions
+}
+
+// RouterOptions configures a router created by NewRouterWithOptions, or by
+// NewFasthttpServerWithOptions through ServerOptions.Router.
+type RouterOptions struct {
+	// Limits bounds the structure of request bodies.
+	Limits RequestLimits
+	// AllowEncodedSeparators accepts request paths containing %2F, %5C or
+	// %00. They are rejected with 400 by default, because the router matches
+	// the decoded path and "/a%2Fb" would otherwise route as "/a/b".
+	AllowEncodedSeparators bool
+	// DisableMethodNotAllowed answers 404 instead of 405 with an Allow
+	// header when a path exists only under other methods.
+	DisableMethodNotAllowed bool
+}
+
+// NewRouterWithOptions creates a router with validated options. Use it when
+// embedding the router in your own fasthttp server through Handler().
+func NewRouterWithOptions(opts RouterOptions) (Router, error) {
+	m := newRouter()
+	if err := m.applyRouterOptions(opts); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (m *serveMux) applyRouterOptions(opts RouterOptions) error {
+	limits, err := opts.Limits.normalize()
+	if err != nil {
+		return err
+	}
+	m.opts.limits = limits
+	m.opts.allowEncodedSeparators = opts.AllowEncodedSeparators
+	m.opts.methodNotAllowed = !opts.DisableMethodNotAllowed
+	return nil
 }
 
 // DefaultServerOptions returns a bounded starting profile for staging. The
@@ -77,6 +119,9 @@ func NewFasthttpServerWithOptions(opts ServerOptions) (*FasthttpServer, error) {
 		return nil, err
 	}
 	m := newRouter()
+	if err := m.applyRouterOptions(opts.Router); err != nil {
+		return nil, err
+	}
 	if opts.MaxRequestBodySize > 0 {
 		m.opts.bodyLimit = opts.MaxRequestBodySize
 	}
@@ -90,7 +135,22 @@ func NewFasthttpServerWithOptions(opts ServerOptions) (*FasthttpServer, error) {
 	srv.Concurrency = opts.MaxConnections
 	srv.MaxConnsPerIP = opts.MaxConnsPerIP
 	srv.MaxRequestsPerConn = opts.MaxRequestsPerConn
+	srv.TLSConfig = serverTLSConfig(opts.TLSConfig)
 	return s, nil
+}
+
+// serverTLSConfig clones base (or starts empty), requires TLS 1.2 or later,
+// and advertises only HTTP/1.1, the only protocol fasthttp serves.
+func serverTLSConfig(base *tls.Config) *tls.Config {
+	cfg := &tls.Config{}
+	if base != nil {
+		cfg = base.Clone()
+	}
+	if cfg.MinVersion < tls.VersionTLS12 {
+		cfg.MinVersion = tls.VersionTLS12
+	}
+	cfg.NextProtos = []string{"http/1.1"}
+	return cfg
 }
 
 // applyRouterConfig freezes the router's body limit into the transport right

@@ -176,6 +176,15 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
 	method := b2s(ctx.Method())
 	path := b2s(ctx.Path())
 
+	if rejected := s.rejectRequest(ctx, method); rejected != nil {
+		c := s.acquireContext(ctx)
+		c.setContextSettings(contextOptions{}, nil, s.globalStore, s.opts)
+		s.opts.errHandler(rejected, c)
+		c.finishWriter()
+		s.releaseContext(c)
+		return
+	}
+
 	if root := s.trees[method]; root != nil {
 		c := s.acquireContext(ctx)
 
@@ -295,6 +304,42 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
 	}
 
 	s.runNotFound(ctx, c, path, method)
+}
+
+// rejectRequest applies the router's request-target policy before routing.
+// Rejected requests reach the error handler without running middleware, as
+// transport errors do.
+func (s *serveMux) rejectRequest(ctx *fasthttp.RequestCtx, method string) error {
+	if !s.opts.allowEncodedSeparators && hasEncodedSeparator(ctx.Request.URI().PathOriginal()) {
+		return NewHTTPError(http.StatusBadRequest, "request path contains an encoded separator")
+	}
+	if (method == http.MethodTrace || method == http.MethodConnect) && s.trees[method] == nil {
+		return NewHTTPError(http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+	}
+	return nil
+}
+
+// hasEncodedSeparator reports whether a raw path encodes '/', '\' or NUL,
+// directly or double-encoded through %25.
+func hasEncodedSeparator(raw []byte) bool {
+	for i := 0; i+2 < len(raw); i++ {
+		if raw[i] != '%' {
+			continue
+		}
+		hex := strings.ToLower(string(raw[i+1 : i+3]))
+		switch hex {
+		case "2f", "5c", "00":
+			return true
+		case "25":
+			if i+4 < len(raw) {
+				switch strings.ToLower(string(raw[i+3 : i+5])) {
+				case "2f", "5c", "00":
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // handleTransportError handles requests rejected before routing can run. The

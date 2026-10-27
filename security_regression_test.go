@@ -1513,3 +1513,45 @@ func TestSecurityRequestStructureLimits(t *testing.T) {
 		}
 	}
 }
+
+// IP-08, IP-11: router options and request-target policy.
+func TestSecurityRouterOptionsAndTargetPolicy(t *testing.T) {
+	ok := gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, c.Param("id")) }}
+	r := gofi.NewRouter()
+	r.Get("/files/:id", ok)
+	for _, path := range []string{"/files/a%2Fb", "/files/a%5Cb", "/files/a%00b", "/files/a%252Fb"} {
+		if resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: path}); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d %q", path, resp.StatusCode, resp.BodyString())
+		}
+	}
+	if resp, _ := r.Test(gofi.TestOptions{Method: "TRACE", Path: "/files/x"}); resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("TRACE without a route: want 405, got %d", resp.StatusCode)
+	}
+
+	if _, err := gofi.NewRouterWithOptions(gofi.RouterOptions{Limits: gofi.RequestLimits{MaxJSONDepth: -1}}); err == nil {
+		t.Fatal("negative limit accepted")
+	}
+	r2, err := gofi.NewRouterWithOptions(gofi.RouterOptions{AllowEncodedSeparators: true, Limits: gofi.RequestLimits{MaxJSONArrayLength: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Get("/files/:id", ok)
+	r2.Trace("/files/:id", ok)
+	r2.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
+		_, err := gofi.ValidateAndBind[nameSchema](c)
+		return err
+	}})
+	// Allowed through the policy; the router then matches the decoded path
+	// "/files/a/b", which is why the policy rejects it by default.
+	if resp, _ := r2.Test(gofi.TestOptions{Method: "GET", Path: "/files/a%2Fb"}); resp.StatusCode == http.StatusBadRequest {
+		t.Errorf("AllowEncodedSeparators ignored: %d", resp.StatusCode)
+	}
+	if resp, _ := r2.Test(gofi.TestOptions{Method: "TRACE", Path: "/files/x"}); resp.StatusCode != 200 {
+		t.Errorf("registered TRACE route rejected: %d", resp.StatusCode)
+	}
+	resp, _ := r2.Test(gofi.TestOptions{Method: "POST", Path: "/n", Headers: map[string]string{"Content-Type": "application/json"},
+		Body: strings.NewReader(`{"name":"a","x":[1,2,3]}`)})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("configured array limit ignored: %d", resp.StatusCode)
+	}
+}
