@@ -80,7 +80,7 @@ func FuzzTrustPolicyResolve(f *testing.F) {
 		fctx.Init(&fasthttp.Request{}, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, nil)
 		fctx.Request.Header.Set("X-Forwarded-For", xff)
 		fctx.Request.Header.Set("X-Forwarded-Proto", proto)
-		ip, scheme := policy.resolve(&context{fctx: &fctx})
+		ip, scheme, _ := policy.resolve(&context{fctx: &fctx})
 		if _, err := netip.ParseAddr(ip); err != nil {
 			t.Fatalf("resolved client %q is not an IP", ip)
 		}

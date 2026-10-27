@@ -222,7 +222,7 @@ func CSRF(cfg CSRFConfig) (gofi.MiddlewareFunc, error) {
 
 		if !safe {
 			if origin := c.HeaderVal("Origin"); origin != "" {
-				self := gofi.Scheme(c) + "://" + string(c.Request().Context().Host())
+				self := gofi.Scheme(c) + "://" + gofi.Host(c)
 				if origin != self && !trusted[origin] {
 					return cfg.ErrorHandler(c)
 				}

@@ -316,7 +316,7 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
 
 	// No tree registered for this method — still run global middleware.
 	c := s.acquireContext(ctx)
-		*current = c
+	*current = c
 
 	// 405 check: is this path registered under a different method?
 	if s.opts.methodNotAllowed {

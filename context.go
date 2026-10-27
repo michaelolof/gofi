@@ -145,6 +145,7 @@ type context struct {
 	// clientIP and scheme are resolved by a TrustPolicy middleware.
 	clientIP string
 	scheme   string
+	host     string
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
@@ -160,6 +161,7 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.streamErrHandler = nil
 	c.clientIP = ""
 	c.scheme = ""
+	c.host = ""
 	c.rulesOverride = nil
 
 	// Reset adapters in-place instead of nil-ing to avoid re-allocation
@@ -231,6 +233,7 @@ func (c *context) Copy() Context {
 		// scheme across explicitly.
 		clientIP: strings.Clone(ClientIP(c)),
 		scheme:   Scheme(c),
+		host:     strings.Clone(Host(c)),
 	}
 
 	// Preserve handler chain state so copied contexts can continue middleware flow.

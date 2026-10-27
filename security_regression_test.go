@@ -1676,3 +1676,38 @@ func TestSecurityNewCacheCoalescesAndBoundsFills(t *testing.T) {
 		t.Errorf("10 concurrent misses ran the handler %d times, want 1", n)
 	}
 }
+
+// IP-10: RFC 7239 Forwarded and validated hosts.
+func TestSecurityForwardedAndHosts(t *testing.T) {
+	policy, err := gofi.NewTrustPolicy(gofi.TrustOptions{
+		TrustedProxies: []string{"127.0.0.1"},
+		UseForwarded:   true,
+		AllowedHosts:   []string{"api.example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := gofi.NewFasthttpServer()
+	s.Router().Use(policy.Middleware())
+	s.Router().Get("/w", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		return c.SendString(200, gofi.ClientIP(c)+" "+gofi.Scheme(c)+" "+gofi.Host(c))
+	}})
+	addr := startServer(t, s)
+	ask := func(host, headers string) string {
+		out := rawRequest(t, addr, "GET /w HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n"+headers+"\r\n")
+		return firstLine(out) + " | " + out[strings.Index(out, "\r\n\r\n")+4:]
+	}
+
+	cases := []struct{ host, headers, want string }{
+		{"internal:8080", `Forwarded: for="[2001:db8::1]:4711";proto=https;host=api.example.com` + "\r\n", "HTTP/1.1 200 OK | 2001:db8::1 https api.example.com"},
+		{"api.example.com", "Forwarded: for=6.6.6.6, for=198.51.100.9\r\n", "HTTP/1.1 200 OK | 198.51.100.9 http api.example.com"},
+		{"api.example.com", "X-Forwarded-For: 6.6.6.6\r\n", "HTTP/1.1 200 OK | 127.0.0.1 http api.example.com"},
+		{"evil.example", "", "HTTP/1.1 421 Misdirected Request"},
+		{"api.example.com", "Forwarded: host=\"bad host\"\r\n", "HTTP/1.1 421 Misdirected Request"},
+	}
+	for _, tc := range cases {
+		if got := ask(tc.host, tc.headers); !strings.HasPrefix(got, tc.want) {
+			t.Errorf("Host %q, %q: got %q, want prefix %q", tc.host, tc.headers, got, tc.want)
+		}
+	}
+}
