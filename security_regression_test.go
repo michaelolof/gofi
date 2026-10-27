@@ -1041,3 +1041,45 @@ func TestSecurityTimeoutKeepsHeaders(t *testing.T) {
 		}
 	}
 }
+
+// F-01: body limits configured after construction reach the transport, and
+// server options are validated.
+func TestSecurityServerBodyLimitTiming(t *testing.T) {
+	s := gofi.NewFasthttpServer()
+	s.Router().Configure(gofi.Config{BodyLimit: 16})
+	s.Router().Post("/p", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	addr := startServer(t, s)
+	body := strings.Repeat("a", 4096)
+	out := rawRequest(t, addr, fmt.Sprintf("POST /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
+	if !strings.HasPrefix(out, "HTTP/1.1 413") {
+		t.Fatalf("Configure(BodyLimit) after construction ignored: %q", firstLine(out))
+	}
+}
+
+func TestSecurityServerOptions(t *testing.T) {
+	if _, err := gofi.NewFasthttpServerWithOptions(gofi.ServerOptions{ReadTimeout: -1}); err == nil {
+		t.Fatal("negative ReadTimeout accepted")
+	}
+	opts := gofi.DefaultServerOptions()
+	opts.MaxRequestBodySize = 32
+	s, err := gofi.NewFasthttpServerWithOptions(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Configure may not raise the ceiling set by ServerOptions.
+	s.Router().Configure(gofi.Config{BodyLimit: 1 << 20})
+	s.Router().Post("/p", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	addr := startServer(t, s)
+	body := strings.Repeat("a", 64)
+	out := rawRequest(t, addr, fmt.Sprintf("POST /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
+	if !strings.HasPrefix(out, "HTTP/1.1 413") {
+		t.Fatalf("Configure raised the ServerOptions body ceiling: %q", firstLine(out))
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.Index(s, "\r\n"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
