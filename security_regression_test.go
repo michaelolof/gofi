@@ -1206,10 +1206,13 @@ func TestSecurityCORS(t *testing.T) {
 // F-12: CSRF tokens are bound to a session, expire, and check Origin.
 func TestSecuritySessionBoundCSRF(t *testing.T) {
 	key := []byte(strings.Repeat("k", 32))
-	if _, err := middleware.NewCSRF(middleware.CSRFConfig{}, middleware.CSRFSessionOptions{SigningKey: []byte("short"), SessionID: func(gofi.Context) string { return "" }}); err == nil {
+	if _, err := middleware.CSRF(middleware.CSRFConfig{SigningKey: []byte("short"), SessionID: func(gofi.Context) string { return "" }}); err == nil {
 		t.Fatal("short signing key accepted")
 	}
-	csrf, err := middleware.NewCSRF(middleware.CSRFConfig{}, middleware.CSRFSessionOptions{
+	if _, err := middleware.CSRF(middleware.CSRFConfig{SigningKey: key}); err == nil {
+		t.Fatal("missing SessionID accepted")
+	}
+	csrf, err := middleware.CSRF(middleware.CSRFConfig{
 		SigningKey: key,
 		SessionID:  func(c gofi.Context) string { return c.HeaderVal("X-Session") },
 	})
