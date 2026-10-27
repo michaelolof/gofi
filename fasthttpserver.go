@@ -119,6 +119,7 @@ func (s *FasthttpServer) ListenOnListener(ln net.Listener) error {
 
 // Shutdown gracefully shuts down the server.
 func (s *FasthttpServer) Shutdown() error {
+	s.mux.lifecycle.cancel()
 	return s.server.Shutdown()
 }
 
@@ -126,6 +127,7 @@ func (s *FasthttpServer) Shutdown() error {
 // close until ctx is done. If ctx ends first it returns ctx.Err(); handlers
 // and hijacked connections that are still running are not stopped.
 func (s *FasthttpServer) ShutdownWithContext(ctx stdcontext.Context) error {
+	s.mux.lifecycle.cancel()
 	return s.server.ShutdownWithContext(ctx)
 }
 

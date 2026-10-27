@@ -158,6 +158,7 @@ func serverTLSConfig(base *tls.Config) *tls.Config {
 // effect. With ServerOptions, the router may lower but not raise the ceiling.
 func (s *FasthttpServer) applyRouterConfig() error {
 	s.mux.lifecycle.seal()
+	s.mux.lifecycle.renewIfCancelled()
 	limit := s.mux.opts.bodyLimit
 	if s.bodyCeiling > 0 && (limit <= 0 || limit > s.bodyCeiling) {
 		limit = s.bodyCeiling

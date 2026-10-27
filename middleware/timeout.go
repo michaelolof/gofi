@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"runtime/debug"
@@ -45,6 +46,9 @@ const DefaultTimeoutMaxInFlight = 1024
 //
 // Headers set before Timeout, natively or through c.Writer(), and headers set
 // by downstream handlers are kept in the response.
+//
+// Deprecated: use ContextTimeout for handler deadlines, or NewTimeout for a
+// validated response timeout with an explicit in-flight limit.
 func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 	// Set default config
 	cfg := TimeoutConfigDefault
@@ -60,8 +64,38 @@ func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
 			cfg.ErrorHandler = TimeoutConfigDefault.ErrorHandler
 		}
 	}
+	return newTimeout(cfg, DefaultTimeoutMaxInFlight)
+}
 
-	inFlight := make(chan struct{}, DefaultTimeoutMaxInFlight)
+// TimeoutOptions configures NewTimeout.
+type TimeoutOptions struct {
+	// Timeout after which the response is sent. Required.
+	Timeout time.Duration
+	// MaxInFlight bounds handler goroutines, including handlers still running
+	// after their request timed out. Required.
+	MaxInFlight int
+	// ErrorHandler produces the timeout response. Default: 503.
+	ErrorHandler gofi.HandlerFunc
+}
+
+// NewTimeout creates a response timeout with validated options. Like
+// Timeout, it answers when the timer fires but cannot stop the handler; the
+// handler keeps its in-flight slot until it returns. Prefer ContextTimeout
+// when handlers honour c.Context().
+func NewTimeout(opts TimeoutOptions) (gofi.MiddlewareFunc, error) {
+	if opts.Timeout <= 0 || opts.MaxInFlight <= 0 {
+		return nil, errors.New("gofi/middleware: NewTimeout requires positive Timeout and MaxInFlight")
+	}
+	if opts.ErrorHandler == nil {
+		opts.ErrorHandler = func(c gofi.Context) error {
+			return gofi.NewHTTPError(http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+		}
+	}
+	return newTimeout(TimeoutConfig{Timeout: opts.Timeout, ErrorHandler: opts.ErrorHandler}, opts.MaxInFlight), nil
+}
+
+func newTimeout(cfg TimeoutConfig, maxInFlight int) gofi.MiddlewareFunc {
+	inFlight := make(chan struct{}, maxInFlight)
 
 	return func(c gofi.Context) error {
 		select {

@@ -71,6 +71,39 @@ type routerLifecycle struct {
 	mu           sync.Mutex
 	activeServer *FasthttpServer
 	sealed       atomic.Bool
+	// base is the parent of every request context. Shutdown cancels it; a
+	// server that starts afterwards installs a fresh one.
+	base atomic.Pointer[lifecycleContext]
+}
+
+type lifecycleContext struct {
+	ctx    stdcontext.Context
+	cancel stdcontext.CancelFunc
+}
+
+func newRouterLifecycle() *routerLifecycle {
+	l := &routerLifecycle{}
+	l.renew()
+	return l
+}
+
+func (l *routerLifecycle) renew() {
+	ctx, cancel := stdcontext.WithCancel(stdcontext.Background())
+	l.base.Store(&lifecycleContext{ctx: ctx, cancel: cancel})
+}
+
+// context returns the current lifetime context.
+func (l *routerLifecycle) context() stdcontext.Context { return l.base.Load().ctx }
+
+// cancel ends every request context derived from the current lifetime.
+func (l *routerLifecycle) cancel() { l.base.Load().cancel() }
+
+// renewIfCancelled installs a fresh lifetime when a server starts after a
+// shutdown.
+func (l *routerLifecycle) renewIfCancelled() {
+	if l.base.Load().ctx.Err() != nil {
+		l.renew()
+	}
 }
 
 func NewRouter() Router {
@@ -167,17 +200,20 @@ func (s *serveMux) With(middlewares ...MiddlewareFunc) Router {
 // handleFastHTTP is the main fasthttp request handler.
 // Called by fasthttp.Server for each incoming connection.
 func (s *serveMux) handleFastHTTP(ctx *fasthttp.RequestCtx) {
-	defer recoverDispatch(ctx, "request dispatch")
-	s.dispatch(ctx)
+	var current *context
+	defer recoverDispatch(ctx, "request dispatch", &current)
+	s.dispatch(ctx, &current)
 }
 
-// dispatch routes one request. Callers own panic recovery.
-func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
+// dispatch routes one request. Callers own panic recovery; dispatch records
+// the context it acquires in *current so recovery can cancel it.
+func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx, current **context) {
 	method := b2s(ctx.Method())
 	path := b2s(ctx.Path())
 
 	if rejected := s.rejectRequest(ctx, method); rejected != nil {
 		c := s.acquireContext(ctx)
+		*current = c
 		c.setContextSettings(contextOptions{}, nil, s.globalStore, s.opts)
 		s.opts.errHandler(rejected, c)
 		c.finishWriter()
@@ -187,6 +223,7 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
 
 	if root := s.trees[method]; root != nil {
 		c := s.acquireContext(ctx)
+		*current = c
 
 		routeData, tsr := root.getValue(path, func() *Params {
 			if cap(c.params) < int(s.maxParams) {
@@ -279,6 +316,7 @@ func (s *serveMux) dispatch(ctx *fasthttp.RequestCtx) {
 
 	// No tree registered for this method — still run global middleware.
 	c := s.acquireContext(ctx)
+		*current = c
 
 	// 405 check: is this path registered under a different method?
 	if s.opts.methodNotAllowed {
@@ -357,7 +395,7 @@ func (s *serveMux) handleTransportError(ctx *fasthttp.RequestCtx, err error) {
 		code = http.StatusRequestTimeout
 	}
 
-	defer recoverDispatch(ctx, "transport error handler")
+	defer recoverDispatch(ctx, "transport error handler", nil)
 
 	c := s.acquireContext(ctx)
 	c.setContextSettings(contextOptions{}, nil, s.globalStore, s.opts)
@@ -377,6 +415,7 @@ func (d *dummyLogger) Printf(format string, args ...interface{}) {}
 func (s *serveMux) acquireContext(ctx *fasthttp.RequestCtx) *context {
 	c := s.ctxPool.Get().(*context)
 	c.reset(ctx)
+	c.base = s.lifecycle.context()
 	c.params = c.params[:0]
 	c.refs.Store(1)
 	return c
@@ -545,6 +584,7 @@ func (s *serveMux) ListenTLSMutual(addr, certFile, keyFile, clientCertFile strin
 
 // Shutdown gracefully shuts down the server.
 func (s *serveMux) Shutdown() error {
+	s.lifecycle.cancel()
 	if srv := s.lifecycle.server(); srv != nil {
 		return srv.Shutdown()
 	}
@@ -553,6 +593,7 @@ func (s *serveMux) Shutdown() error {
 
 // ShutdownWithContext gracefully shuts down the server with a timeout context.
 func (s *serveMux) ShutdownWithContext(ctx stdcontext.Context) error {
+	s.lifecycle.cancel()
 	if srv := s.lifecycle.server(); srv != nil {
 		return srv.ShutdownWithContext(ctx)
 	}
@@ -712,7 +753,13 @@ func (s *serveMux) Test(opts TestOptions) (resp *InjectResponse, err error) {
 			}
 		}()
 
-		s.dispatch(&fctx)
+		var current *context
+		defer func() {
+			if current != nil {
+				current.cancelContext()
+			}
+		}()
+		s.dispatch(&fctx, &current)
 	}()
 
 	headerMap := make(http.Header)
@@ -957,7 +1004,7 @@ func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, glo
 		inlineMiddlewares: make(Middlewares, 0),
 		opts:              opts,
 		rOpts:             nil,
-		lifecycle:         &routerLifecycle{},
+		lifecycle:         newRouterLifecycle(),
 	}
 	pool := &sync.Pool{}
 	pool.New = func() interface{} {

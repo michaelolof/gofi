@@ -29,10 +29,13 @@ func logRecoveredPanic(where string, r any) {
 // response can still be replaced, and closes the connection because request
 // state may be inconsistent. The panicking context is deliberately not
 // returned to the pool.
-func recoverDispatch(ctx *fasthttp.RequestCtx, where string) {
+func recoverDispatch(ctx *fasthttp.RequestCtx, where string, current **context) {
 	r := recover()
 	if r == nil {
 		return
+	}
+	if current != nil && *current != nil {
+		(*current).cancelContext()
 	}
 	logRecoveredPanic(where, r)
 	writeInternalServerError(ctx)

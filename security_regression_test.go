@@ -1555,3 +1555,45 @@ func TestSecurityRouterOptionsAndTargetPolicy(t *testing.T) {
 		t.Errorf("configured array limit ignored: %d", resp.StatusCode)
 	}
 }
+
+// IP-09: the request context ends with the request; NewTimeout is validated
+// and bounds detached work.
+func TestSecurityRequestContextLifetime(t *testing.T) {
+	r := gofi.NewRouter()
+	got := make(chan stdcontext.Context, 1)
+	r.Get("/c", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		if c.Context().Err() != nil {
+			return errors.New("request context cancelled during the request")
+		}
+		got <- c.Context()
+		return c.SendString(200, "ok")
+	}})
+	if resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/c"}); resp.StatusCode != 200 {
+		t.Fatalf("request failed: %q", resp.BodyString())
+	}
+	select {
+	case <-(<-got).Done():
+	case <-time.After(time.Second):
+		t.Fatal("request context not cancelled after the request finished")
+	}
+}
+
+func TestSecurityNewTimeout(t *testing.T) {
+	if _, err := middleware.NewTimeout(middleware.TimeoutOptions{Timeout: time.Second}); err == nil {
+		t.Fatal("missing MaxInFlight accepted")
+	}
+	to, err := middleware.NewTimeout(middleware.TimeoutOptions{Timeout: 20 * time.Millisecond, MaxInFlight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	r := gofi.NewRouter()
+	r.Use(to)
+	r.Get("/stuck", gofi.RouteOptions{Handler: func(c gofi.Context) error { <-release; return nil }})
+	first, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/stuck"})
+	second, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/stuck"})
+	if first.StatusCode != http.StatusServiceUnavailable || second.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 for the timeout and for the full in-flight limit, got %d and %d", first.StatusCode, second.StatusCode)
+	}
+}

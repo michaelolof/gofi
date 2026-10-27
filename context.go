@@ -82,12 +82,13 @@ type Context interface {
 	// set — either by a middleware writing directly to the fasthttp response or via c.Writer().
 	// Useful for middleware idempotency checks where a header may have been set upstream.
 	HasResponseHeader(key string) bool
-	// Context returns the request's Go context. On a live context it is the
-	// fasthttp request context unless middleware replaced it with
-	// SetRequestContext (for example ContextTimeout). The fasthttp context is
-	// cancelled only when the server shuts down: it is not cancelled when the
-	// client disconnects, and it carries no deadline. On a Copy()-ed context
-	// it is context.Background().
+	// Context returns the request's Go context. It is cancelled when the
+	// request finishes (after any stream producer returns) or when the
+	// router's server shuts down; it is not cancelled when the client
+	// disconnects. Middleware can replace it with SetRequestContext (for
+	// example ContextTimeout). Routers embedded through Handler() cancel it at
+	// request completion only, as gofi does not own that server's shutdown.
+	// On a Copy()-ed context it is context.Background().
 	Context() stdcontext.Context
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
@@ -134,6 +135,10 @@ type context struct {
 	refs atomic.Int32
 	// streamErrHandler receives terminal stream producer errors (OnStreamError).
 	streamErrHandler func(err error)
+	// base is the router's lifetime context; cancel ends the request context
+	// derived from it by Context().
+	base   stdcontext.Context
+	cancel stdcontext.CancelFunc
 	// rulesOverride holds schema rules compiled by Inject, so injected
 	// handlers never replace a live route's rules.
 	rulesOverride *schemaRules
@@ -270,7 +275,17 @@ func (c *context) Copy() Context {
 // when no dispatch or stream producer still uses it.
 func (c *context) releaseRef() {
 	if c.refs.Add(-1) == 0 && c.pool != nil {
+		c.cancelContext()
 		c.pool.Put(c)
+	}
+}
+
+// cancelContext ends the request context returned by Context(), if one was
+// created.
+func (c *context) cancelContext() {
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
 	}
 }
 
@@ -344,8 +359,13 @@ func (c *context) Context() stdcontext.Context {
 	if c.stdCtx != nil {
 		return c.stdCtx
 	}
-	// For live contexts, delegate to the fasthttp request context, which is
-	// cancelled on server shutdown only.
+	// Live contexts get a request context on first use. It is cancelled when
+	// the request (including any stream producer) finishes, or when the
+	// router's server shuts down.
+	if c.base != nil {
+		c.stdCtx, c.cancel = stdcontext.WithCancel(c.base)
+		return c.stdCtx
+	}
 	return c.fctx
 }
 
