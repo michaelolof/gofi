@@ -86,6 +86,18 @@ func BenchmarkTreeLookup(b *testing.B) {
 			routes: []string{"/users/me", "/users/:id"},
 			path:   "/users/mike",
 		},
+		{
+			name:       "catch-all",
+			routes:     []string{"/static/*filepath"},
+			path:       "/static/css/app.css",
+			withParams: true,
+		},
+		{
+			name:       "catch-all-miss",
+			routes:     []string{"/static/*filepath"},
+			path:       "/staticx",
+			withParams: true,
+		},
 	}
 
 	for _, test := range cases {
@@ -143,6 +155,12 @@ func TestTree_BacktrackingAllocations(t *testing.T) {
 			name:   "fallback-nil-params",
 			routes: []string{"/users/me", "/users/:id"},
 			path:   "/users/mike",
+		},
+		{
+			name:       "catch-all",
+			routes:     []string{"/static/*filepath"},
+			path:       "/static/css/app.css",
+			withParams: true,
 		},
 	}
 
