@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -33,6 +34,20 @@ func ConcurrencyLimit(max int) (gofi.MiddlewareFunc, error) {
 	}, nil
 }
 
+// RateLimitStore counts requests per key in fixed windows. Implement it over
+// shared storage (for example Redis INCR with an expiry) so several instances
+// enforce one limit.
+type RateLimitStore interface {
+	// Increment adds one request for key in the current window of the given
+	// length and returns the window's count so far and the time until the
+	// window resets.
+	Increment(ctx context.Context, key string, window time.Duration) (count int, resetIn time.Duration, err error)
+}
+
+// ErrRateStoreFull is returned by the in-memory store when it tracks
+// MaxKeys keys and none has expired.
+var ErrRateStoreFull = errors.New("gofi/middleware: rate limit store is full")
+
 // RateLimitConfig configures RateLimit.
 type RateLimitConfig struct {
 	// Requests allowed per key in each window. Required.
@@ -41,11 +56,22 @@ type RateLimitConfig struct {
 	Window time.Duration
 	// Key identifies the caller. Default: gofi.ClientIP, which uses the
 	// socket peer unless a gofi.TrustPolicy middleware resolved a client
-	// behind trusted proxies. Never key on an unvalidated request header.
+	// behind trusted proxies. Never key on an unvalidated request header;
+	// after authentication, key on the principal or tenant instead.
 	Key func(c gofi.Context) string
-	// MaxKeys bounds tracked keys. When full, expired keys are swept; if
-	// none can be removed, requests from new keys get 503. Default: 100000.
+	// RequestsFor overrides Requests per request, for example to apply each
+	// tenant's quota. Values <= 0 fall back to Requests.
+	RequestsFor func(c gofi.Context) int
+	// Store counts requests. Default: an in-memory store bounded by MaxKeys,
+	// local to this process.
+	Store RateLimitStore
+	// MaxKeys bounds keys in the default in-memory store. When full, expired
+	// keys are swept; if none can be removed, requests from new keys get 503.
+	// Default: 100000.
 	MaxKeys int
+	// FailOpen admits requests when the store returns an error. By default
+	// such requests are rejected with 503.
+	FailOpen bool
 }
 
 // maxRateLimitKey bounds the stored length of one key.
@@ -56,7 +82,40 @@ type rateWindow struct {
 	count int
 }
 
-// RateLimit limits each key to cfg.Requests per cfg.Window (fixed windows).
+// memoryRateStore is the default, process-local RateLimitStore.
+type memoryRateStore struct {
+	mu      sync.Mutex
+	windows map[string]*rateWindow
+	maxKeys int
+}
+
+func (m *memoryRateStore) Increment(_ context.Context, key string, window time.Duration) (int, time.Duration, error) {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w, ok := m.windows[key]
+	if !ok {
+		if len(m.windows) >= m.maxKeys {
+			for k, v := range m.windows {
+				if now.Sub(v.start) >= window {
+					delete(m.windows, k)
+				}
+			}
+		}
+		if len(m.windows) >= m.maxKeys {
+			return 0, 0, ErrRateStoreFull
+		}
+		w = &rateWindow{start: now}
+		m.windows[key] = w
+	}
+	if now.Sub(w.start) >= window {
+		w.start, w.count = now, 0
+	}
+	w.count++
+	return w.count, window - now.Sub(w.start), nil
+}
+
+// RateLimit limits each key to cfg.Requests (or RequestsFor) per cfg.Window.
 // Requests over the limit get 429 with Retry-After.
 func RateLimit(cfg RateLimitConfig) (gofi.MiddlewareFunc, error) {
 	if cfg.Requests <= 0 || cfg.Window <= 0 {
@@ -71,45 +130,32 @@ func RateLimit(cfg RateLimitConfig) (gofi.MiddlewareFunc, error) {
 	if cfg.Key == nil {
 		cfg.Key = gofi.ClientIP
 	}
-
-	var mu sync.Mutex
-	windows := make(map[string]*rateWindow)
+	if cfg.Store == nil {
+		cfg.Store = &memoryRateStore{windows: make(map[string]*rateWindow), maxKeys: cfg.MaxKeys}
+	}
 
 	return func(c gofi.Context) error {
 		key := cfg.Key(c)
 		if len(key) > maxRateLimitKey {
 			key = key[:maxRateLimitKey]
 		}
-		now := time.Now()
-
-		mu.Lock()
-		w, ok := windows[key]
-		if !ok {
-			if len(windows) >= cfg.MaxKeys {
-				for k, v := range windows {
-					if now.Sub(v.start) >= cfg.Window {
-						delete(windows, k)
-					}
-				}
+		limit := cfg.Requests
+		if cfg.RequestsFor != nil {
+			if n := cfg.RequestsFor(c); n > 0 {
+				limit = n
 			}
-			if len(windows) >= cfg.MaxKeys {
-				mu.Unlock()
-				return gofi.NewHTTPError(http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
-			}
-			w = &rateWindow{start: now}
-			windows[key] = w
 		}
-		if now.Sub(w.start) >= cfg.Window {
-			w.start, w.count = now, 0
-		}
-		w.count++
-		over := w.count > cfg.Requests
-		retry := cfg.Window - now.Sub(w.start)
-		mu.Unlock()
 
-		if over {
-			seconds := int(retry.Seconds())
-			if retry > time.Duration(seconds)*time.Second {
+		count, resetIn, err := cfg.Store.Increment(c.Context(), key, cfg.Window)
+		if err != nil {
+			if cfg.FailOpen {
+				return c.Next()
+			}
+			return gofi.NewHTTPError(http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+		}
+		if count > limit {
+			seconds := int(resetIn.Seconds())
+			if resetIn > time.Duration(seconds)*time.Second {
 				seconds++
 			}
 			c.Request().Context().Response.Header.Set("Retry-After", strconv.Itoa(seconds))

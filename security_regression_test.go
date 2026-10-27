@@ -1758,3 +1758,57 @@ func TestSecurityRequestEvents(t *testing.T) {
 	close(block)
 	q.Close()
 }
+
+type failingRateStore struct{}
+
+func (failingRateStore) Increment(stdcontext.Context, string, time.Duration) (int, time.Duration, error) {
+	return 0, 0, errors.New("store unavailable")
+}
+
+// IP-15: tenant quotas and pluggable stores.
+func TestSecurityRateLimitTenantsAndStores(t *testing.T) {
+	rl, err := middleware.RateLimit(middleware.RateLimitConfig{
+		Requests: 1, Window: time.Minute,
+		Key: func(c gofi.Context) string { return c.HeaderVal("X-Tenant") },
+		RequestsFor: func(c gofi.Context) int {
+			if c.HeaderVal("X-Tenant") == "premium" {
+				return 3
+			}
+			return 0
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := gofi.NewRouter()
+	r.Use(rl)
+	r.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	count := func(tenant string) int {
+		ok := 0
+		for i := 0; i < 4; i++ {
+			resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/x", Headers: map[string]string{"X-Tenant": tenant}})
+			if resp.StatusCode == 200 {
+				ok++
+			}
+		}
+		return ok
+	}
+	if free, premium := count("free"), count("premium"); free != 1 || premium != 3 {
+		t.Errorf("tenant quotas: free=%d premium=%d, want 1 and 3", free, premium)
+	}
+
+	for _, failOpen := range []bool{false, true} {
+		rl, _ := middleware.RateLimit(middleware.RateLimitConfig{Requests: 1, Window: time.Minute, Store: failingRateStore{}, FailOpen: failOpen})
+		r := gofi.NewRouter()
+		r.Use(rl)
+		r.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/x"})
+		want := http.StatusServiceUnavailable
+		if failOpen {
+			want = 200
+		}
+		if resp.StatusCode != want {
+			t.Errorf("store failure with FailOpen=%v: got %d, want %d", failOpen, resp.StatusCode, want)
+		}
+	}
+}
