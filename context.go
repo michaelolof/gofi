@@ -3,6 +3,7 @@ package gofi
 import (
 	"bufio"
 	stdcontext "context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -81,10 +82,12 @@ type Context interface {
 	// set — either by a middleware writing directly to the fasthttp response or via c.Writer().
 	// Useful for middleware idempotency checks where a header may have been set upstream.
 	HasResponseHeader(key string) bool
-	// Context returns a standard library context.Context that is safe for both synchronous and
-	// asynchronous use. On the original (live) context it is backed by the fasthttp connection
-	// context so cancellation signals propagate naturally. On a Copy()-ed context it is a
-	// detached context.Background(), keeping the copy independent from the connection lifetime.
+	// Context returns the request's Go context. On a live context it is the
+	// fasthttp request context unless middleware replaced it with
+	// SetRequestContext (for example ContextTimeout). The fasthttp context is
+	// cancelled only when the server shuts down: it is not cancelled when the
+	// client disconnects, and it carries no deadline. On a Copy()-ed context
+	// it is context.Background().
 	Context() stdcontext.Context
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
@@ -320,13 +323,30 @@ func (c *context) HasResponseHeader(key string) bool {
 }
 
 func (c *context) Context() stdcontext.Context {
-	// For Copy()-ed contexts stdCtx is pre-set to context.Background().
+	// For Copy()-ed contexts stdCtx is pre-set to context.Background();
+	// SetRequestContext also sets it.
 	if c.stdCtx != nil {
 		return c.stdCtx
 	}
-	// For live contexts, delegate to the fasthttp connection context which
-	// carries cancellation signals (e.g. client disconnect).
+	// For live contexts, delegate to the fasthttp request context, which is
+	// cancelled on server shutdown only.
 	return c.fctx
+}
+
+// SetRequestContext replaces the Go context that c.Context() returns for the
+// rest of the request. Middleware that derives a deadline should restore the
+// previous context when its downstream chain returns. It rejects a nil
+// context and contexts not created by gofi.
+func SetRequestContext(c Context, ctx stdcontext.Context) error {
+	if ctx == nil {
+		return errors.New("gofi: nil request context")
+	}
+	cc, ok := c.(*context)
+	if !ok {
+		return errors.New("unknown context object passed")
+	}
+	cc.stdCtx = ctx
+	return nil
 }
 
 func (c *context) HeaderBytes(name string) []byte {

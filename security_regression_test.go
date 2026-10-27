@@ -991,3 +991,53 @@ func TestSecurityPublicErrors(t *testing.T) {
 }
 
 func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+
+// F-03, F-30: deadlines reach cooperative handlers; Timeout keeps headers and
+// bounds detached work.
+func TestSecurityContextTimeout(t *testing.T) {
+	ct, err := middleware.ContextTimeout(20 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := gofi.NewRouter()
+	r.Use(ct)
+	r.Get("/slow", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		if _, ok := c.Context().Deadline(); !ok {
+			return errors.New("no deadline on c.Context()")
+		}
+		select {
+		case <-c.Context().Done():
+			return c.Context().Err()
+		case <-time.After(2 * time.Second):
+			return c.SendString(200, "too slow")
+		}
+	}})
+	start := time.Now()
+	resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/slow"})
+	if resp.StatusCode != http.StatusServiceUnavailable || time.Since(start) > time.Second {
+		t.Fatalf("want 503 at the deadline, got %d after %v (%q)", resp.StatusCode, time.Since(start), resp.BodyString())
+	}
+	if _, err := middleware.ContextTimeout(0); err == nil {
+		t.Fatal("zero duration accepted")
+	}
+}
+
+func TestSecurityTimeoutKeepsHeaders(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(func(c gofi.Context) error {
+		c.Request().Context().Response.Header.Set("X-Upstream-Native", "1")
+		c.Writer().Header().Set("X-Upstream-View", "1")
+		return c.Next()
+	})
+	r.Use(middleware.Timeout(middleware.TimeoutConfig{Timeout: time.Second}))
+	r.Get("/t", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		c.Writer().Header().Set("X-Downstream-View", "1")
+		return c.SendString(200, c.Request().RemoteAddr)
+	}})
+	resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/t"})
+	for _, h := range []string{"X-Upstream-Native", "X-Upstream-View", "X-Downstream-View"} {
+		if resp.Header(h) != "1" {
+			t.Errorf("%s lost under Timeout: %v", h, resp.HeaderMap)
+		}
+	}
+}
