@@ -976,5 +976,8 @@ func convertFasthttpToHTTPRequest(c Context) (*http.Request, error) {
 	if fctx.IsTLS() {
 		r.TLS = fctx.TLSConnectionState()
 	}
+	if !fctx.Request.Header.IsHTTP11() {
+		r.Proto, r.ProtoMajor, r.ProtoMinor = "HTTP/1.0", 1, 0
+	}
 	return r, nil
 }

@@ -239,16 +239,13 @@ func newRequest(ctx *fasthttp.RequestCtx, pattern string) *Request {
 		remoteAddr = ip.String()
 	}
 
-	var proto string
-	var protoMajor, protoMinor int
-	if ctx.IsTLS() {
-		proto = "HTTP/2.0"
-		protoMajor = 2
+	// fasthttp serves HTTP/1.x only; report the protocol from the request
+	// line rather than inferring it from TLS.
+	proto := "HTTP/1.1"
+	protoMajor, protoMinor := 1, 1
+	if !ctx.Request.Header.IsHTTP11() {
+		proto = "HTTP/1.0"
 		protoMinor = 0
-	} else {
-		proto = "HTTP/1.1"
-		protoMajor = 1
-		protoMinor = 1
 	}
 
 	return &Request{
@@ -394,13 +391,24 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
 // WrapMiddleware converts a standard net/http middleware into a Gofi MiddlewareFunc.
 //
 // The wrapped middleware receives a server-style *http.Request carrying the
-// method, target, headers, host, remote address and TLS state. Changes it makes
-// to that request, including a replacement request or context passed to the
-// next handler, are not propagated to downstream Gofi handlers.
+// method, target, headers, host, remote address and TLS state. When it calls
+// the next handler, the request it passes is propagated to downstream Gofi
+// handlers as follows: its context becomes c.Context() (so values attached
+// with r.WithContext, such as an authenticated principal, are visible), and
+// its headers replace the request headers. Changes to the method, URL, body
+// or remote address are not propagated. Flusher, Hijacker and Pusher are not
+// supported.
 func WrapMiddleware(mw func(http.Handler) http.Handler) MiddlewareFunc {
 	return func(c Context) error {
 		var innerErr error
 		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r != nil {
+				if err := SetRequestContext(c, r.Context()); err != nil {
+					innerErr = err
+					return
+				}
+				syncRequestHeaders(c, r.Header, r.Host)
+			}
 			innerErr = c.Next()
 		})
 
@@ -419,6 +427,33 @@ func WrapMiddleware(mw func(http.Handler) http.Handler) MiddlewareFunc {
 		}
 		wrapped.ServeHTTP(rw, r)
 		return innerErr
+	}
+}
+
+// syncRequestHeaders makes the fasthttp request headers match h, as modified
+// by a wrapped net/http middleware.
+func syncRequestHeaders(c Context, h http.Header, host string) {
+	req := &c.Request().FastHTTPContext().Request
+	var stale []string
+	for key := range req.Header.All() {
+		name := http.CanonicalHeaderKey(string(key))
+		if name != "Host" && h[name] == nil {
+			stale = append(stale, name)
+		}
+	}
+	for _, name := range stale {
+		req.Header.Del(name)
+	}
+	for name, values := range h {
+		req.Header.Del(name)
+		for _, v := range values {
+			if validHeaderField(name) && validHeaderField(v) {
+				req.Header.Add(name, v)
+			}
+		}
+	}
+	if host != "" && validHeaderField(host) {
+		req.Header.SetHost(host)
 	}
 }
 

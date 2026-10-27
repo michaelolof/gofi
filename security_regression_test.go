@@ -1369,3 +1369,25 @@ func TestSecurityRedirectRulesAreDeterministic(t *testing.T) {
 		t.Fatalf("/docs/* matched /docsearch: %d %v", resp.StatusCode, resp.HeaderMap)
 	}
 }
+
+type principalKey struct{}
+
+// F-15: decisions made by standard middleware reach the gofi handler.
+func TestSecurityWrapMiddlewarePropagatesContext(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Use(gofi.WrapMiddleware(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			req.Header.Set("X-User", "alice")
+			req.Header.Del("Authorization")
+			next.ServeHTTP(w, req.WithContext(stdcontext.WithValue(req.Context(), principalKey{}, "alice")))
+		})
+	}))
+	r.Get("/", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		principal, _ := c.Context().Value(principalKey{}).(string)
+		return c.SendString(200, principal+"|"+c.HeaderVal("X-User")+"|"+c.HeaderVal("Authorization")+"|"+c.Request().Proto)
+	}})
+	resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/", Headers: map[string]string{"Authorization": "Bearer t"}})
+	if resp.BodyString() != "alice|alice||HTTP/1.1" {
+		t.Fatalf("bridge did not propagate context/headers: %q", resp.BodyString())
+	}
+}
