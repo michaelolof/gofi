@@ -675,10 +675,16 @@ func TestSecurityCacheBoundaries(t *testing.T) {
 	}
 
 	t.Run("host is part of the key", func(t *testing.T) {
-		r := newRouter(middleware.CacheConfig{}, echo)
-		r.Test(gofi.TestOptions{Method: "GET", Path: "/r"})
-		// Test always sends Host: localhost; a second Host header overrides it.
-		if got := req(r, "", map[string]string{"Host": "tenant-b"}); !strings.HasPrefix(got, "tenant-b|") {
+		s := gofi.NewFasthttpServer()
+		s.Router().Use(middleware.Cache())
+		s.Router().Get("/r", gofi.RouteOptions{Handler: echo})
+		addr := startServer(t, s)
+		hostGet := func(host string) string {
+			out := rawRequest(t, addr, "GET /r HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n")
+			return out[strings.Index(out, "\r\n\r\n")+4:]
+		}
+		hostGet("tenant-a")
+		if got := hostGet("tenant-b"); !strings.HasPrefix(got, "tenant-b|") {
 			t.Fatalf("response cached across hosts: %q", got)
 		}
 	})
