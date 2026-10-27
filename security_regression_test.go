@@ -1391,3 +1391,58 @@ func TestSecurityWrapMiddlewarePropagatesContext(t *testing.T) {
 		t.Fatalf("bridge did not propagate context/headers: %q", resp.BodyString())
 	}
 }
+
+// IP-15: admission control rejects predictably and bounds its bookkeeping.
+func TestSecurityAdmissionControl(t *testing.T) {
+	limit, err := middleware.ConcurrencyLimit(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	r := gofi.NewRouter()
+	r.Use(limit)
+	r.Get("/slow", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		close(entered)
+		<-release
+		return c.SendString(200, "ok")
+	}})
+	done := make(chan int)
+	go func() {
+		resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/slow"})
+		done <- resp.StatusCode
+	}()
+	<-entered
+	if resp, _ := r.Test(gofi.TestOptions{Method: "GET", Path: "/slow"}); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("second concurrent request admitted: %d", resp.StatusCode)
+	}
+	close(release)
+	if code := <-done; code != 200 {
+		t.Errorf("first request failed: %d", code)
+	}
+
+	rl, err := middleware.RateLimit(middleware.RateLimitConfig{Requests: 2, Window: time.Minute, MaxKeys: 2,
+		Key: func(c gofi.Context) string { return c.HeaderVal("X-Client") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := gofi.NewRouter()
+	r2.Use(rl)
+	r2.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+	call := func(client string) *gofi.InjectResponse {
+		resp, _ := r2.Test(gofi.TestOptions{Method: "GET", Path: "/x", Headers: map[string]string{"X-Client": client}})
+		return resp
+	}
+	call("a")
+	call("a")
+	if resp := call("a"); resp.StatusCode != http.StatusTooManyRequests || resp.Header("Retry-After") == "" {
+		t.Errorf("third request in window: want 429 with Retry-After, got %d %v", resp.StatusCode, resp.HeaderMap)
+	}
+	call("b")
+	if resp := call("c"); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("key table grew past MaxKeys: %d", resp.StatusCode)
+	}
+	if _, err := middleware.RateLimit(middleware.RateLimitConfig{}); err == nil {
+		t.Error("zero rate limit accepted")
+	}
+}
