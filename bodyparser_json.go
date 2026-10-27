@@ -166,6 +166,9 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
+	if err := checkJSONStructure(pv, requestLimits(opts.Context)); err != nil {
+		return err
+	}
 
 	walkOpts := jsonRequestOptions{
 		SchemaRules: opts.SchemaRules,

@@ -45,6 +45,13 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
+	count := 0
+	for _, vals := range formValues {
+		count += len(vals)
+	}
+	if count > requestLimits(opts.Context).MaxFormValues {
+		return newLimitError("form value count")
+	}
 
 	if opts.SchemaRules == nil {
 		return nil

@@ -71,6 +71,16 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
 	}
+	parts := 0
+	for _, vals := range form.Value {
+		parts += len(vals)
+	}
+	for _, files := range form.File {
+		parts += len(files)
+	}
+	if parts > requestLimits(opts.Context).MaxMultipartParts {
+		return newLimitError("multipart part count")
+	}
 
 	if opts.SchemaRules == nil {
 		return nil

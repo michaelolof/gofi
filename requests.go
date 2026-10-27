@@ -308,9 +308,14 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 			contentType = cont.ContentType(actualCT)
 		}
 	}
+	// Request bodies are never decompressed, so an encoded body cannot be
+	// validated; refuse it rather than parse compressed bytes.
+	if enc := c.headerGet("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		return schemaPtr, NewHTTPError(http.StatusUnsupportedMediaType, "request body content encoding is not supported")
+	}
 	sz, err := c.serverOpts.getSerializer(contentType)
 	if err != nil {
-		return schemaPtr, newErrReport(RequestErr, schemaBody, string(contentType), "required", err)
+		return schemaPtr, NewHTTPError(http.StatusUnsupportedMediaType, http.StatusText(http.StatusUnsupportedMediaType))
 	}
 
 	err = sz.ValidateAndDecodeRequest(body, RequestOptions{

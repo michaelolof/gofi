@@ -1473,3 +1473,43 @@ func TestSecurityDocsTemplates(t *testing.T) {
 		}
 	}
 }
+
+// IP-06: structural limits and content-type policy.
+func TestSecurityRequestStructureLimits(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
+		if _, err := gofi.ValidateAndBind[nameSchema](c); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}})
+	post := func(contentType, body string, headers map[string]string) int {
+		h := map[string]string{"Content-Type": contentType}
+		for k, v := range headers {
+			h[k] = v
+		}
+		resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/n", Headers: h, Body: strings.NewReader(body)})
+		return resp.StatusCode
+	}
+
+	deep := `{"name":"a","x":` + strings.Repeat("[", 70) + strings.Repeat("]", 70) + `}`
+	wide := `{"name":"a","x":[` + strings.TrimSuffix(strings.Repeat("1,", 10001), ",") + `]}`
+	many := "name=a" + strings.Repeat("&k=v", 1000)
+	cases := []struct {
+		name, ct, body string
+		headers        map[string]string
+		want           int
+	}{
+		{"deep JSON", "application/json", deep, nil, http.StatusBadRequest},
+		{"long array", "application/json", wide, nil, http.StatusBadRequest},
+		{"many form values", "application/x-www-form-urlencoded", many, nil, http.StatusBadRequest},
+		{"unsupported media type", "application/xml", "<a/>", nil, http.StatusUnsupportedMediaType},
+		{"compressed body", "application/json", `{"name":"a"}`, map[string]string{"Content-Encoding": "gzip"}, http.StatusUnsupportedMediaType},
+		{"within limits", "application/json", `{"name":"a","x":[1,2,3]}`, nil, 200},
+	}
+	for _, tc := range cases {
+		if got := post(tc.ct, tc.body, tc.headers); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
