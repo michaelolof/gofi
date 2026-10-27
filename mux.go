@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
+	"log"
 	"net"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 	"sync"
 	"unsafe"
@@ -391,6 +393,11 @@ func (s *serveMux) RegisterBodyParser(list ...BodyParser) {
 	}
 }
 
+// Static serves files under root at prefix for GET and HEAD. Files are read
+// through an os.Root, so symlinks cannot escape root, and are streamed with
+// range and conditional request support. Paths with a segment beginning with
+// "." are not served, and directories are served only through an index.html.
+// If root cannot be opened, the routes answer 404 and the error is logged.
 func (s *serveMux) Static(prefix, root string) {
 	if s.prefix != "" {
 		prefix = joinPath(s.prefix, prefix)
@@ -400,56 +407,44 @@ func (s *serveMux) Static(prefix, root string) {
 		prefix += "/"
 	}
 
-	fileServer := http.FileServer(publicFileSystem{http.Dir(root)})
-	handler := http.StripPrefix(prefix, fileServer)
-
-	s.method("GET", prefix+"*filepath", RouteOptions{
-		Handler: func(c Context) error {
-			// Bridge to net/http file server via adapter
-			w := c.Writer()
-			rw, ok := w.(http.ResponseWriter)
-			if !ok {
-				rw = newHTTPResponseWriterShim(c)
-			}
-			r, err := convertFasthttpToHTTPRequest(c)
-			if err != nil {
-				return NewHTTPError(http.StatusBadRequest, http.StatusText(http.StatusBadRequest))
-			}
-			handler.ServeHTTP(rw, r)
-			return nil
-		},
-	})
+	handler := newStaticHandler(prefix, root)
+	s.method("GET", prefix+"*filepath", RouteOptions{Handler: handler})
+	s.method("HEAD", prefix+"*filepath", RouteOptions{Handler: handler})
 }
 
-// publicFileSystem hides dotfiles and directory listings from Router.Static.
-// Any path segment beginning with "." is reported as missing, and a directory
-// is reported as missing unless it has an index.html for http.FileServer.
-type publicFileSystem struct {
-	fs http.FileSystem
-}
+func newStaticHandler(prefix, root string) HandlerFunc {
+	notFound := func(c Context) error {
+		return NewHTTPError(http.StatusNotFound, http.StatusText(http.StatusNotFound))
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		log.Printf("gofi: Static(%q, %q): %v; serving 404", prefix, root, err)
+		return notFound
+	}
+	fileServer := (&fasthttp.FS{
+		FS:                 dir.FS(),
+		IndexNames:         []string{"index.html"},
+		GenerateIndexPages: false,
+		AcceptByteRange:    true,
+		// Strip the route prefix but keep the leading slash.
+		PathRewrite: fasthttp.NewPathPrefixStripper(len(prefix) - 1),
+	}).NewRequestHandler()
 
-func (p publicFileSystem) Open(name string) (http.File, error) {
-	if strings.Contains(name, "/.") || strings.HasPrefix(name, ".") {
-		return nil, fs.ErrNotExist
-	}
-	f, err := p.fs.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, err
-	}
-	if info.IsDir() {
-		index, err := p.fs.Open(strings.TrimSuffix(name, "/") + "/index.html")
-		if err != nil {
-			f.Close()
-			return nil, fs.ErrNotExist
+	return func(c Context) error {
+		name := path.Clean("/" + c.Param("filepath"))
+		if strings.Contains(name, "/.") {
+			return notFound(c)
 		}
-		index.Close()
+		fctx := c.Request().FastHTTPContext()
+		fileServer(fctx)
+		switch fctx.Response.StatusCode() {
+		case http.StatusNotFound, http.StatusForbidden:
+			// Missing files and directories without an index.
+			fctx.Response.ResetBody()
+			return notFound(c)
+		}
+		return nil
 	}
-	return f, nil
 }
 
 // Listen starts the server on the given address using fasthttp.

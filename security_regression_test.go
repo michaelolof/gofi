@@ -105,8 +105,8 @@ func TestSecurityStaticMalformedEscapeDoesNotCrash(t *testing.T) {
 		s.Router().Static("/static", dir)
 		addr := startServer(t, s)
 
-		if out := rawRequest(t, addr, get("/static/%zz")); !strings.HasPrefix(out, "HTTP/1.1 400") {
-			t.Fatalf("malformed escape: want 400, got %q", out)
+		if out := rawRequest(t, addr, get("/static/%zz")); !strings.HasPrefix(out, "HTTP/1.1 4") {
+			t.Fatalf("malformed escape: want a 4xx, got %q", out)
 		}
 		if out := rawRequest(t, addr, get("/static/a.txt")); !strings.HasSuffix(out, "hi") {
 			t.Fatalf("server did not keep serving after malformed escape: %q", out)
@@ -1234,5 +1234,32 @@ func TestSecuritySessionBoundCSRF(t *testing.T) {
 	}
 	if code := post("alice", "v1.1.abc.def", nil); code != http.StatusForbidden {
 		t.Errorf("forged token accepted: %d", code)
+	}
+}
+
+// F-13, F-28: Router.Static is confined to its root and streams files.
+func TestSecurityRouterStaticConfinementAndStreaming(t *testing.T) {
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "secret.txt"), "outside secret")
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.js"), "0123456789")
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "escape.txt")); err != nil {
+		t.Skip("symlinks unsupported:", err)
+	}
+
+	s := gofi.NewFasthttpServer()
+	s.Router().Static("/static", dir)
+	addr := startServer(t, s)
+
+	if status, body := httpGet(t, addr, "/static/escape.txt"); status == 200 || strings.Contains(body, "outside secret") {
+		t.Fatalf("symlink escaped the static root: %d %q", status, body)
+	}
+	out := rawRequest(t, addr, "HEAD /static/app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(out, "HTTP/1.1 200") || !strings.Contains(out, "Content-Length: 10") {
+		t.Fatalf("HEAD not served: %q", out)
+	}
+	out = rawRequest(t, addr, "GET /static/app.js HTTP/1.1\r\nHost: x\r\nRange: bytes=2-4\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(out, "HTTP/1.1 206") || !strings.HasSuffix(out, "234") {
+		t.Fatalf("range request not honoured: %q", out)
 	}
 }

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"log"
+	"os"
 	"path"
 	"strings"
 
@@ -66,9 +67,16 @@ func Static(config ...StaticConfig) gofi.MiddlewareFunc {
 	// "/public/...", never "/publicity".
 	prefix := strings.TrimSuffix(cfg.Prefix, "/")
 
-	// Internal fasthttp FS handler setup
+	// Read files through an os.Root so symlinks cannot escape Root. With a
+	// custom filesystem fasthttp also keeps compressed copies in memory rather
+	// than writing them into the served directory.
+	dir, err := os.OpenRoot(cfg.Root)
+	if err != nil {
+		log.Printf("gofi/middleware: Static cannot open Root %q: %v; passing requests through", cfg.Root, err)
+		return func(c gofi.Context) error { return c.Next() }
+	}
 	fs := &fasthttp.FS{
-		Root:               cfg.Root,
+		FS:                 dir.FS(),
 		IndexNames:         []string{cfg.Index},
 		GenerateIndexPages: false,
 		Compress:           cfg.Compress,
