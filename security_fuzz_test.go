@@ -216,6 +216,8 @@ func FuzzBindMultipartBody(f *testing.F) {
 func FuzzNormalizeHost(f *testing.F) {
 	f.Add("Example.COM.:8080")
 	f.Add("[::1]:443")
+	f.Add("[0:0::01]:80")
+	f.Add("[fe80::1%25en0]")
 	f.Add("a..b")
 	f.Add("ex ample.com")
 	f.Fuzz(func(t *testing.T, h string) {
@@ -223,7 +225,8 @@ func FuzzNormalizeHost(f *testing.F) {
 		if !ok {
 			return
 		}
-		if name == "" || name != strings.ToLower(name) || strings.ContainsAny(name, " \t\r\n/\\@?#%") {
+		if name == "" || name != strings.ToLower(name) || strings.ContainsAny(name, " \t\r\n/\\@?#%") ||
+			strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
 			t.Fatalf("normalizeHost(%q) = %q", h, name)
 		}
 		if again, ok := normalizeHost(name); !ok || again != name {

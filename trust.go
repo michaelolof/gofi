@@ -268,14 +268,16 @@ func normalizeHost(h string) (string, bool) {
 		if end < 0 {
 			return "", false
 		}
-		if _, err := netip.ParseAddr(h[1:end]); err != nil {
+		// Zones never belong in a Host header; the address is canonicalized
+		// so every spelling of it compares equal.
+		addr, err := netip.ParseAddr(h[1:end])
+		if err != nil || !addr.Is6() || addr.Zone() != "" {
 			return "", false
 		}
-		name = h[:end+1]
 		if rest := h[end+1:]; rest != "" && !validPort(strings.TrimPrefix(rest, ":")) {
 			return "", false
 		}
-		return strings.ToLower(name), true
+		return "[" + addr.String() + "]", true
 	}
 	if i := strings.LastIndexByte(h, ':'); i >= 0 {
 		if !validPort(h[i+1:]) {
@@ -284,7 +286,8 @@ func normalizeHost(h string) (string, bool) {
 		name = h[:i]
 	}
 	name = strings.TrimSuffix(strings.ToLower(name), ".")
-	if name == "" {
+	// Every label must be non-empty: no leading dot, "..", or second trailing dot.
+	if name == "" || name[0] == '.' || name[len(name)-1] == '.' || strings.Contains(name, "..") {
 		return "", false
 	}
 	for i := 0; i < len(name); i++ {
