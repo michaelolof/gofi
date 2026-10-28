@@ -254,13 +254,7 @@ func TestSecuritySessionDoneOnShutdown(t *testing.T) {
 }
 
 func TestSecuritySessionLimit(t *testing.T) {
-	if _, err := gofiws.NewSessionRegistryWithLimit(0); err == nil {
-		t.Fatal("zero limit accepted")
-	}
-	registry, err := gofiws.NewSessionRegistryWithLimit(1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	registry := gofiws.NewSessionRegistry(gofiws.RegistryOptions{MaxSessions: 1})
 	s := gofi.NewFasthttpServer()
 	s.Router().Get("/ws", gofiws.DefineWebSocket(gofiws.WebSocketOptions{
 		Runtime: gofiws.RuntimeOptions{Registry: registry},

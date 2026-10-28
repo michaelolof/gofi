@@ -13,8 +13,9 @@ import (
 
 // CORSConfig defines the config for the CORS middleware.
 type CORSConfig struct {
-	// AllowOrigin defines a list of origins that may access the resource.
-	// Optional. Default: "*"
+	// AllowOrigins is a comma-separated list of origins (scheme://host[:port])
+	// that may access the resource, or "*" for any origin.
+	// Required.
 	AllowOrigins string
 
 	// AllowMethods defines a list methods allowed when accessing the resource.
@@ -42,50 +43,23 @@ type CORSConfig struct {
 	MaxAge int
 }
 
-// CORSConfigDefault is the default config
+// CORSConfigDefault holds the defaults applied to optional fields.
 var CORSConfigDefault = CORSConfig{
-	AllowOrigins:     "*",
-	AllowMethods:     "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
-	AllowHeaders:     "",
-	AllowCredentials: false,
-	ExposeHeaders:    "",
-	MaxAge:           0,
+	AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
 }
 
-// CORS creates a new middleware handler.
+// CORS validates cfg and creates a CORS middleware. It rejects a wildcard
+// origin combined with credentials, origins that are not scheme://host[:port],
+// and a negative MaxAge. Requested headers are allowed only if listed in
+// AllowHeaders, and a preflight for a method not in AllowMethods receives no
+// allow headers.
 //
 // Responses whose CORS headers depend on the request Origin carry
 // "Vary: Origin", including responses to disallowed origins, so shared caches
 // do not reuse one origin's decision for another. Only an OPTIONS request with
 // an Access-Control-Request-Method header is answered as a preflight; other
-// OPTIONS requests continue down the chain. With AllowHeaders empty, the
-// requested headers are reflected (legacy behavior); NewCORS does not reflect
-// and validates the configuration.
-func CORS(config ...CORSConfig) gofi.MiddlewareFunc {
-	// Set default config
-	cfg := CORSConfigDefault
-
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
-
-		if cfg.AllowOrigins == "" {
-			cfg.AllowOrigins = CORSConfigDefault.AllowOrigins
-		}
-
-		if cfg.AllowMethods == "" {
-			cfg.AllowMethods = CORSConfigDefault.AllowMethods
-		}
-	}
-	return newCORSHandler(cfg, true)
-}
-
-// NewCORS validates cfg and creates a CORS middleware. It rejects a wildcard
-// origin combined with credentials, origins that are not scheme://host[:port],
-// and empty method lists. Requested headers are allowed only if listed in
-// AllowHeaders, and a preflight for a method not in AllowMethods receives no
-// allow headers.
-func NewCORS(cfg CORSConfig) (gofi.MiddlewareFunc, error) {
+// OPTIONS requests continue down the chain.
+func CORS(cfg CORSConfig) (gofi.MiddlewareFunc, error) {
 	if cfg.AllowOrigins == "" {
 		return nil, errors.New("gofi/middleware: CORS AllowOrigins is required")
 	}
@@ -107,10 +81,10 @@ func NewCORS(cfg CORSConfig) (gofi.MiddlewareFunc, error) {
 			}
 		}
 	}
-	return newCORSHandler(cfg, false), nil
+	return newCORSHandler(cfg), nil
 }
 
-func newCORSHandler(cfg CORSConfig, reflectHeaders bool) gofi.MiddlewareFunc {
+func newCORSHandler(cfg CORSConfig) gofi.MiddlewareFunc {
 	wildcard := cfg.AllowOrigins == "*"
 	origins := map[string]bool{}
 	if !wildcard {
@@ -164,13 +138,11 @@ func newCORSHandler(cfg CORSConfig, reflectHeaders bool) gofi.MiddlewareFunc {
 		// Preflight
 		addVary(h, "Access-Control-Request-Method")
 		addVary(h, "Access-Control-Request-Headers")
-		if reflectHeaders || allowedMethods[strings.ToUpper(requestedMethod)] {
+		if allowedMethods[strings.ToUpper(requestedMethod)] {
 			h.Set("Access-Control-Allow-Methods", cfg.AllowMethods)
 
 			if cfg.AllowHeaders != "" {
 				h.Set("Access-Control-Allow-Headers", cfg.AllowHeaders)
-			} else if requested := c.HeaderVal("Access-Control-Request-Headers"); requested != "" && reflectHeaders {
-				h.Set("Access-Control-Allow-Headers", requested)
 			}
 
 			if cfg.MaxAge > 0 {

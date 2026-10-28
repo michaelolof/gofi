@@ -34,9 +34,9 @@ type TrustOptions struct {
 	AllowedHosts []string
 }
 
-// TrustPolicy resolves the client IP and scheme of a request, starting from
-// the socket peer.
-type TrustPolicy struct {
+// trustPolicy resolves the client IP, scheme and host of a request, starting
+// from the socket peer.
+type trustPolicy struct {
 	prefixes      []netip.Prefix
 	forwardedFor  string
 	forwardedPro  string
@@ -53,9 +53,21 @@ type forwardedHop struct {
 	host  string
 }
 
-// NewTrustPolicy validates opts and compiles the trusted proxy ranges.
-func NewTrustPolicy(opts TrustOptions) (*TrustPolicy, error) {
-	p := &TrustPolicy{
+// TrustPolicy validates opts and returns middleware that resolves the client
+// IP, scheme and host once per request, so that ClientIP, Scheme, Host and
+// built-in middleware (Logger, CSRF) use them. It answers 421 when the host is
+// malformed or not in AllowedHosts. Register it before middleware that reads
+// them.
+func TrustPolicy(opts TrustOptions) (MiddlewareFunc, error) {
+	p, err := newTrustPolicy(opts)
+	if err != nil {
+		return nil, err
+	}
+	return p.middleware, nil
+}
+
+func newTrustPolicy(opts TrustOptions) (*trustPolicy, error) {
+	p := &trustPolicy{
 		forwardedFor: opts.ForwardedForHeader,
 		forwardedPro: opts.ForwardedProtoHeader,
 		maxEntries:   opts.MaxForwardedEntries,
@@ -103,7 +115,7 @@ func NewTrustPolicy(opts TrustOptions) (*TrustPolicy, error) {
 	return p, nil
 }
 
-func (p *TrustPolicy) trusted(addr netip.Addr) bool {
+func (p *trustPolicy) trusted(addr netip.Addr) bool {
 	addr = addr.Unmap()
 	for _, prefix := range p.prefixes {
 		if prefix.Contains(addr) {
@@ -114,7 +126,7 @@ func (p *TrustPolicy) trusted(addr netip.Addr) bool {
 }
 
 // hops returns the forwarding chain, nearest hop last.
-func (p *TrustPolicy) hops(c *context) []forwardedHop {
+func (p *trustPolicy) hops(c *context) []forwardedHop {
 	var hops []forwardedHop
 	if p.useForwarded {
 		for _, value := range c.fctx.Request.Header.PeekAll("Forwarded") {
@@ -192,7 +204,7 @@ func parseHopAddr(s string) (netip.Addr, bool) {
 }
 
 // resolve returns the client IP, scheme and host for the request in c.
-func (p *TrustPolicy) resolve(c *context) (string, string, string) {
+func (p *trustPolicy) resolve(c *context) (string, string, string) {
 	scheme := "http"
 	if c.fctx.IsTLS() {
 		scheme = "https"
@@ -296,28 +308,22 @@ func validPort(p string) bool {
 	return true
 }
 
-// Middleware resolves the client IP, scheme and host once per request so
-// that ClientIP, Scheme, Host and built-in middleware (Logger, CSRF) use them.
-// It answers 421 when the host is malformed or not in AllowedHosts. Register
-// it before middleware that reads them.
-func (p *TrustPolicy) Middleware() MiddlewareFunc {
-	return func(c Context) error {
-		if cc, ok := c.(*context); ok {
-			var host string
-			cc.clientIP, cc.scheme, host = p.resolve(cc)
-			name, valid := normalizeHost(host)
-			if !valid || (p.allowedHosts != nil && !p.allowedHosts[name]) {
-				return NewHTTPError(http.StatusMisdirectedRequest, http.StatusText(http.StatusMisdirectedRequest))
-			}
-			cc.host = host
+func (p *trustPolicy) middleware(c Context) error {
+	if cc, ok := c.(*context); ok {
+		var host string
+		cc.clientIP, cc.scheme, host = p.resolve(cc)
+		name, valid := normalizeHost(host)
+		if !valid || (p.allowedHosts != nil && !p.allowedHosts[name]) {
+			return NewHTTPError(http.StatusMisdirectedRequest, http.StatusText(http.StatusMisdirectedRequest))
 		}
-		return c.Next()
+		cc.host = host
 	}
+	return c.Next()
 }
 
 // ClientIP returns the request's client IP: the address resolved by a
 // TrustPolicy middleware, or otherwise the socket peer. Forwarding headers are
-// never used without a TrustPolicy.
+// never used without TrustPolicy.
 func ClientIP(c Context) string {
 	if cc, ok := c.(*context); ok {
 		if cc.clientIP != "" {

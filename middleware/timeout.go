@@ -13,89 +13,49 @@ import (
 
 // TimeoutConfig defines the config for the Timeout middleware.
 type TimeoutConfig struct {
-	// Timeout controls how long the server should wait for a response.
-	// Optional. Default: 5 * time.Second
+	// Timeout after which the response is sent.
+	// Required.
 	Timeout time.Duration
 
+	// MaxInFlight bounds handler goroutines, including handlers still running
+	// after their request timed out. Requests beyond it are rejected with 503.
+	// Required.
+	MaxInFlight int
+
 	// ErrorHandler is executed if the request times out.
-	// Optional. Default: returns 408 Request Timeout.
+	// Optional. Default: returns 503 Service Unavailable.
 	ErrorHandler gofi.HandlerFunc
 }
 
-// TimeoutConfigDefault is the default config
+// TimeoutConfigDefault holds the defaults applied to optional fields.
 var TimeoutConfigDefault = TimeoutConfig{
-	Timeout: 5 * time.Second,
 	ErrorHandler: func(c gofi.Context) error {
-		return gofi.NewHTTPError(408, "request timeout")
+		return gofi.NewHTTPError(http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
 	},
 }
 
-// DefaultTimeoutMaxInFlight bounds how many handler goroutines one Timeout
-// middleware instance runs at once, including handlers still running after
-// their request timed out. Requests beyond it are rejected with 503.
-const DefaultTimeoutMaxInFlight = 1024
-
-// Timeout creates a new middleware handler.
+// Timeout validates cfg and creates a response timeout middleware.
 //
 // Timeout runs the rest of the chain on a copied context in another goroutine
 // and answers when the timer fires. It does not stop the handler: the
-// goroutine keeps running, and keeps its slot in the in-flight limit
-// (DefaultTimeoutMaxInFlight), until the handler returns. Prefer
-// ContextTimeout, which gives handlers a cooperative deadline without a second
-// goroutine. Streaming responses are rejected under Timeout.
+// goroutine keeps running, and keeps its MaxInFlight slot, until the handler
+// returns. Prefer ContextTimeout, which gives handlers a cooperative deadline
+// without a second goroutine. Streaming responses are rejected under Timeout.
 //
 // Headers set before Timeout, natively or through c.Writer(), and headers set
 // by downstream handlers are kept in the response.
-//
-// Deprecated: use ContextTimeout for handler deadlines, or NewTimeout for a
-// validated response timeout with an explicit in-flight limit.
-func Timeout(config ...TimeoutConfig) gofi.MiddlewareFunc {
-	// Set default config
-	cfg := TimeoutConfigDefault
-
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
-
-		if cfg.Timeout == 0 {
-			cfg.Timeout = TimeoutConfigDefault.Timeout
-		}
-		if cfg.ErrorHandler == nil {
-			cfg.ErrorHandler = TimeoutConfigDefault.ErrorHandler
-		}
+func Timeout(cfg TimeoutConfig) (gofi.MiddlewareFunc, error) {
+	if cfg.Timeout <= 0 || cfg.MaxInFlight <= 0 {
+		return nil, errors.New("gofi/middleware: Timeout requires positive Timeout and MaxInFlight")
 	}
-	return newTimeout(cfg, DefaultTimeoutMaxInFlight)
+	if cfg.ErrorHandler == nil {
+		cfg.ErrorHandler = TimeoutConfigDefault.ErrorHandler
+	}
+	return newTimeout(cfg), nil
 }
 
-// TimeoutOptions configures NewTimeout.
-type TimeoutOptions struct {
-	// Timeout after which the response is sent. Required.
-	Timeout time.Duration
-	// MaxInFlight bounds handler goroutines, including handlers still running
-	// after their request timed out. Required.
-	MaxInFlight int
-	// ErrorHandler produces the timeout response. Default: 503.
-	ErrorHandler gofi.HandlerFunc
-}
-
-// NewTimeout creates a response timeout with validated options. Like
-// Timeout, it answers when the timer fires but cannot stop the handler; the
-// handler keeps its in-flight slot until it returns. Prefer ContextTimeout
-// when handlers honour c.Context().
-func NewTimeout(opts TimeoutOptions) (gofi.MiddlewareFunc, error) {
-	if opts.Timeout <= 0 || opts.MaxInFlight <= 0 {
-		return nil, errors.New("gofi/middleware: NewTimeout requires positive Timeout and MaxInFlight")
-	}
-	if opts.ErrorHandler == nil {
-		opts.ErrorHandler = func(c gofi.Context) error {
-			return gofi.NewHTTPError(http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
-		}
-	}
-	return newTimeout(TimeoutConfig{Timeout: opts.Timeout, ErrorHandler: opts.ErrorHandler}, opts.MaxInFlight), nil
-}
-
-func newTimeout(cfg TimeoutConfig, maxInFlight int) gofi.MiddlewareFunc {
-	inFlight := make(chan struct{}, maxInFlight)
+func newTimeout(cfg TimeoutConfig) gofi.MiddlewareFunc {
+	inFlight := make(chan struct{}, cfg.MaxInFlight)
 
 	return func(c gofi.Context) error {
 		select {

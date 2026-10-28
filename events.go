@@ -87,11 +87,11 @@ type EventQueue struct {
 	once    sync.Once
 }
 
-// NewEventQueue starts a consumer goroutine that calls consume for each
-// event. Pass q.Publish to OnRequestComplete.
-func NewEventQueue(capacity int, consume func(RequestEvent)) (*EventQueue, error) {
+// StartEventQueue starts a consumer goroutine that calls consume for each
+// event. Pass q.Publish to OnRequestComplete, and Close the queue on shutdown.
+func StartEventQueue(capacity int, consume func(RequestEvent)) (*EventQueue, error) {
 	if capacity <= 0 || consume == nil {
-		return nil, errors.New("gofi: NewEventQueue requires a positive capacity and a consumer")
+		return nil, errors.New("gofi: StartEventQueue requires a positive capacity and a consumer")
 	}
 	q := &EventQueue{events: make(chan RequestEvent, capacity), done: make(chan struct{})}
 	go func() {

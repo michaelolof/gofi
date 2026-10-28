@@ -18,13 +18,23 @@ import (
 type FasthttpServer struct {
 	mux    *serveMux
 	server *fasthttp.Server
-	// bodyCeiling is the ServerOptions body limit; zero for NewFasthttpServer.
+	// bodyCeiling is the ServerOptions body limit; zero without ServerOptions.
 	bodyCeiling int
 }
 
-// NewFasthttpServer creates a FasthttpServer backed by a new serveMux.
-func NewFasthttpServer() *FasthttpServer {
-	return newRouter().newFasthttpServer()
+// NewFasthttpServer creates a FasthttpServer backed by a new router. Without
+// ServerOptions, fasthttp's transport defaults apply, which leave timeouts and
+// connection counts unbounded. Invalid options panic; check them first with
+// ValidateServerOptions when they come from configuration.
+func NewFasthttpServer(opts ...ServerOptions) *FasthttpServer {
+	if len(opts) == 0 {
+		return newRouter().newFasthttpServer()
+	}
+	s, err := newFasthttpServerWithOptions(opts[0])
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 // newFasthttpServer keeps all native listener paths wired identically.

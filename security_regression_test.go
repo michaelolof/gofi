@@ -267,7 +267,7 @@ func TestSecuritySchemaHeaderControlBytesRejected(t *testing.T) {
 // F-27: a returned error or a 404/405 outcome must never become a cached 200.
 func TestSecurityCacheDoesNotStoreErrors(t *testing.T) {
 	r := gofi.NewRouter()
-	r.Use(middleware.Cache())
+	r.Use(must(middleware.Cache(middleware.CacheConfig{})))
 	var calls atomic.Int32
 	r.Get("/item", gofi.RouteOptions{Handler: func(c gofi.Context) error {
 		if calls.Add(1) == 1 {
@@ -541,7 +541,7 @@ func TestSecurityStreamProducerKeepsItsContext(t *testing.T) {
 
 func TestSecurityCacheBypassesStreams(t *testing.T) {
 	r := gofi.NewRouter()
-	r.Use(middleware.Cache(), middleware.ETag())
+	r.Use(must(middleware.Cache(middleware.CacheConfig{})), middleware.ETag())
 	r.Get("/s", gofi.RouteOptions{Handler: func(c gofi.Context) error {
 		return c.SetBodyStreamWriter(func(w *bufio.Writer) error {
 			_, err := w.WriteString("streamed")
@@ -659,7 +659,7 @@ func TestSecurityNumericBindingIsExact(t *testing.T) {
 func TestSecurityCacheBoundaries(t *testing.T) {
 	newRouter := func(cfg middleware.CacheConfig, handler gofi.HandlerFunc) gofi.Router {
 		r := gofi.NewRouter()
-		r.Use(middleware.Cache(cfg))
+		r.Use(must(middleware.Cache(cfg)))
 		r.Get("/r", gofi.RouteOptions{Handler: handler})
 		return r
 	}
@@ -677,7 +677,7 @@ func TestSecurityCacheBoundaries(t *testing.T) {
 
 	t.Run("host is part of the key", func(t *testing.T) {
 		s := gofi.NewFasthttpServer()
-		s.Router().Use(middleware.Cache())
+		s.Router().Use(must(middleware.Cache(middleware.CacheConfig{})))
 		s.Router().Get("/r", gofi.RouteOptions{Handler: echo})
 		addr := startServer(t, s)
 		hostGet := func(host string) string {
@@ -1042,7 +1042,7 @@ func TestSecurityTimeoutKeepsHeaders(t *testing.T) {
 		c.Writer().Header().Set("X-Upstream-View", "1")
 		return c.Next()
 	})
-	r.Use(middleware.Timeout(middleware.TimeoutConfig{Timeout: time.Second}))
+	r.Use(must(middleware.Timeout(middleware.TimeoutConfig{Timeout: time.Second, MaxInFlight: 16})))
 	r.Get("/t", gofi.RouteOptions{Handler: func(c gofi.Context) error {
 		c.Writer().Header().Set("X-Downstream-View", "1")
 		return c.SendString(200, c.Request().RemoteAddr)
@@ -1070,15 +1070,15 @@ func TestSecurityServerBodyLimitTiming(t *testing.T) {
 }
 
 func TestSecurityServerOptions(t *testing.T) {
-	if _, err := gofi.NewFasthttpServerWithOptions(gofi.ServerOptions{ReadTimeout: -1}); err == nil {
+	if err := gofi.ValidateServerOptions(gofi.ServerOptions{ReadTimeout: -1}); err == nil {
 		t.Fatal("negative ReadTimeout accepted")
+	}
+	if !panics(func() { gofi.NewFasthttpServer(gofi.ServerOptions{ReadTimeout: -1}) }) {
+		t.Fatal("NewFasthttpServer accepted a negative ReadTimeout")
 	}
 	opts := gofi.DefaultServerOptions()
 	opts.MaxRequestBodySize = 32
-	s, err := gofi.NewFasthttpServerWithOptions(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := gofi.NewFasthttpServer(opts)
 	// Configure may not raise the ceiling set by ServerOptions.
 	s.Router().Configure(gofi.Config{BodyLimit: 1 << 20})
 	s.Router().Post("/p", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
@@ -1088,6 +1088,20 @@ func TestSecurityServerOptions(t *testing.T) {
 	if !strings.HasPrefix(out, "HTTP/1.1 413") {
 		t.Fatalf("Configure raised the ServerOptions body ceiling: %q", firstLine(out))
 	}
+}
+
+func panics(fn func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	fn()
+	return false
+}
+
+// must unwraps a middleware constructor that takes a validated config.
+func must(mw gofi.MiddlewareFunc, err error) gofi.MiddlewareFunc {
+	if err != nil {
+		panic(err)
+	}
+	return mw
 }
 
 func firstLine(s string) string {
@@ -1100,10 +1114,10 @@ func firstLine(s string) string {
 // F-09, F-19: client identity starts at the socket peer; logs carry the final
 // status and bounded fields.
 func TestSecurityTrustPolicy(t *testing.T) {
-	newServer := func(policy *gofi.TrustPolicy) string {
+	newServer := func(policy gofi.MiddlewareFunc) string {
 		s := gofi.NewFasthttpServer()
 		if policy != nil {
-			s.Router().Use(policy.Middleware())
+			s.Router().Use(policy)
 		}
 		s.Router().Get("/ip", gofi.RouteOptions{Handler: func(c gofi.Context) error {
 			return c.SendString(200, gofi.ClientIP(c)+" "+gofi.Scheme(c))
@@ -1120,7 +1134,7 @@ func TestSecurityTrustPolicy(t *testing.T) {
 		t.Errorf("forwarding headers trusted without a policy: %q", got)
 	}
 
-	policy, err := gofi.NewTrustPolicy(gofi.TrustOptions{TrustedProxies: []string{"127.0.0.1", "10.0.0.0/8"}})
+	policy, err := gofi.TrustPolicy(gofi.TrustOptions{TrustedProxies: []string{"127.0.0.1", "10.0.0.0/8"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1137,7 +1151,7 @@ func TestSecurityTrustPolicy(t *testing.T) {
 		}
 	}
 
-	if _, err := gofi.NewTrustPolicy(gofi.TrustOptions{TrustedProxies: []string{"not-a-cidr"}}); err == nil {
+	if _, err := gofi.TrustPolicy(gofi.TrustOptions{TrustedProxies: []string{"not-a-cidr"}}); err == nil {
 		t.Error("invalid proxy accepted")
 	}
 }
@@ -1168,7 +1182,7 @@ func TestSecurityLoggerAndRequestID(t *testing.T) {
 // F-11: CORS varies on Origin, distinguishes preflights, validates config.
 func TestSecurityCORS(t *testing.T) {
 	r := gofi.NewRouter()
-	r.Use(middleware.CORS(middleware.CORSConfig{AllowOrigins: "https://app.example"}))
+	r.Use(must(middleware.CORS(middleware.CORSConfig{AllowOrigins: "https://app.example"})))
 	r.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
 	r.Options("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "options handler") }})
 
@@ -1183,13 +1197,13 @@ func TestSecurityCORS(t *testing.T) {
 		t.Errorf("ordinary OPTIONS treated as a preflight: %d %q", resp.StatusCode, resp.BodyString())
 	}
 
-	if _, err := middleware.NewCORS(middleware.CORSConfig{AllowOrigins: "*", AllowCredentials: true}); err == nil {
+	if _, err := middleware.CORS(middleware.CORSConfig{AllowOrigins: "*", AllowCredentials: true}); err == nil {
 		t.Error("wildcard origin with credentials accepted")
 	}
-	if _, err := middleware.NewCORS(middleware.CORSConfig{AllowOrigins: "app.example"}); err == nil {
+	if _, err := middleware.CORS(middleware.CORSConfig{AllowOrigins: "app.example"}); err == nil {
 		t.Error("origin without scheme accepted")
 	}
-	strict, err := middleware.NewCORS(middleware.CORSConfig{AllowOrigins: "https://app.example", AllowMethods: "GET"})
+	strict, err := middleware.CORS(middleware.CORSConfig{AllowOrigins: "https://app.example", AllowMethods: "GET"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1532,13 +1546,10 @@ func TestSecurityRouterOptionsAndTargetPolicy(t *testing.T) {
 		t.Errorf("TRACE without a route: want 405, got %d", resp.StatusCode)
 	}
 
-	if _, err := gofi.NewRouterWithOptions(gofi.RouterOptions{Limits: gofi.RequestLimits{MaxJSONDepth: -1}}); err == nil {
+	if !panics(func() { gofi.NewRouter(gofi.RouterOptions{Limits: gofi.RequestLimits{MaxJSONDepth: -1}}) }) {
 		t.Fatal("negative limit accepted")
 	}
-	r2, err := gofi.NewRouterWithOptions(gofi.RouterOptions{AllowEncodedSeparators: true, Limits: gofi.RequestLimits{MaxJSONArrayLength: 2}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	r2 := gofi.NewRouter(gofi.RouterOptions{AllowEncodedSeparators: true, Limits: gofi.RequestLimits{MaxJSONArrayLength: 2}})
 	r2.Get("/files/:id", ok)
 	r2.Trace("/files/:id", ok)
 	r2.Post("/n", gofi.RouteOptions{Schema: &nameSchema{}, Handler: func(c gofi.Context) error {
@@ -1560,7 +1571,7 @@ func TestSecurityRouterOptionsAndTargetPolicy(t *testing.T) {
 	}
 }
 
-// IP-09: the request context ends with the request; NewTimeout is validated
+// IP-09: the request context ends with the request; Timeout is validated
 // and bounds detached work.
 func TestSecurityRequestContextLifetime(t *testing.T) {
 	r := gofi.NewRouter()
@@ -1582,11 +1593,11 @@ func TestSecurityRequestContextLifetime(t *testing.T) {
 	}
 }
 
-func TestSecurityNewTimeout(t *testing.T) {
-	if _, err := middleware.NewTimeout(middleware.TimeoutOptions{Timeout: time.Second}); err == nil {
+func TestSecurityTimeoutConfig(t *testing.T) {
+	if _, err := middleware.Timeout(middleware.TimeoutConfig{Timeout: time.Second}); err == nil {
 		t.Fatal("missing MaxInFlight accepted")
 	}
-	to, err := middleware.NewTimeout(middleware.TimeoutOptions{Timeout: 20 * time.Millisecond, MaxInFlight: 1})
+	to, err := middleware.Timeout(middleware.TimeoutConfig{Timeout: 20 * time.Millisecond, MaxInFlight: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1645,11 +1656,11 @@ func TestSecurityStreamOptions(t *testing.T) {
 }
 
 // IP-07: stampede control and bounded fills.
-func TestSecurityNewCacheCoalescesAndBoundsFills(t *testing.T) {
-	if _, err := middleware.NewCache(middleware.CacheOptions{MaxWaiters: -1}); err == nil {
+func TestSecurityCacheCoalescesAndBoundsFills(t *testing.T) {
+	if _, err := middleware.Cache(middleware.CacheConfig{MaxWaiters: -1}); err == nil {
 		t.Fatal("negative option accepted")
 	}
-	cache, err := middleware.NewCache(middleware.CacheOptions{CoalesceWait: time.Second})
+	cache, err := middleware.Cache(middleware.CacheConfig{CoalesceWait: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1679,7 +1690,7 @@ func TestSecurityNewCacheCoalescesAndBoundsFills(t *testing.T) {
 
 // IP-10: RFC 7239 Forwarded and validated hosts.
 func TestSecurityForwardedAndHosts(t *testing.T) {
-	policy, err := gofi.NewTrustPolicy(gofi.TrustOptions{
+	policy, err := gofi.TrustPolicy(gofi.TrustOptions{
 		TrustedProxies: []string{"127.0.0.1"},
 		UseForwarded:   true,
 		AllowedHosts:   []string{"api.example.com"},
@@ -1688,7 +1699,7 @@ func TestSecurityForwardedAndHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := gofi.NewFasthttpServer()
-	s.Router().Use(policy.Middleware())
+	s.Router().Use(policy)
 	s.Router().Get("/w", gofi.RouteOptions{Handler: func(c gofi.Context) error {
 		return c.SendString(200, gofi.ClientIP(c)+" "+gofi.Scheme(c)+" "+gofi.Host(c))
 	}})
@@ -1745,7 +1756,7 @@ func TestSecurityRequestEvents(t *testing.T) {
 	}
 
 	block := make(chan struct{})
-	q, err := gofi.NewEventQueue(1, func(gofi.RequestEvent) { <-block })
+	q, err := gofi.StartEventQueue(1, func(gofi.RequestEvent) { <-block })
 	if err != nil {
 		t.Fatal(err)
 	}

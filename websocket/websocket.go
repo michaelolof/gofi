@@ -3,7 +3,6 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -180,20 +179,22 @@ func applyHandshakePolicy(runtime *Options, policy HandshakePolicy, hasSchema bo
 }
 
 // NewSessionRegistry creates an active-session registry for graceful shutdown/draining.
-func NewSessionRegistry() *SessionRegistry {
-	return &SessionRegistry{sessions: make(map[*Session]struct{})}
+func NewSessionRegistry(opts ...RegistryOptions) *SessionRegistry {
+	r := &SessionRegistry{sessions: make(map[*Session]struct{})}
+	if len(opts) > 0 {
+		if opts[0].MaxSessions < 0 {
+			panic("gofi/websocket: negative RegistryOptions.MaxSessions")
+		}
+		r.max = opts[0].MaxSessions
+	}
+	return r
 }
 
-// NewSessionRegistryWithLimit creates a registry that admits at most max
-// concurrent sessions. Upgrades beyond it are refused with 503 before the
-// handshake.
-func NewSessionRegistryWithLimit(max int) (*SessionRegistry, error) {
-	if max <= 0 {
-		return nil, errors.New("gofi/websocket: session limit must be positive")
-	}
-	r := NewSessionRegistry()
-	r.max = max
-	return r, nil
+// RegistryOptions configures a SessionRegistry.
+type RegistryOptions struct {
+	// MaxSessions bounds concurrent sessions. Upgrades beyond it are refused
+	// with 503 before the handshake. Zero means unlimited.
+	MaxSessions int
 }
 
 // full reports whether the registry is at its session limit.

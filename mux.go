@@ -110,8 +110,17 @@ func (l *routerLifecycle) renewIfCancelled() {
 	}
 }
 
-func NewRouter() Router {
-	return newRouter()
+// NewRouter creates a router. Pass RouterOptions to configure it; invalid
+// options panic, like invalid route patterns. Use it when embedding the router
+// in your own fasthttp server through Handler().
+func NewRouter(opts ...RouterOptions) Router {
+	m := newRouter()
+	if len(opts) > 0 {
+		if err := m.applyRouterOptions(opts[0]); err != nil {
+			panic(err)
+		}
+	}
+	return m
 }
 
 func (s *serveMux) Method(method string, path string, opts RouteOptions) {

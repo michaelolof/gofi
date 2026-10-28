@@ -53,6 +53,22 @@ type CacheConfig struct {
 	// AllowPrivateResponses enables caching requests that carry Authorization/Cookie headers.
 	// Optional. Default: false
 	AllowPrivateResponses bool
+
+	// MaxConcurrentFills bounds responses being copied into the cache at
+	// once. Misses beyond it run the handler but are not stored.
+	// Optional. Default: 64
+	MaxConcurrentFills int
+
+	// CoalesceWait lets concurrent misses for the same key wait up to this
+	// long for the request already filling it, instead of all running the
+	// handler.
+	// Optional. Default: 0 (no coalescing)
+	CoalesceWait time.Duration
+
+	// MaxWaiters bounds requests waiting on one key; extra requests run the
+	// handler themselves.
+	// Optional. Default: 32
+	MaxWaiters int
 }
 
 // defaultKeyGenerator partitions entries by method, Host and path, and keeps
@@ -68,14 +84,15 @@ func defaultKeyGenerator(c gofi.Context) string {
 	return key
 }
 
-// CacheConfigDefault is the default config
+// CacheConfigDefault holds the defaults applied to optional fields.
 var CacheConfigDefault = CacheConfig{
-	Expiration:   1 * time.Minute,
-	CacheHeader:  false,
-	KeyGenerator: defaultKeyGenerator,
-	Methods:      "GET, HEAD",
-	MaxEntries:   4096,
-	MaxBytes:     64 << 20,
+	Expiration:         1 * time.Minute,
+	KeyGenerator:       defaultKeyGenerator,
+	Methods:            "GET, HEAD",
+	MaxEntries:         4096,
+	MaxBytes:           64 << 20,
+	MaxConcurrentFills: 64,
+	MaxWaiters:         32,
 }
 
 // replayedHeaders are the end-to-end response headers a cache hit restores.
@@ -100,52 +117,28 @@ type cacheEntry struct {
 	size        int64
 }
 
-// CacheOptions configures NewCache.
-type CacheOptions struct {
-	CacheConfig
-	// MaxConcurrentFills bounds responses being copied into the cache at
-	// once. Misses beyond it run the handler but are not stored. Default: 64.
-	MaxConcurrentFills int
-	// CoalesceWait lets concurrent misses for the same key wait up to this
-	// long for the request already filling it, instead of all running the
-	// handler. Zero disables coalescing.
-	CoalesceWait time.Duration
-	// MaxWaiters bounds requests waiting on one key; extra requests run the
-	// handler themselves. Default: 32.
-	MaxWaiters int
-}
-
-// NewCache validates opts and creates a cache middleware with bounded fills
-// and optional stampede control. Admission, keys and replay are as for Cache.
-func NewCache(opts CacheOptions) (gofi.MiddlewareFunc, error) {
-	if opts.Expiration < 0 || opts.MaxConcurrentFills < 0 || opts.CoalesceWait < 0 || opts.MaxWaiters < 0 {
-		return nil, errors.New("gofi/middleware: negative CacheOptions value")
-	}
-	if opts.MaxConcurrentFills == 0 {
-		opts.MaxConcurrentFills = 64
-	}
-	if opts.MaxWaiters == 0 {
-		opts.MaxWaiters = 32
-	}
-	return newCache(opts.CacheConfig, opts.MaxConcurrentFills, opts.CoalesceWait, opts.MaxWaiters), nil
-}
-
 // pendingFill tracks a request filling one cache key.
 type pendingFill struct {
 	done    chan struct{}
 	waiters int
 }
 
-// Cache creates a new middleware handler
-func Cache(config ...CacheConfig) gofi.MiddlewareFunc {
-	cfg := CacheConfigDefault
-	if len(config) > 0 {
-		cfg = config[0]
+// Cache validates cfg and creates a cache middleware with bounded fills and
+// optional stampede control.
+func Cache(cfg CacheConfig) (gofi.MiddlewareFunc, error) {
+	if cfg.Expiration < 0 || cfg.MaxConcurrentFills < 0 || cfg.CoalesceWait < 0 || cfg.MaxWaiters < 0 {
+		return nil, errors.New("gofi/middleware: negative CacheConfig value")
 	}
-	return newCache(cfg, 0, 0, 0)
+	if cfg.MaxConcurrentFills == 0 {
+		cfg.MaxConcurrentFills = CacheConfigDefault.MaxConcurrentFills
+	}
+	if cfg.MaxWaiters == 0 {
+		cfg.MaxWaiters = CacheConfigDefault.MaxWaiters
+	}
+	return newCache(cfg), nil
 }
 
-func newCache(cfg CacheConfig, maxFills int, coalesceWait time.Duration, maxWaiters int) gofi.MiddlewareFunc {
+func newCache(cfg CacheConfig) gofi.MiddlewareFunc {
 	{
 		if cfg.Expiration == 0 {
 			cfg.Expiration = CacheConfigDefault.Expiration
@@ -180,8 +173,8 @@ func newCache(cfg CacheConfig, maxFills int, coalesceWait time.Duration, maxWait
 	varySpecs := make(map[string][]string)
 	var totalBytes int64
 	var fills chan struct{}
-	if maxFills > 0 {
-		fills = make(chan struct{}, maxFills)
+	if cfg.MaxConcurrentFills > 0 {
+		fills = make(chan struct{}, cfg.MaxConcurrentFills)
 	}
 	pending := make(map[string]*pendingFill)
 
@@ -240,12 +233,12 @@ func newCache(cfg CacheConfig, maxFills int, coalesceWait time.Duration, maxWait
 		// Coalesce concurrent misses: wait briefly for the request already
 		// filling this key, then use its entry if it was stored.
 		var fill *pendingFill
-		if !found && coalesceWait > 0 {
+		if !found && cfg.CoalesceWait > 0 {
 			mu.Lock()
-			if p, ok := pending[baseKey]; ok && p.waiters < maxWaiters {
+			if p, ok := pending[baseKey]; ok && p.waiters < cfg.MaxWaiters {
 				p.waiters++
 				mu.Unlock()
-				timer := time.NewTimer(coalesceWait)
+				timer := time.NewTimer(cfg.CoalesceWait)
 				select {
 				case <-p.done:
 				case <-timer.C:

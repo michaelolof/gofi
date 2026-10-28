@@ -71,7 +71,7 @@ func FuzzReadBodyLimited(f *testing.F) {
 func FuzzTrustPolicyResolve(f *testing.F) {
 	f.Add("203.0.113.7, 10.0.0.2", "https")
 	f.Add("not-an-ip,,::ffff:1.2.3.4", "HTTPS , http")
-	policy, err := NewTrustPolicy(TrustOptions{TrustedProxies: []string{"127.0.0.1", "10.0.0.0/8"}})
+	policy, err := newTrustPolicy(TrustOptions{TrustedProxies: []string{"127.0.0.1", "10.0.0.0/8"}})
 	if err != nil {
 		f.Fatal(err)
 	}

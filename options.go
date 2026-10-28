@@ -7,7 +7,7 @@ import (
 )
 
 // ServerOptions configures the native fasthttp transport created by
-// NewFasthttpServerWithOptions. Zero values mean "use fasthttp's default",
+// NewFasthttpServer. Zero values mean "use fasthttp's default",
 // which for timeouts and connection limits is unlimited; negative values are
 // invalid. Transport timeouts bound socket reads and writes, not handler
 // execution: use ContextTimeout for handler deadlines.
@@ -39,8 +39,8 @@ type ServerOptions struct {
 	Router RouterOptions
 }
 
-// RouterOptions configures a router created by NewRouterWithOptions, or by
-// NewFasthttpServerWithOptions through ServerOptions.Router.
+// RouterOptions configures a router created by NewRouter, or by
+// NewFasthttpServer through ServerOptions.Router.
 type RouterOptions struct {
 	// Limits bounds the structure of request bodies.
 	Limits RequestLimits
@@ -51,16 +51,6 @@ type RouterOptions struct {
 	// DisableMethodNotAllowed answers 404 instead of 405 with an Allow
 	// header when a path exists only under other methods.
 	DisableMethodNotAllowed bool
-}
-
-// NewRouterWithOptions creates a router with validated options. Use it when
-// embedding the router in your own fasthttp server through Handler().
-func NewRouterWithOptions(opts RouterOptions) (Router, error) {
-	m := newRouter()
-	if err := m.applyRouterOptions(opts); err != nil {
-		return nil, err
-	}
-	return m, nil
 }
 
 func (m *serveMux) applyRouterOptions(opts RouterOptions) error {
@@ -89,7 +79,8 @@ func DefaultServerOptions() ServerOptions {
 	}
 }
 
-// ValidateServerOptions reports the first invalid setting in opts.
+// ValidateServerOptions reports the first invalid setting in opts, including
+// opts.Router.
 func ValidateServerOptions(opts ServerOptions) error {
 	durations := map[string]time.Duration{
 		"ReadTimeout": opts.ReadTimeout, "WriteTimeout": opts.WriteTimeout, "IdleTimeout": opts.IdleTimeout,
@@ -109,12 +100,13 @@ func ValidateServerOptions(opts ServerOptions) error {
 			return fmt.Errorf("gofi: ServerOptions.%s must not be negative", name)
 		}
 	}
-	return nil
+	_, err := opts.Router.Limits.normalize()
+	return err
 }
 
-// NewFasthttpServerWithOptions creates a FasthttpServer with a new router and
+// newFasthttpServerWithOptions creates a FasthttpServer with a new router and
 // a validated transport configuration.
-func NewFasthttpServerWithOptions(opts ServerOptions) (*FasthttpServer, error) {
+func newFasthttpServerWithOptions(opts ServerOptions) (*FasthttpServer, error) {
 	if err := ValidateServerOptions(opts); err != nil {
 		return nil, err
 	}
