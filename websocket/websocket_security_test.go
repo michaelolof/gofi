@@ -10,8 +10,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,4 +281,105 @@ func TestSecuritySessionLimit(t *testing.T) {
 	if err == nil || resp == nil || resp.StatusCode != 503 {
 		t.Fatalf("second session admitted past the limit (err %v)", err)
 	}
+}
+
+// IP-20: abrupt client disconnects, oversized frames and session-limit
+// refusals leave no sessions or session goroutines behind.
+func TestCapacitySessionChurnReturnsToPlateau(t *testing.T) {
+	if testing.Short() {
+		t.Skip("capacity test skipped with -short")
+	}
+	registry := gofiws.NewSessionRegistry(gofiws.RegistryOptions{MaxSessions: 8})
+	s := gofi.NewFasthttpServer()
+	s.Router().Get("/ws", gofiws.DefineWebSocket(gofiws.WebSocketOptions{
+		Runtime: gofiws.RuntimeOptions{Registry: registry, ReadTimeout: time.Second, MaxMessageBytes: 1 << 10},
+		Handler: func(ws *gofiws.Session) error {
+			for {
+				mt, msg, err := ws.ReadMessage()
+				if err != nil {
+					return nil
+				}
+				if err := ws.WriteMessage(mt, msg); err != nil {
+					return nil
+				}
+			}
+		},
+	}))
+	addr := startWSServer(t, s)
+	url := "ws://" + addr + "/ws"
+
+	settle := func() int {
+		deadline := time.Now().Add(5 * time.Second)
+		for registry.Active() > 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return registry.Active()
+	}
+	warm, _, err := fasthttpws.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warm.Close()
+	settle()
+	base := sessionGoroutines()
+
+	var admitted, refused atomic.Int32
+	var wg sync.WaitGroup
+	for w := 0; w < 16; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 25; i++ {
+				conn, resp, err := fasthttpws.DefaultDialer.Dial(url, nil)
+				if err != nil {
+					if resp != nil && resp.StatusCode == 503 {
+						refused.Add(1) // refused at the session limit
+					}
+					continue
+				}
+				admitted.Add(1)
+				switch (w + i) % 3 {
+				case 0: // echo, then vanish without a close frame
+					_ = conn.WriteMessage(fasthttpws.TextMessage, []byte("hi"))
+					_, _, _ = conn.ReadMessage()
+					_ = conn.UnderlyingConn().Close()
+				case 1: // frame over ReadLimit
+					_ = conn.WriteMessage(fasthttpws.BinaryMessage, make([]byte, 4<<10))
+					_, _, _ = conn.ReadMessage()
+					conn.Close()
+				default: // clean close
+					_ = conn.WriteMessage(fasthttpws.CloseMessage, fasthttpws.FormatCloseMessage(fasthttpws.CloseNormalClosure, ""))
+					conn.Close()
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	if admitted.Load() < 100 || admitted.Load()+refused.Load() != 400 {
+		t.Fatalf("admitted %d and refused %d of 400 dials", admitted.Load(), refused.Load())
+	}
+	t.Logf("admitted %d sessions, refused %d at the limit", admitted.Load(), refused.Load())
+
+	if n := settle(); n != 0 {
+		t.Fatalf("%d sessions still registered after churn", n)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for sessionGoroutines() > base && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if now := sessionGoroutines(); now > base {
+		t.Fatalf("session goroutines did not return to plateau: %d, baseline %d", now, base)
+	}
+}
+
+// sessionGoroutines counts goroutines running gofi websocket code.
+func sessionGoroutines() int {
+	buf := make([]byte, 4<<20)
+	n := 0
+	for _, st := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+		if strings.Contains(st, "gofi/websocket.") && !strings.Contains(st, "TestCapacitySessionChurn") {
+			n++
+		}
+	}
+	return n
 }
