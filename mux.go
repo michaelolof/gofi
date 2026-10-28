@@ -1060,27 +1060,6 @@ func serveRouterBuilder(trees map[string]*node, paths docsPaths, rm metaMap, glo
 	return s
 }
 
-// newHTTPResponseWriterShim creates a simple http.ResponseWriter for bridging to net/http handlers.
-type httpResponseWriterShim struct {
-	c Context
-}
-
-func newHTTPResponseWriterShim(c Context) *httpResponseWriterShim {
-	return &httpResponseWriterShim{c: c}
-}
-
-func (w *httpResponseWriterShim) Header() http.Header {
-	return w.c.Writer().Header()
-}
-
-func (w *httpResponseWriterShim) Write(b []byte) (int, error) {
-	return w.c.Writer().Write(b)
-}
-
-func (w *httpResponseWriterShim) WriteHeader(statusCode int) {
-	w.c.Writer().WriteHeader(statusCode)
-}
-
 // convertFasthttpToHTTPRequest builds a server-style *http.Request from the
 // context for net/http bridge usage. It returns an error instead of a nil
 // request when the request target cannot be represented as a net/url URL

@@ -808,48 +808,6 @@ func parseTime(s string, layout string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-// requestFieldByIndex resolves a compiled struct-field index without repeating
-// a name lookup for every request. FieldByIndexErr safely traverses initialized
-// embedded pointers and reports nil parents instead of panicking.
-func requestFieldByIndex(parent reflect.Value, index []int) (reflect.Value, error) {
-	if !parent.IsValid() {
-		return reflect.Value{}, errors.New("cannot access a field on an invalid value")
-	}
-	if len(index) == 0 {
-		return reflect.Value{}, errors.New("compiled field index is empty")
-	}
-
-	for parent.Kind() == reflect.Pointer {
-		if parent.IsNil() {
-			return reflect.Value{}, fmt.Errorf("field index %v traverses a nil parent", index)
-		}
-		parent = parent.Elem()
-	}
-	if parent.Kind() != reflect.Struct {
-		return reflect.Value{}, fmt.Errorf("field index %v traverses non-struct %s", index, parent.Kind())
-	}
-	currentType := parent.Type()
-	for position, fieldIndex := range index {
-		for currentType.Kind() == reflect.Pointer {
-			currentType = currentType.Elem()
-		}
-		if currentType.Kind() != reflect.Struct || fieldIndex < 0 || fieldIndex >= currentType.NumField() {
-			return reflect.Value{}, fmt.Errorf("field index %v is invalid at position %d", index, position)
-		}
-		currentType = currentType.Field(fieldIndex).Type
-	}
-
-	current, err := parent.FieldByIndexErr(index)
-	if err != nil {
-		return reflect.Value{}, fmt.Errorf("invalid compiled field index %v: %w", index, err)
-	}
-
-	if !current.CanSet() {
-		return reflect.Value{}, fmt.Errorf("field index %v is not settable", index)
-	}
-	return current, nil
-}
-
 func requestFieldParentsReady(parent reflect.Value, index []int) bool {
 	if !parent.IsValid() || len(index) == 0 {
 		return false

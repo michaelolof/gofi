@@ -26,7 +26,6 @@ var (
 	jsonMarshalerType   = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
 	rawMessageType      = reflect.TypeOf(json.RawMessage(nil))
-	byteSliceType       = reflect.TypeOf([]byte(nil))
 )
 
 // ImplementsJSONMarshaler reports whether T or *T implements json.Marshaler.

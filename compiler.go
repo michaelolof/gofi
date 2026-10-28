@@ -622,5 +622,3 @@ func checkTagReference(methodName string, typ reflect.Type) (string, bool) {
 	}
 	return "", false
 }
-
-type SpecialTypeIds = utils.ObjectFormats

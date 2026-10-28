@@ -460,8 +460,6 @@ type walkFinishStatus struct{}
 
 var walkFinished = walkFinishStatus{}
 
-const DEFAULT_ARRAY_SIZE = 50
-
 // setConvertedReflectValue uses typed setters for the primitive conversions
 // performed on nearly every JSON field. Uncommon conversions retain the
 // existing SafeConvert fallback and its error behavior.

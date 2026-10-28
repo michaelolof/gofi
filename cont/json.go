@@ -17,29 +17,6 @@ type ParsedJson struct {
 	pv *fastjson.Value
 }
 
-func NewParsedJson(pv *fastjson.Value) ParsedJson {
-	return ParsedJson{pv: pv}
-}
-
-func JsonParse(p fastjson.Parser, bs []byte) (*ParsedJson, error) {
-	pv, err := p.ParseBytes(bs)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ParsedJson{pv: pv}, err
-}
-
-func PoolJsonParse(bs []byte) (*ParsedJson, error) {
-	var p fastjson.Parser
-	pv, err := p.ParseBytes(bs)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ParsedJson{pv: pv}, err
-}
-
 type JsonDefinition uint8
 
 const (
@@ -500,16 +477,6 @@ func GetAnyValueFromNode(node *fastjson.Value) (any, error) {
 	}
 
 	return nil, errors.New("unknown value passed to GetAnyValueFromNode")
-}
-
-type arrayItem struct {
-	Size int
-}
-
-func NewArrayItem(size int) arrayItem {
-	return arrayItem{
-		Size: size,
-	}
 }
 
 // extractRawValue extracts the raw value from a fastjson node for custom spec decoding.
