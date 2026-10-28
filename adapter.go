@@ -133,7 +133,7 @@ func (w *responseWriter) syncHeaders() {
 // validHeaderField reports whether a header name or value is free of CR, LF
 // and NUL, which would otherwise allow response splitting.
 func validHeaderField(s string) bool {
-	return strings.IndexAny(s, "\r\n\x00") < 0
+	return !strings.ContainsAny(s, "\r\n\x00")
 }
 
 // Request wraps a fasthttp.RequestCtx to provide *http.Request-like access for backward compatibility.

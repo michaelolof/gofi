@@ -132,9 +132,9 @@ func saveNativeHeaders(h *fasthttp.ResponseHeader) []savedHeader {
 		}
 		saved = append(saved, savedHeader{key: name, value: string(value)})
 	}
-	h.VisitAllCookie(func(_, value []byte) {
+	for _, value := range h.Cookies() {
 		saved = append(saved, savedHeader{key: "Set-Cookie", value: string(value), cookie: true})
-	})
+	}
 	return saved
 }
 

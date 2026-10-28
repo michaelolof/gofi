@@ -249,11 +249,12 @@ type cookieSetter interface {
 // response or in the ResponseWriter adapter's pending header map.
 func (c *context) cookieAlreadyWritten(name string) bool {
 	found := false
-	c.fctx.Response.Header.VisitAllCookie(func(key, _ []byte) {
+	for key := range c.fctx.Response.Header.Cookies() {
 		if string(key) == name {
 			found = true
+			break
 		}
-	})
+	}
 	if found {
 		return true
 	}

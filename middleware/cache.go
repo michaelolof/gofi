@@ -382,7 +382,10 @@ func effectiveHeader(c gofi.Context, fctx *fasthttp.RequestCtx, name string) str
 // storable reports whether the response may be shared between clients.
 func storable(c gofi.Context, fctx *fasthttp.RequestCtx) bool {
 	hasCookie := false
-	fctx.Response.Header.VisitAllCookie(func(_, _ []byte) { hasCookie = true })
+	for range fctx.Response.Header.Cookies() {
+		hasCookie = true
+		break
+	}
 	if hasCookie || len(c.Writer().Header().Values("Set-Cookie")) > 0 {
 		return false
 	}

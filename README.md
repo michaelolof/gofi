@@ -895,6 +895,8 @@ resp, err := r.Test(gofi.TestOptions{
 
 If the handler panics, `Test` returns the same generic `500` response a live server sends, alongside a non-nil error describing the panic.
 
+If the request cannot be parsed (for example, a header beyond the server's limits), `Test` and `Inject` return an error and the handler does not run, matching a live server that rejects the request.
+
 ### TestOptions, InjectOptions & InjectResponse
 
 ```go
