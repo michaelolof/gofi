@@ -655,6 +655,56 @@ func TestSecurityNumericBindingIsExact(t *testing.T) {
 	}
 }
 
+type nestedFormSchema struct {
+	Request struct {
+		Body struct {
+			Inner struct {
+				ID   uint16 `json:"id" validate:"max=100"`
+				Tags []int  `json:"tags"`
+				Rows []struct {
+					Key string `json:"key" validate:"required,max=3"`
+				} `json:"rows"`
+			} `json:"inner"`
+		}
+	}
+}
+
+// IP-20 (found by FuzzBindFormBody): nested form fields are cast and validated
+// like top-level ones, so bad input is a 400 naming the full field path.
+func TestSecurityNestedFormFieldsAreValidated(t *testing.T) {
+	r := gofi.NewRouter()
+	r.Post("/n", gofi.RouteOptions{Schema: &nestedFormSchema{}, Handler: func(c gofi.Context) error {
+		s, err := gofi.ValidateAndBind[nestedFormSchema](c)
+		if err != nil {
+			return err
+		}
+		in := s.Request.Body.Inner
+		return c.SendString(200, fmt.Sprint(in.ID, in.Tags, len(in.Rows)))
+	}})
+	post := func(body string) *gofi.InjectResponse {
+		resp, _ := r.Test(gofi.TestOptions{Method: "POST", Path: "/n",
+			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, Body: strings.NewReader(body)})
+		return resp
+	}
+
+	if resp := post("inner.id=7&inner.tags=1&inner.tags=2&inner.rows.0.key=a"); resp.StatusCode != 200 || resp.BodyString() != "7 [1 2] 1" {
+		t.Fatalf("valid nested form rejected: %d %q", resp.StatusCode, resp.BodyString())
+	}
+	for body, field := range map[string]string{
+		"inner.id":                 "inner.id",
+		"inner.id=x":               "inner.id",
+		"inner.id=101":             "inner.id",
+		"inner.tags=1&inner.tags=": "inner.tags.1",
+		"inner.rows.0.key=abcd":    "inner.rows.0.key",
+		"inner.rows.0.other=1":     "inner.rows.0.key",
+	} {
+		resp := post(body)
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(resp.BodyString(), field) {
+			t.Errorf("%q: want 400 naming %s, got %d %q", body, field, resp.StatusCode, resp.BodyString())
+		}
+	}
+}
+
 // F-05, F-06, F-07: cache isolation, eligibility, replay and size limits.
 func TestSecurityCacheBoundaries(t *testing.T) {
 	newRouter := func(cfg middleware.CacheConfig, handler gofi.HandlerFunc) gofi.Router {

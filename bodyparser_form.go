@@ -1,7 +1,6 @@
 package gofi
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -145,7 +144,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 							}
 						}
 
-						if err := f.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
+						if err := f.bindStruct(subForm, istrct, elemRule, customSpecs, fmt.Sprintf("%s.%d", key, i)); err != nil {
 							return err
 						}
 						nslice = reflect.Append(nslice, istrct)
@@ -214,7 +213,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 						subForm[strings.TrimPrefix(k, prefix)] = v
 					}
 				}
-				if err := f.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
+				if err := f.bindStruct(subForm, fieldVal, rule, customSpecs, key); err != nil {
 					return err
 				}
 			} else {
@@ -264,11 +263,14 @@ func (f *FormBodyParser) bindValue(field reflect.Value, val any) error {
 	return fmt.Errorf("cannot convert %v to %v", rv.Type(), field.Type())
 }
 
-func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef, customSpecs CustomSpecs) error {
+// bindStruct binds the nested fields under path. Errors and validation mirror
+// the top level, reported against the full dotted field name.
+func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef, customSpecs CustomSpecs, path string) error {
 	if dest.Kind() == reflect.Pointer {
 		dest = dest.Elem()
 	}
 	for key, rule := range rules.properties {
+		name := path + "." + key
 		vals, ok := form[key]
 		if !ok {
 			// Check for nested fields even if the top-level key isn't there
@@ -276,7 +278,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 				// Continue to handle nested binding
 			} else {
 				if rule.required || rule.present {
-					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
+					return newErrReport(RequestErr, schemaBody, name, "required", errors.New("field is required"))
 				}
 				continue
 			}
@@ -298,8 +300,26 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			return utils.PrimitiveFromStr(r.kind, v)
 		}
 
+		// bindScalar parses, validates and binds one value.
+		bindScalar := func(field reflect.Value, v string, r *RuleDef, name string) error {
+			val, err := parseVal(v, r)
+			if err != nil {
+				return newErrReport(RequestErr, schemaBody, name, "typeCast", err)
+			}
+			if err := runValidation(val, RequestErr, schemaBody, name, r.rules); err != nil {
+				return err
+			}
+			if err := f.bindValue(field, val); err != nil {
+				return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
+			}
+			return nil
+		}
+
 		if rule.kind == reflect.Slice || rule.kind == reflect.Array {
 			elemRule := rule.item
+			if elemRule == nil {
+				elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
+			}
 			if elemRule.kind == reflect.Struct {
 				// Nested struct array
 				i := 0
@@ -331,7 +351,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 						}
 					}
 
-					if err := f.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
+					if err := f.bindStruct(subForm, istrct, elemRule, customSpecs, fmt.Sprintf("%s.%d", name, i)); err != nil {
 						return err
 					}
 
@@ -339,7 +359,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 					i++
 				}
 				if err := f.bindValue(fieldVal, nslice.Interface()); err != nil {
-					return err
+					return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
 				}
 			} else {
 				// Primitive slice
@@ -349,27 +369,19 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 				}
 				slice := reflect.MakeSlice(sliceType, len(vals), len(vals))
 				for i, v := range vals {
-					val, err := parseVal(v, elemRule)
-					if err != nil {
-						return err
-					}
-					if err := f.bindValue(slice.Index(i), val); err != nil {
+					if err := bindScalar(slice.Index(i), v, elemRule, fmt.Sprintf("%s.%d", name, i)); err != nil {
 						return err
 					}
 				}
 				if err := f.bindValue(fieldVal, slice.Interface()); err != nil {
-					return err
+					return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
 				}
 			}
 		} else if rule.kind == reflect.Struct {
 			// If this struct-like field has a custom spec format, treat it as a scalar
 			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
 				if len(vals) > 0 {
-					val, err := parseVal(vals[0], rule)
-					if err != nil {
-						return err
-					}
-					if err := f.bindValue(fieldVal, val); err != nil {
+					if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 						return err
 					}
 				}
@@ -384,16 +396,12 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 					subForm[strings.TrimPrefix(k, prefix)] = v
 				}
 			}
-			if err := f.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
+			if err := f.bindStruct(subForm, fieldVal, rule, customSpecs, name); err != nil {
 				return err
 			}
 		} else {
 			if len(vals) > 0 {
-				val, err := parseVal(vals[0], rule)
-				if err != nil {
-					return err
-				}
-				if err := f.bindValue(fieldVal, val); err != nil {
+				if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 					return err
 				}
 			}
@@ -415,6 +423,3 @@ func (f *FormBodyParser) getFieldStruct(strct reflect.Value, fieldname string) r
 	}
 	return strct.FieldByName(fieldname)
 }
-
-// Helper function to suppress unused import warning
-var _ = bytes.NewReader
