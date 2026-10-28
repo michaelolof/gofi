@@ -1823,3 +1823,24 @@ func TestSecurityRateLimitTenantsAndStores(t *testing.T) {
 		}
 	}
 }
+
+// Inject and Test parse large requests and report malformed ones, instead of
+// silently running the chain on an empty GET request.
+func TestSecurityInjectReportsUnparsableRequests(t *testing.T) {
+	r := gofi.NewRouter()
+	handler := &gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		return c.SendString(200, c.Method()+" "+fmt.Sprint(len(c.Request().Header.Get("X-Big"))))
+	}}
+	big := strings.Repeat("a", 16<<10)
+	resp, err := r.Inject(gofi.InjectOptions{Method: "POST", Path: "/", Headers: map[string]string{"X-Big": big}, Handler: handler})
+	if err != nil || string(resp.Body) != fmt.Sprintf("POST %d", len(big)) {
+		t.Fatalf("large header: %v %q", err, resp.Body)
+	}
+	if _, err := r.Inject(gofi.InjectOptions{Method: "POST", Path: "/", Headers: map[string]string{"X-A": "1\nbroken"}, Handler: handler}); err == nil {
+		t.Fatal("malformed request ran the chain without an error")
+	}
+	r.Post("/t", *handler)
+	if _, err := r.Test(gofi.TestOptions{Method: "POST", Path: "/t", Headers: map[string]string{"X-Big": big}}); err != nil {
+		t.Fatalf("Test with a large header: %v", err)
+	}
+}

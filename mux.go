@@ -776,7 +776,7 @@ func (s *serveMux) Test(opts TestOptions) (resp *InjectResponse, err error) {
 
 	var fctx fasthttp.RequestCtx
 	fctx.Init2(nil, &dummyLogger{}, false)
-	if err := fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes()))); err != nil {
+	if err := readSyntheticRequest(&fctx.Request, rawReq.Bytes()); err != nil {
 		return nil, fmt.Errorf("failed to build test request: %w", err)
 	}
 
@@ -824,6 +824,14 @@ type InjectOptions struct {
 	Cookies []http.Cookie
 	Body    io.Reader
 	Handler *RouteOptions
+}
+
+// readSyntheticRequest parses a request built by Test or Inject. The reader
+// holds the whole request so large headers parse rather than fail, and a
+// parse error is returned: otherwise the context would silently stay an
+// empty GET request.
+func readSyntheticRequest(req *fasthttp.Request, raw []byte) error {
+	return req.Read(bufio.NewReaderSize(bytes.NewReader(raw), len(raw)+1))
 }
 
 func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) {
@@ -877,7 +885,9 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 	// Create fasthttp context from raw request
 	var fctx fasthttp.RequestCtx
 	fctx.Init2(nil, &dummyLogger{}, false)
-	fctx.Request.Read(bufio.NewReader(bytes.NewReader(rawReq.Bytes())))
+	if err := readSyntheticRequest(&fctx.Request, rawReq.Bytes()); err != nil {
+		return nil, fmt.Errorf("failed to build inject request: %w", err)
+	}
 
 	c := s.acquireContext(&fctx)
 	defer s.releaseContext(c)
