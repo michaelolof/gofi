@@ -9,7 +9,6 @@ import (
 	"io"
 	"mime"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +86,20 @@ var jsonBodyPool = sync.Pool{
 	New: func() any {
 		return new(bytes.Buffer)
 	},
+}
+
+func getJSONBuffer() *bytes.Buffer {
+	buf := jsonBodyPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+// putJSONBuffer returns buf to the pool unless one large body grew it past
+// 1 MiB, so the pool does not pin peak-sized buffers.
+func putJSONBuffer(buf *bytes.Buffer) {
+	if buf.Cap() <= 1<<20 {
+		jsonBodyPool.Put(buf)
+	}
 }
 
 func (j *JSONBodyParser) Match(contentType string) bool {
@@ -215,31 +228,34 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 }
 
 func (j *JSONBodyParser) ValidateAndEncodeResponse(obj any, opts ResponseOptions) ([]byte, error) {
+	buf := getJSONBuffer()
+	defer putJSONBuffer(buf)
+	if err := j.encodeResponse(buf, opts); err != nil {
+		return nil, err
+	}
+	return bytes.Clone(buf.Bytes()), nil
+}
+
+// encodeResponse validates and encodes opts.Body into buf.
+func (j *JSONBodyParser) encodeResponse(buf *bytes.Buffer, opts ResponseOptions) error {
 	body := opts.Body
 	if body.Kind() == reflect.Pointer {
 		body = body.Elem()
 	}
 
 	if opts.SchemaRules != nil && (opts.SchemaRules.required || opts.SchemaRules.present) && !body.IsValid() {
-		return nil, newErrReport(ResponseErr, schemaBody, "", "required", errors.New("value is required for body"))
+		return newErrReport(ResponseErr, schemaBody, "", "required", errors.New("value is required for body"))
 	}
 
 	if opts.SchemaRules != nil && opts.SchemaRules.kind != body.Kind() {
-		return nil, newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
+		return newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
 	}
 
-	buf := jsonBodyPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	if err := j.encodeFieldValue(opts.Context, buf, opts.Body, opts.SchemaRules, nil); err != nil {
-		jsonBodyPool.Put(buf)
-		return nil, newErrReport(ResponseErr, schemaBody, "", "encoder", err)
+	e := jsonEncoder{buf: buf, specs: opts.Context.CustomSpecs()}
+	if err := e.encode(opts.Body, opts.SchemaRules); err != nil {
+		return newErrReport(ResponseErr, schemaBody, "", "encoder", err)
 	}
-
-	// Copy result before returning buffer to pool
-	result := make([]byte, buf.Len())
-	copy(result, buf.Bytes())
-	jsonBodyPool.Put(buf)
-	return result, nil
+	return nil
 }
 
 func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaField, opts jsonRequestOptions, path *requestPath) (*walkFinishStatus, error) {
@@ -850,312 +866,4 @@ func (j *JSONBodyParser) getFieldOptions(opts jsonRequestOptions, fieldStruct re
 	rtn.HasBody = fieldStruct.IsValid()
 	rtn.SchemaRules = fieldRule
 	return rtn
-}
-
-func (j *JSONBodyParser) encodeFieldValue(c ParserContext, buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
-	isEmptyValue := func(v reflect.Value) bool {
-		switch v.Kind() {
-		case reflect.String:
-			return v.String() == ""
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return v.Int() == 0
-		case reflect.Bool:
-			return !v.Bool()
-		case reflect.Slice, reflect.Array, reflect.Map:
-			return v.Len() == 0
-		case reflect.Ptr, reflect.Interface:
-			return v.IsNil()
-		default:
-			return false
-		}
-	}
-
-	encodeString := func(b *bytes.Buffer, s string) {
-		b.WriteRune('"')
-		for _, r := range s {
-			switch r {
-			case '"':
-				b.WriteString(`\"`)
-			case '\\':
-				b.WriteString(`\\`)
-			case '\n':
-				b.WriteString(`\n`)
-			case '\r':
-				b.WriteString(`\r`)
-			case '\t':
-				b.WriteString(`\t`)
-			default:
-				b.WriteRune(r)
-			}
-		}
-		b.WriteRune('"')
-	}
-
-	// We need to define encodeArr and encodeMap recursing with method call j.encodeFieldValue
-	// BUT closures capturing method receiver? Yes.
-
-	// Issue: encodeArr in encoders.go called `encodeFieldValue(c, ...)` which was a function.
-	// Here `j.encodeFieldValue` is a method.
-	// I'll define local helpers that call the method.
-
-	var encodeArr func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
-	encodeArr = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
-		buf.WriteString("[")
-
-		var arules *RuleDef
-		if rules != nil {
-			arules = rules.item
-		}
-
-		for i := 0; i < val.Len(); i++ {
-			if i > 0 {
-				buf.WriteString(",")
-			}
-			if err := j.encodeFieldValue(c, buf, val.Index(i), arules, append(kp, strconv.Itoa(i))); err != nil {
-				return err
-			}
-		}
-
-		buf.WriteString("]")
-		return nil
-	}
-
-	var encodeMap func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
-	encodeMap = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
-		buf.WriteString("{")
-
-		var mrules *RuleDef
-		if rules != nil {
-			mrules = rules.additionalProperties
-		}
-
-		mr := val.MapRange()
-		for i := 0; mr.Next(); i++ {
-			if i > 0 {
-				buf.WriteString(",")
-			}
-
-			key := mr.Key()
-			keyStr, ok := key.Interface().(string)
-			if !ok {
-				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("map key must be of type string"))
-			}
-
-			if err := j.encodeFieldValue(c, buf, key, mrules, append(kp, keyStr)); err != nil {
-				return err
-			}
-			buf.WriteString(":")
-			if err := j.encodeFieldValue(c, buf, mr.Value(), mrules, append(kp, keyStr)); err != nil {
-				return err
-			}
-		}
-
-		buf.WriteString("}")
-		return nil
-	}
-
-	var encodeStruct func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error
-	encodeStruct = func(buf *bytes.Buffer, val reflect.Value, rules *RuleDef, kp []string) error {
-		buf.WriteByte('{')
-		first := true
-
-		// Fast path: schema rules are pre-compiled
-		if rules != nil && len(rules.orderedProps) > 0 {
-			for _, frules := range rules.orderedProps {
-				var fieldValue reflect.Value
-				if len(frules.accessor.index) > 0 {
-					fieldValue = val.FieldByIndex(frules.accessor.index)
-				} else {
-					fieldValue = val.FieldByName(frules.fieldName)
-				}
-
-				if (slices.Contains(frules.tags["json"], "omitempty") && isEmptyValue(fieldValue)) || slices.Contains(frules.tags["json"], "-") {
-					continue
-				}
-
-				if !first {
-					buf.WriteByte(',')
-				}
-				first = false
-
-				if len(frules.jsonKeyBytes) > 0 {
-					buf.Write(frules.jsonKeyBytes)
-				} else {
-					buf.WriteByte('"')
-					buf.WriteString(frules.field)
-					buf.WriteString(`":`)
-				}
-
-				if err := j.encodeFieldValue(c, buf, fieldValue, frules, append(kp, frules.field)); err != nil {
-					return err
-				}
-			}
-		} else {
-			// Slow path: arbitrary struct without predefined schema
-			typ := val.Type()
-			for _, field := range reflect.VisibleFields(typ) {
-				if isPromotedEmbed(field) {
-					continue
-				}
-				jsonTags := strings.Split(field.Tag.Get("json"), ",")
-				var name string
-				if len(jsonTags) > 0 && jsonTags[0] != "" {
-					name = jsonTags[0]
-				} else {
-					name = field.Name
-				}
-
-				if slices.Contains(jsonTags, "-") || (slices.Contains(jsonTags, "omitempty") && isEmptyValue(val.FieldByName(field.Name))) {
-					continue
-				}
-
-				if !first {
-					buf.WriteByte(',')
-				}
-				first = false
-
-				buf.WriteByte('"')
-				buf.WriteString(name)
-				buf.WriteString(`":`)
-				fieldValue := val.FieldByName(field.Name)
-				if err := j.encodeFieldValue(c, buf, fieldValue, nil, append(kp, name)); err != nil {
-					return err
-				}
-			}
-		}
-
-		buf.WriteByte('}')
-		return nil
-	}
-
-	var vIsValid bool
-	var vany any
-	if val.IsValid() {
-		if rules != nil && rules.defStr != "" && isEmptyValue(val) {
-			if val.CanAddr() {
-				val.Set(reflect.ValueOf(rules.defVal).Convert(val.Type()))
-			} else {
-				ptr := reflect.New(val.Type())
-				ptr.Elem().Set(reflect.ValueOf(rules.defVal).Convert(val.Type()))
-				val = ptr.Elem()
-			}
-		}
-
-		vIsValid = true
-		vany = val.Interface()
-	}
-
-	if rules != nil {
-		if err := runValidation(vany, ResponseErr, schemaBody, strings.Join(kp, "."), rules.rules); err != nil {
-			return err
-		}
-	}
-
-	if vany == nil {
-		_, err := buf.WriteString("null")
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if rules != nil {
-		if spec, ok := c.CustomSpecs().Find(string(rules.format)); ok {
-			if vIsValid {
-				v, err := spec.Encode(vany)
-				if err != nil {
-					return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
-				}
-				encodeString(buf, v)
-				return nil
-
-			} else {
-				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("could not cast given type to string"))
-			}
-		}
-	}
-
-	// json.Marshaler (covers json.RawMessage) → write verbatim
-	if vIsValid {
-		if m, ok := vany.(json.Marshaler); ok {
-			// For nil slices/pointers that implement json.Marshaler, emit null.
-			switch val.Kind() {
-			case reflect.Slice, reflect.Map, reflect.Pointer, reflect.Interface:
-				if val.IsNil() {
-					_, err := buf.WriteString("null")
-					return err
-				}
-			}
-			raw, err := m.MarshalJSON()
-			if err != nil {
-				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", err)
-			}
-			buf.Write(raw) // already valid JSON
-			return nil
-		}
-	}
-	// []byte (no custom marshaler) → base64 string
-	if vIsValid && utils.IsByteSlice(val.Type()) {
-		if val.IsNil() {
-			_, err := buf.WriteString("null")
-			return err
-		}
-		encodeString(buf, base64.StdEncoding.EncodeToString(val.Bytes()))
-		return nil
-	}
-
-	switch val.Kind() {
-	case reflect.Invalid:
-		_, err := buf.WriteString("null")
-		if err != nil {
-			return err
-		}
-	case reflect.Interface:
-		return j.encodeFieldValue(c, buf, val.Elem(), rules, kp)
-	case reflect.Pointer:
-		if !val.IsValid() {
-			_, err := buf.WriteString("null")
-			if err != nil {
-				return err
-			}
-			return nil
-		}
-		return j.encodeFieldValue(c, buf, val.Elem(), rules, kp)
-	case reflect.String:
-		encodeString(buf, val.String())
-		return nil
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		b := strconv.AppendInt(buf.AvailableBuffer(), val.Int(), 10)
-		buf.Write(b)
-		return nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		b := strconv.AppendUint(buf.AvailableBuffer(), val.Uint(), 10)
-		buf.Write(b)
-		return nil
-	case reflect.Float32, reflect.Float64:
-		b := strconv.AppendFloat(buf.AvailableBuffer(), val.Float(), 'f', -1, 64)
-		buf.Write(b)
-		return nil
-	case reflect.Bool:
-		b := strconv.AppendBool(buf.AvailableBuffer(), val.Bool())
-		buf.Write(b)
-		return nil
-	case reflect.Slice, reflect.Array:
-		return encodeArr(buf, val, rules, kp)
-	case reflect.Map:
-		return encodeMap(buf, val, rules, kp)
-	case reflect.Struct:
-		if rules.format == utils.TimeObjectFormat {
-			if v, ok := (vany).(time.Time); ok {
-				encodeString(buf, v.Format(rules.pattern))
-				return nil
-			} else {
-				return newErrReport(ResponseErr, schemaBody, strings.Join(kp, "."), "typeMismatch", errors.New("cannot cast time field to string"))
-			}
-		} else {
-			return encodeStruct(buf, val, rules, kp)
-		}
-	}
-
-	return nil
 }

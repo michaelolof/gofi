@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/netip"
@@ -259,6 +260,66 @@ func FuzzForwardedHeader(f *testing.F) {
 			if name, ok := normalizeHost(c.host); !ok || name != "api.example.com" {
 				t.Fatalf("host %q accepted outside AllowedHosts", c.host)
 			}
+		}
+	})
+}
+
+type fuzzEncodeItem struct {
+	Text  string            `json:"text"`
+	Ratio float64           `json:"ratio"`
+	Small float32           `json:"small"`
+	Count int64             `json:"count"`
+	Tags  []string          `json:"tags"`
+	Attrs map[string]string `json:"attrs"`
+	Any   any               `json:"any"`
+	When  time.Time         `json:"when"`
+}
+
+type fuzzEncodeSchema struct {
+	Ok struct {
+		Body []fuzzEncodeItem
+	}
+}
+
+// FuzzEncodeResponse checks the schema encoder against encoding/json (without
+// HTML escaping): the same bytes for every encodable value, and an error,
+// never invalid JSON, for values JSON cannot represent.
+func FuzzEncodeResponse(f *testing.F) {
+	f.Add("plain", "k", 1.5, float32(0.1), int64(-7), int64(0))
+	f.Add("q\"\\\x00\x1f\x7f\u2028\xff<>&é", "\n", 1e21, float32(1e-7), int64(1)<<62, int64(1)<<40)
+	f.Add("", "", math.Inf(1), float32(0), int64(0), int64(-1))
+	var item fuzzEncodeItem
+	r := NewRouter()
+	r.Get("/e", RouteOptions{Schema: &fuzzEncodeSchema{}, Handler: func(c Context) error {
+		var s fuzzEncodeSchema
+		s.Ok.Body = []fuzzEncodeItem{item}
+		return c.Send(200, s.Ok)
+	}})
+	f.Fuzz(func(t *testing.T, text, key string, ratio float64, small float32, count, unix int64) {
+		item = fuzzEncodeItem{
+			Text: text, Ratio: ratio, Small: small, Count: count,
+			Tags:  []string{text, key},
+			Attrs: map[string]string{key: text, text: key, "z": ""},
+			Any:   map[string]any{"n": ratio, "s": []any{key, true, nil}},
+			When:  time.Unix(unix%(1<<34), unix%1e9).UTC(),
+		}
+		var want bytes.Buffer
+		enc := json.NewEncoder(&want)
+		enc.SetEscapeHTML(false)
+		wantErr := enc.Encode([]fuzzEncodeItem{item})
+
+		resp, err := r.Test(TestOptions{Method: "GET", Path: "/e"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wantErr != nil {
+			if resp.StatusCode != 500 {
+				t.Fatalf("encoding/json rejects %+v (%v), gofi answered %d %s", item, wantErr, resp.StatusCode, resp.Body)
+			}
+			return
+		}
+		if got := string(resp.Body); got != strings.TrimSuffix(want.String(), "\n") {
+			t.Fatalf("encoder mismatch\n got: %s\nwant: %s", got, want.String())
 		}
 	})
 }

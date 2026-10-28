@@ -69,17 +69,15 @@ type RuleDef struct {
 	tags         map[string][]string
 	accessor     fieldAccessor
 	jsonKeyBytes []byte
+	omitEmpty    bool // json:",omitempty"
+	skipJSON     bool // json:"-"
 }
 
 func preComputeJSONKey(name string) []byte {
 	if name == "" {
 		return nil
 	}
-	buf := make([]byte, 0, len(name)+4)
-	buf = append(buf, '"')
-	buf = append(buf, name...)
-	buf = append(buf, '"', ':')
-	return buf
+	return append(appendJSONString(make([]byte, 0, len(name)+3), name), ':')
 }
 
 func newRuleDef(sf reflect.StructField, defStr string, defVal any, rules []ruleOpts, required bool, present bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {

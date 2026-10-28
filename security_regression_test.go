@@ -705,6 +705,92 @@ func TestSecurityNestedFormFieldsAreValidated(t *testing.T) {
 	}
 }
 
+type encodeDefaultsItem struct {
+	Label string  `json:"label" default:"none"`
+	Hits  uint    `json:"hits,omitempty"`
+	Rate  float64 `json:"rate,omitempty"`
+}
+
+type encodeDefaultsSchema struct {
+	Ok struct {
+		Body []encodeDefaultsItem
+	}
+}
+
+type badMarshaler struct{}
+
+func (badMarshaler) MarshalJSON() ([]byte, error) { return []byte(`1,"admin":true`), nil }
+
+type badMarshalerSchema struct {
+	Ok struct {
+		Body struct {
+			Value badMarshaler `json:"value"`
+		}
+	}
+}
+
+type schemalessHolder struct {
+	Ok struct {
+		Body struct {
+			Any any `json:"any"`
+		}
+	}
+}
+
+type withUnexported struct {
+	Shown  string `json:"shown"`
+	hidden string
+}
+
+// Response encoding: defaults are encoded, never written into shared data;
+// marshaler output must be one JSON value; schemaless structs skip
+// unexported fields; omitempty covers zero unsigned and float values.
+func TestSecurityResponseEncoding(t *testing.T) {
+	shared := []encodeDefaultsItem{{}, {Label: "set", Hits: 2, Rate: 0.5}}
+	r := gofi.NewRouter()
+	r.Get("/defaults", gofi.RouteOptions{Schema: &encodeDefaultsSchema{}, Handler: func(c gofi.Context) error {
+		var s encodeDefaultsSchema
+		s.Ok.Body = shared
+		return c.Send(200, s.Ok)
+	}})
+	r.Get("/marshaler", gofi.RouteOptions{Schema: &badMarshalerSchema{}, Handler: func(c gofi.Context) error {
+		return c.Send(200, badMarshalerSchema{}.Ok)
+	}})
+	r.Get("/any", gofi.RouteOptions{Schema: &schemalessHolder{}, Handler: func(c gofi.Context) error {
+		var s schemalessHolder
+		s.Ok.Body.Any = withUnexported{Shown: "yes", hidden: "no"}
+		return c.Send(200, s.Ok)
+	}})
+	get := func(path string) *gofi.InjectResponse {
+		resp, err := r.Test(gofi.TestOptions{Method: "GET", Path: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if resp := get("/defaults"); resp.BodyString() != `[{"label":"none"},{"label":"set","hits":2,"rate":0.5}]` {
+				t.Errorf("defaults: got %d %s", resp.StatusCode, resp.BodyString())
+			}
+		}()
+	}
+	wg.Wait()
+	if shared[0].Label != "" {
+		t.Fatalf("encoding wrote the default into shared data: %+v", shared[0])
+	}
+	if resp := get("/marshaler"); resp.StatusCode != 500 || strings.Contains(resp.BodyString(), "admin") {
+		t.Fatalf("invalid MarshalJSON output: got %d %s", resp.StatusCode, resp.BodyString())
+	}
+	if resp := get("/any"); resp.StatusCode != 200 || resp.BodyString() != `{"any":{"shown":"yes"}}` {
+		t.Fatalf("schemaless struct: got %d %s", resp.StatusCode, resp.BodyString())
+	}
+}
+
 // F-05, F-06, F-07: cache isolation, eligibility, replay and size limits.
 func TestSecurityCacheBoundaries(t *testing.T) {
 	newRouter := func(cfg middleware.CacheConfig, handler gofi.HandlerFunc) gofi.Router {

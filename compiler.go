@@ -4,6 +4,7 @@ import (
 	"log"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -273,6 +274,10 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 
 	rtn := newRuleDef(sf, defStr, defVal, rules, required, present, max, nil, nil, nil)
 	rtn.tags = tagList
+	if parts, ok := tagList["json"]; ok {
+		rtn.skipJSON = len(parts) == 1 && parts[0] == "-"
+		rtn.omitEmpty = slices.Contains(parts[1:], "omitempty")
+	}
 	return rtn
 }
 

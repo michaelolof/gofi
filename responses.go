@@ -59,12 +59,21 @@ func (c *context) Send(code int, obj any) error {
 		bdef = v
 	}
 
-	bs, err := sz.ValidateAndEncodeResponse(obj, ResponseOptions{
+	opts := ResponseOptions{
 		Context:     &parserContext{c: c},
 		SchemaRules: &bdef,
 		Body:        rv.FieldByName(string(schemaBody)),
-	})
-	if err != nil {
+	}
+	var bs []byte
+	if jp, ok := sz.(*JSONBodyParser); ok {
+		// Encode into a pooled buffer; SetBody below copies it once.
+		buf := getJSONBuffer()
+		defer putJSONBuffer(buf)
+		if err := jp.encodeResponse(buf, opts); err != nil {
+			return err
+		}
+		bs = buf.Bytes()
+	} else if bs, err = sz.ValidateAndEncodeResponse(obj, opts); err != nil {
 		return err
 	}
 
