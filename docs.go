@@ -147,7 +147,7 @@ func ScalarTemplate(config *ScalarConfig) DocsUiTemplate {
 	// Pinned with Subresource Integrity; a custom ScriptSrcLink is loaded
 	// without an integrity attribute.
 	srcLink := "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.76.0/dist/browser/standalone.js"
-	srcIntegrity := ` integrity="sha384-JpepQjnR3EY/jA4qZIphNISYIrkHthebkOYe93Zh0X0086IIZovV4yv9ZqTXcSaA" crossorigin="anonymous"`
+	srcIntegrity := ` integrity="sha384-oH1C0RwqcwbVXkC+r8A+4qRoyEUQdtxAzOwumkxZtQBBcsy61FOoPt7B50OVJYYQ" crossorigin="anonymous"`
 	additionalStyle := ""
 	additionalScript := ""
 	if config != nil {
@@ -250,7 +250,8 @@ func RedoclyTemplate() DocsUiTemplate {
 		</head>
 		<body>
 			<redoc spec-url="%s"></redoc>
-			<script src="https://cdn.jsdelivr.net/npm/redoc@3.0.1/bundles/redoc.standalone.js" integrity="sha384-j07qRKHNNmcwU1/Y1elJc7pDLHXP/QfbQXTtSkbOJ7uYGJikqAzsFVbY2zR9FqOT" crossorigin="anonymous"></script>
+			<!-- Redoc 3 bundles use import.meta and only run as a module. -->
+			<script type="module" src="https://cdn.jsdelivr.net/npm/redoc@3.0.1/bundles/redoc.standalone.js" integrity="sha384-j07qRKHNNmcwU1/Y1elJc7pDLHXP/QfbQXTtSkbOJ7uYGJikqAzsFVbY2zR9FqOT" crossorigin="anonymous"></script>
 		</body>
 		</html>
 	`
