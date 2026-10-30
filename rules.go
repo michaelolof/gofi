@@ -39,6 +39,63 @@ func newRuleOpts(typ reflect.Type, kind reflect.Kind, rule string, args []string
 	}
 }
 
+// isKnownRule reports whether rule is a built-in rule, omitempty, or a custom
+// rule registered on the router.
+func (o *muxOptions) isKnownRule(rule string) bool {
+	var custom rules.ContextValidators
+	if o != nil {
+		custom = o.customValidators
+	}
+	return validators.IsKnownRule(rule, custom)
+}
+
+// customValidatorsOrNil returns the router's custom validators.
+func (o *muxOptions) customValidatorsOrNil() rules.ContextValidators {
+	if o == nil {
+		return nil
+	}
+	return o.customValidators
+}
+
+// skipWhenEmpty returns r with its validator skipped for empty values.
+func (r ruleOpts) skipWhenEmpty() ruleOpts {
+	next := r.dator
+	r.dator = func(val any) error {
+		if validators.IsEmpty(val) {
+			return nil
+		}
+		return next(val)
+	}
+	return r
+}
+
+// derefPointers returns r for a pointer field. Its validator was built for
+// the pointed-to type, so a non-nil pointer value is dereferenced before the
+// check. A nil pointer means no value: only required and present run (with
+// nil), every other rule is skipped.
+func (r ruleOpts) derefPointers() ruleOpts {
+	next := r.dator
+	presence := r.rule == "required" || r.rule == "present"
+	r.dator = func(val any) error {
+		if val != nil {
+			rv := reflect.ValueOf(val)
+			for rv.Kind() == reflect.Pointer {
+				if rv.IsNil() {
+					val = nil
+					break
+				}
+				rv = rv.Elem()
+				val = rv.Interface()
+			}
+		}
+		if val == nil && !presence {
+			return nil
+		}
+		return next(val)
+	}
+	return r
+}
+
 type fieldAccessor struct {
 	offset    uintptr
 	index     []int

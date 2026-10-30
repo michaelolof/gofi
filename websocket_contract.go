@@ -2,12 +2,14 @@ package gofi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"sync"
 
 	"github.com/michaelolof/gofi/validators"
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
 type WebSocketDirection string
@@ -80,6 +82,8 @@ type compiledWebSocketMessageContract struct {
 	discriminator string
 	variants      map[string]compiledWebSocketVariant
 	bySchemaType  map[reflect.Type]compiledWebSocketVariant
+	// custom holds the router's registered validators for message checks.
+	custom rules.ContextValidators
 }
 
 type compiledWebSocketVariant struct {
@@ -132,11 +136,11 @@ func ExtractWebSocketSchema(schema any) (WebSocketSchema, bool) {
 	return ws, true
 }
 
-func compileWebSocketContract(protocol WebSocketSchema) *compiledWebSocketContract {
+func compileWebSocketContract(protocol WebSocketSchema, custom rules.ContextValidators) *compiledWebSocketContract {
 	contract := &compiledWebSocketContract{}
-	contract.inbound = compileWebSocketMessageContract(protocol.Inbound)
-	contract.outbound = compileWebSocketMessageContract(protocol.Outbound)
-	contract.error = compileWebSocketMessageContract(protocol.Error)
+	contract.inbound = compileWebSocketMessageContract(protocol.Inbound, custom)
+	contract.outbound = compileWebSocketMessageContract(protocol.Outbound, custom)
+	contract.error = compileWebSocketMessageContract(protocol.Error, custom)
 
 	if contract.inbound == nil && contract.outbound == nil && contract.error == nil {
 		return nil
@@ -145,7 +149,7 @@ func compileWebSocketContract(protocol WebSocketSchema) *compiledWebSocketContra
 	return contract
 }
 
-func compileWebSocketMessageContract(family WebSocketMessageFamily) *compiledWebSocketMessageContract {
+func compileWebSocketMessageContract(family WebSocketMessageFamily, custom rules.ContextValidators) *compiledWebSocketMessageContract {
 	if family.IsZero() {
 		return nil
 	}
@@ -154,6 +158,7 @@ func compileWebSocketMessageContract(family WebSocketMessageFamily) *compiledWeb
 		discriminator: family.NormalizedDiscriminator(),
 		variants:      make(map[string]compiledWebSocketVariant, len(family.Variants)),
 		bySchemaType:  make(map[reflect.Type]compiledWebSocketVariant, len(family.Variants)),
+		custom:        custom,
 	}
 
 	for _, variant := range family.Variants {
@@ -161,6 +166,7 @@ func compileWebSocketMessageContract(family WebSocketMessageFamily) *compiledWeb
 		if !ok {
 			continue
 		}
+		checkWebSocketVariantRules(typ, custom)
 
 		compiled := compiledWebSocketVariant{
 			messageType: variant.Type,
@@ -225,7 +231,7 @@ func (c *compiledWebSocketMessageContract) validate(payload any, direction WebSo
 	}
 
 	if variant, ok := c.variantForValue(payload); ok {
-		return validateWebSocketSchemaValue(payload, variant.schema, string(direction))
+		return validateWebSocketSchemaValue(payload, variant.schema, string(direction), c.custom)
 	}
 
 	discriminator, innerPayload, ok := c.extractEnvelopePayload(payload)
@@ -238,7 +244,7 @@ func (c *compiledWebSocketMessageContract) validate(payload any, direction WebSo
 		return fmt.Errorf("websocket %s payload type '%s' is not declared in the websocket contract", direction, discriminator)
 	}
 
-	return validateWebSocketSchemaValue(innerPayload, variant.schema, string(direction))
+	return validateWebSocketSchemaValue(innerPayload, variant.schema, string(direction), c.custom)
 }
 
 func (c *compiledWebSocketMessageContract) decode(payload []byte, dst any, direction WebSocketDirection) error {
@@ -246,9 +252,14 @@ func (c *compiledWebSocketMessageContract) decode(payload []byte, dst any, direc
 		return fmt.Errorf("websocket %s destination is nil", direction)
 	}
 
+	// A payload in the target's own shape is tried first. If it decodes but
+	// fails validation, keep that error: it is the real reason unless the
+	// payload turns out to be an envelope.
+	var directErr error
 	if variant, ok := c.variantForTarget(dst); ok {
 		if err := json.Unmarshal(payload, dst); err == nil {
-			if err := validateWebSocketSchemaValue(dst, variant.schema, string(direction)); err == nil {
+			directErr = validateWebSocketSchemaValue(dst, variant.schema, string(direction), c.custom)
+			if directErr == nil {
 				return nil
 			}
 		}
@@ -256,6 +267,9 @@ func (c *compiledWebSocketMessageContract) decode(payload []byte, dst any, direc
 
 	discriminator, rawPayload, err := c.extractWireEnvelope(payload, direction)
 	if err != nil {
+		if directErr != nil {
+			return directErr
+		}
 		return err
 	}
 
@@ -273,14 +287,14 @@ func (c *compiledWebSocketMessageContract) decode(payload []byte, dst any, direc
 		if err := json.Unmarshal(rawPayload, dst); err != nil {
 			return err
 		}
-		return validateWebSocketSchemaValue(dst, variant.schema, string(direction))
+		return validateWebSocketSchemaValue(dst, variant.schema, string(direction), c.custom)
 	}
 
 	if err := populateWebSocketEnvelope(dst, c.discriminator, discriminator, decoded); err != nil {
 		return err
 	}
 
-	return validateWebSocketSchemaValue(decoded, variant.schema, string(direction))
+	return validateWebSocketSchemaValue(decoded, variant.schema, string(direction), c.custom)
 }
 
 func (c *compiledWebSocketMessageContract) variantForValue(payload any) (compiledWebSocketVariant, bool) {
@@ -436,7 +450,49 @@ func findStructFieldByJSONName(rv reflect.Value, jsonName string) (reflect.Value
 	return reflect.Value{}, false
 }
 
-func validateWebSocketSchemaValue(payload any, schema any, direction string) error {
+// checkWebSocketVariantRules panics if a message type's validate tags name an
+// unknown rule, as route registration does for HTTP schemas.
+func checkWebSocketVariantRules(t reflect.Type, custom rules.ContextValidators) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
+	for _, f := range buildWebSocketFieldRules(t) {
+		if err := validators.CheckRules(f.rule, custom); err != nil {
+			panic(fmt.Sprintf("gofi: %v in validate tag %q on field %s of websocket message %s; register custom rules with RegisterValidator before the routes that use them", err, f.rule, f.name, t))
+		}
+	}
+}
+
+// ValidateWebSocketStruct checks the validate tags on the top-level fields of
+// payload, a struct or a pointer to one, with the built-in rules and the
+// custom rules registered on c's router.
+func ValidateWebSocketStruct(c Context, payload any) error {
+	t := reflect.TypeOf(payload)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil {
+		return errors.New("websocket payload is nil")
+	}
+	v, err := getCachedWebSocketStructValidator(t)
+	if err != nil {
+		return err
+	}
+	return v.validate(payload, routerValidators(c))
+}
+
+// routerValidators returns the custom validators registered on c's router.
+func routerValidators(c Context) rules.ContextValidators {
+	if ctx, ok := c.(*context); ok && ctx.serverOpts != nil {
+		return ctx.serverOpts.customValidators
+	}
+	return nil
+}
+
+func validateWebSocketSchemaValue(payload any, schema any, direction string, custom rules.ContextValidators) error {
 	if schema == nil {
 		return nil
 	}
@@ -463,7 +519,7 @@ func validateWebSocketSchemaValue(payload any, schema any, direction string) err
 		return err
 	}
 
-	if err := v.validate(payload); err != nil {
+	if err := v.validate(payload, custom); err != nil {
 		return fmt.Errorf("websocket %s validation failed: %w", direction, err)
 	}
 
@@ -497,7 +553,7 @@ func buildWebSocketFieldRules(t reflect.Type) []websocketStructFieldRule {
 	return rules
 }
 
-func (v *websocketCachedStructValidator) validate(payload any) error {
+func (v *websocketCachedStructValidator) validate(payload any, custom rules.ContextValidators) error {
 	rv := reflect.ValueOf(payload)
 	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
@@ -508,7 +564,7 @@ func (v *websocketCachedStructValidator) validate(payload any) error {
 
 	for _, f := range v.fields {
 		fv := rv.FieldByIndex(f.index)
-		if err := validators.Validate(fv.Interface(), f.rule); err != nil {
+		if err := validators.ValidateWith(fv.Interface(), f.rule, custom); err != nil {
 			return fmt.Errorf("field '%s': %w", f.name, err)
 		}
 	}

@@ -69,6 +69,12 @@ func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
 
 	t := val.Type()
 	if t == timeType {
+		// A schema layout (the pattern tag) decides how times are written;
+		// the fast path covers the default RFC 3339 layout.
+		if rules != nil && rules.pattern != "" && rules.pattern != time.RFC3339Nano {
+			e.writeString(timeValue(val).Format(rules.pattern))
+			return nil
+		}
 		return e.encodeTime(val)
 	}
 	// Only types with methods can implement json.Marshaler, and only []byte
@@ -175,12 +181,7 @@ func (e *jsonEncoder) encodeArray(val reflect.Value, rules *RuleDef) error {
 // outside 0–9999, zone offsets of 24 hours or more) go through MarshalJSON
 // for its error.
 func (e *jsonEncoder) encodeTime(val reflect.Value) error {
-	var t time.Time
-	if val.CanAddr() {
-		t = *(*time.Time)(val.Addr().UnsafePointer())
-	} else {
-		t = val.Interface().(time.Time)
-	}
+	t := timeValue(val)
 	_, offset := t.Zone()
 	if y := t.Year(); y < 0 || y > 9999 || offset <= -24*3600 || offset >= 24*3600 {
 		_, err := t.MarshalJSON()
@@ -190,6 +191,14 @@ func (e *jsonEncoder) encodeTime(val reflect.Value) error {
 	b = t.AppendFormat(b, time.RFC3339Nano)
 	e.buf.Write(append(b, '"'))
 	return nil
+}
+
+// timeValue reads a time.Time from val without boxing it when possible.
+func timeValue(val reflect.Value) time.Time {
+	if val.CanAddr() {
+		return *(*time.Time)(val.Addr().UnsafePointer())
+	}
+	return val.Interface().(time.Time)
 }
 
 // mapEntry locates one encoded "key":value pair in the buffer.

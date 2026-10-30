@@ -14,7 +14,6 @@ import (
 
 	"github.com/fasthttp/websocket"
 	"github.com/michaelolof/gofi"
-	"github.com/michaelolof/gofi/validators"
 )
 
 type Conn = websocket.Conn
@@ -278,19 +277,6 @@ func (r *SessionRegistry) untrack(s *Session) {
 	r.mu.Unlock()
 }
 
-type structFieldRule struct {
-	index []int
-	rule  string
-	name  string
-}
-
-type cachedStructValidator struct {
-	typeName string
-	fields   []structFieldRule
-}
-
-var structValidatorCache sync.Map // map[reflect.Type]*cachedStructValidator
-
 // Context returns the request context snapshot associated with the ws session.
 func (s *Session) Context() gofi.Context {
 	return s.ctx
@@ -381,7 +367,7 @@ func (s *Session) ValidateInbound(v any) error {
 	if handled, err := gofi.ValidateWebSocketPayload(s.ctx, gofi.WebSocketInbound, v); handled {
 		return err
 	}
-	return validatePayloadSchema(v, s.inboundSchema, "inbound")
+	return validatePayloadSchema(s.ctx, v, s.inboundSchema, "inbound")
 }
 
 // ValidateOutbound validates payload against configured outbound schema when set.
@@ -389,7 +375,7 @@ func (s *Session) ValidateOutbound(v any) error {
 	if handled, err := gofi.ValidateWebSocketPayload(s.ctx, gofi.WebSocketOutbound, v); handled {
 		return err
 	}
-	return validatePayloadSchema(v, s.outboundSchema, "outbound")
+	return validatePayloadSchema(s.ctx, v, s.outboundSchema, "outbound")
 }
 
 // Close closes the underlying websocket connection.
@@ -596,7 +582,9 @@ func NewWithSessionAndOptions(handler func(*Session) error, opts Options) gofi.H
 	}, opts)
 }
 
-func validatePayloadSchema(payload any, schema any, direction string) error {
+// validatePayloadSchema checks payload against schema's type and validate
+// tags, using the custom rules registered on c's router.
+func validatePayloadSchema(c gofi.Context, payload any, schema any, direction string) error {
 	if schema == nil {
 		return nil
 	}
@@ -618,59 +606,8 @@ func validatePayloadSchema(payload any, schema any, direction string) error {
 		return fmt.Errorf("websocket %s payload type mismatch: expected %s, got %s", direction, schemaType.String(), payloadType.String())
 	}
 
-	v, err := getCachedStructValidator(payloadType)
-	if err != nil {
-		return err
-	}
-
-	if err := v.validate(payload); err != nil {
+	if err := gofi.ValidateWebSocketStruct(c, payload); err != nil {
 		return fmt.Errorf("websocket %s validation failed: %w", direction, err)
-	}
-
-	return nil
-}
-
-func getCachedStructValidator(t reflect.Type) (*cachedStructValidator, error) {
-	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("websocket validation expects struct payload, got %s", t.String())
-	}
-
-	if vv, ok := structValidatorCache.Load(t); ok {
-		return vv.(*cachedStructValidator), nil
-	}
-
-	built := &cachedStructValidator{typeName: t.String(), fields: buildFieldRules(t)}
-	actual, _ := structValidatorCache.LoadOrStore(t, built)
-	return actual.(*cachedStructValidator), nil
-}
-
-func buildFieldRules(t reflect.Type) []structFieldRule {
-	rules := make([]structFieldRule, 0, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		rule := f.Tag.Get("validate")
-		if rule == "" {
-			continue
-		}
-		rules = append(rules, structFieldRule{index: f.Index, rule: rule, name: f.Name})
-	}
-	return rules
-}
-
-func (v *cachedStructValidator) validate(payload any) error {
-	rv := reflect.ValueOf(payload)
-	if rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return fmt.Errorf("nil payload for type %s", v.typeName)
-		}
-		rv = rv.Elem()
-	}
-
-	for _, f := range v.fields {
-		fv := rv.FieldByIndex(f.index)
-		if err := validators.Validate(fv.Interface(), f.rule); err != nil {
-			return fmt.Errorf("field '%s': %w", f.name, err)
-		}
 	}
 
 	return nil

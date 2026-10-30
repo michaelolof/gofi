@@ -5,13 +5,56 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	"github.com/michaelolof/gofi/validators/rules"
 )
 
-// Validate validates a single value against a rule string.
+// Validate validates a single value against a rule string using the
+// built-in rules.
 // ruleString format: "required,min=10,max=20,oneof=red green blue"
 func Validate(val any, rulesStr string) error {
+	return ValidateWith(val, rulesStr, nil)
+}
+
+// CheckRules reports an error if rulesStr names a rule that is neither
+// built in nor in custom, or combines omitempty with required or present.
+func CheckRules(rulesStr string, custom rules.ContextValidators) error {
+	var omitEmpty, required bool
+	for _, def := range parseRules(rulesStr) {
+		if !IsKnownRule(def.Name, custom) {
+			return fmt.Errorf("unknown validation rule %q", def.Name)
+		}
+		switch def.Name {
+		case OmitEmpty:
+			omitEmpty = true
+		case "required", "present":
+			required = true
+		}
+	}
+	if omitEmpty && required {
+		return errors.New("omitempty cannot be combined with required or present")
+	}
+	return nil
+}
+
+// ValidateWith validates a single value against a rule string using the
+// built-in rules and the rules in custom.
+func ValidateWith(val any, rulesStr string, custom rules.ContextValidators) error {
 	if rulesStr == "" {
 		return nil
+	}
+
+	// Rules check the value a pointer points to; a nil pointer is no value.
+	if val != nil {
+		rv := reflect.ValueOf(val)
+		for rv.Kind() == reflect.Pointer {
+			if rv.IsNil() {
+				val = nil
+				break
+			}
+			rv = rv.Elem()
+			val = rv.Interface()
+		}
 	}
 
 	valType := reflect.TypeOf(val)
@@ -23,7 +66,24 @@ func Validate(val any, rulesStr string) error {
 	ruleDefs := parseRules(rulesStr)
 
 	for _, def := range ruleDefs {
-		validatorFn := NewContextValidatorFn(valType, valKind, def.Name, def.Args, nil)
+		if !IsKnownRule(def.Name, custom) {
+			return fmt.Errorf("unknown validation rule %q", def.Name)
+		}
+		if def.Name == OmitEmpty && IsEmpty(val) {
+			return nil
+		}
+	}
+
+	for _, def := range ruleDefs {
+		if def.Name == OmitEmpty {
+			continue
+		}
+		// A missing value (nil, or a nil pointer) is checked only by the
+		// presence rules.
+		if val == nil && def.Name != "required" && def.Name != "present" {
+			continue
+		}
+		validatorFn := NewContextValidatorFn(valType, valKind, def.Name, def.Args, custom)
 		if err := validatorFn(val); err != nil {
 			return err
 		}

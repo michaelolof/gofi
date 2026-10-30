@@ -16,7 +16,7 @@ func BenchmarkValidatePayloadSchemaCached(b *testing.B) {
 	schema := benchInbound{}
 
 	for i := 0; i < b.N; i++ {
-		if err := validatePayloadSchema(payload, schema, "inbound"); err != nil {
+		if err := validatePayloadSchema(nil, payload, schema, "inbound"); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -27,7 +27,7 @@ func BenchmarkValidatePayloadSchemaCachedPointer(b *testing.B) {
 	schema := &benchInbound{}
 
 	for i := 0; i < b.N; i++ {
-		if err := validatePayloadSchema(payload, schema, "inbound"); err != nil {
+		if err := validatePayloadSchema(nil, payload, schema, "inbound"); err != nil {
 			b.Fatal(err)
 		}
 	}

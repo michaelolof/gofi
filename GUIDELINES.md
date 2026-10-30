@@ -110,7 +110,7 @@ var GetProjectHandler = gofi.DefineHandler(gofi.RouteOptions{
 			return apperr.Wrap(1793299514311, apperr.InvalidInput, err)
 		}
 
-		caller, _ := middleware.GetPrincipal(c)
+		caller, _ := domain.PrincipalFrom(c.Context())
 		project, err := deps.MustGet(c).Projects().Get(c.Context(), caller.UserID, s.Request.Path.ProjectID)
 		if errors.Is(err, domain.ErrNotFound) {
 			return apperr.Wrap(1793299514312, apperr.NotFound, err).WithMsg("project not found")
@@ -258,16 +258,35 @@ type ErrBody struct {
   (IDs, dates, enums).
 - **TAG-6 (MUST)** Use only rules Gofi defines in `validate` (see
   [docs/validations.md](docs/validations.md)) or rules you registered with
-  `RegisterValidator`. Gofi currently ignores unknown rule names without an
-  error, so a typo or a rule borrowed from another validator silently
-  validates nothing.
-- **TAG-7 (MUST NOT)** Do not write `validate:"omitempty"`. Gofi does not
-  have that rule yet. It already skips validation for fields the request
-  leaves out and for empty query parameters; a JSON body field sent as `""`
-  is still validated. `json:"name,omitempty"` is fine and works as in
+  `RegisterValidator` before the routes that use them. Route registration
+  panics on any other rule name, including rules from other validators such
+  as `dive` and `required_if`.
+- **TAG-7 (SHOULD)** Add `omitempty` to an optional field whose rules should
+  not apply to an empty value: `validate:"omitempty,email"`. Gofi already
+  skips fields the request leaves out; `omitempty` also skips the rules when
+  the value is sent but empty (`""`, `0`, `[]`). Never combine it with
+  `required` or `present`. `json:"name,omitempty"` works as in
   `encoding/json`.
 - **TAG-8 (MUST)** Path parameters are `:name` in the route pattern and
   `json:"name"` in `Request.Path`. Never `{name}`.
+- **TAG-9 (SHOULD)** On a `time.Time` field, `pattern` is the Go layout Gofi
+  uses to parse the value from requests and to format it in responses
+  (default RFC 3339). Leave it out for RFC 3339 timestamps. Use
+  `pattern:"2006-01-02"` for dates. For any other layout, also add an
+  `example` in that layout so clients see the expected shape: OpenAPI has no
+  way to describe a Go layout, so Gofi documents RFC 3339 layouts as
+  `format: date-time`, `2006-01-02` as `format: date`, and anything else
+  only through an example.
+- **TAG-10 (MUST NOT)** Do not rely on `pattern` to validate other fields. On
+  a non-time field it is copied into the OpenAPI document as a regular
+  expression and is not checked at runtime. Use `validate` rules to enforce
+  a format.
+- **TAG-11 (SHOULD)** Model an optional value whose zero value is meaningful
+  (`0`, `false`, `""`) as a pointer: ``Age *int `json:"age" validate:"gte=18"` ``.
+  Rules on a pointer field check the value it points to. A nil pointer
+  (field left out or sent as `null`) skips every rule except `required` and
+  `present`. Pointer fields bind in every location: body, query, path,
+  header and cookie.
 
 ---
 
@@ -393,9 +412,11 @@ struct built in `main` and in the test harness.
 ## 8. Routes
 
 ```go
-// RegisterAPIRoutes registers the product API under /api/v1. Every route
-// requires a bearer token.
+// RegisterAPIRoutes registers the public health route and the product API
+// under /api/v1, where every route requires a bearer token.
 func RegisterAPIRoutes(r gofi.Router, d deps.Deps) {
+	r.Get("/health", health.GetHealthHandler)
+
 	r.Route("/api/v1", func(r gofi.Router) {
 		r.Use(middleware.Authenticate(d.Authenticator()))
 
@@ -424,7 +445,12 @@ func RegisterAPIRoutes(r gofi.Router, d deps.Deps) {
 - **RTE-5 (MUST)** Use Gofi's pattern syntax: `:name` for one segment,
   `*name` for the rest of the path. Static segments win over parameters, and
   parameters win over catch-alls, whatever the registration order.
-- **RTE-6 (SHOULD)** Separate groups of related routes with a blank line, and
+- **RTE-6 (MUST)** Use `:` and `*` only as the first character of a segment.
+  A `:` or `*` anywhere starts a parameter that runs to the next `/`, so
+  `/events:batch` is a parameter route that also matches `/eventsfoo`. Gofi
+  has no literal `:`; write custom actions as their own segment
+  (`/events/batch`). See [docs/routing.md](docs/routing.md).
+- **RTE-7 (SHOULD)** Separate groups of related routes with a blank line, and
   comment a route block when its middleware is not obvious from the code.
 
 ---
@@ -434,10 +460,42 @@ func RegisterAPIRoutes(r gofi.Router, d deps.Deps) {
 Middleware has the same signature as a handler and calls `c.Next()` to run
 the rest of the chain.
 
-```go
-type principalKey struct{}
+Middleware passes values on in one of two places, depending on who reads
+them. A value only HTTP-layer code reads goes in `c.DataStore()`:
 
-// Authenticate verifies the bearer token and stores the caller for handlers.
+```go
+type requestIDKey struct{}
+
+// RequestID reads X-Request-ID or generates one, stores it for later
+// middleware and handlers, and echoes it on the response.
+func RequestID(c gofi.Context) error {
+	rid := c.HeaderVal("x-request-id")
+	if rid == "" || len(rid) > 128 {
+		b := make([]byte, 16)
+		_, _ = rand.Read(b)
+		rid = hex.EncodeToString(b)
+	}
+	gofi.StoreSet(c.DataStore(), requestIDKey{}, rid)
+	c.Writer().Header().Set("X-Request-ID", rid)
+	return c.Next()
+}
+
+// GetRequestID returns the ID set by RequestID, or "" if it did not run.
+func GetRequestID(c gofi.Context) string {
+	v, _ := gofi.StoreGet(c.DataStore(), requestIDKey{})
+	rid, _ := v.(string)
+	return rid
+}
+```
+
+A value domain code needs (the caller, the tenant, a trace span) goes on the
+request context, because domain code receives `c.Context()`, never the
+`gofi.Context` (HND-7):
+
+```go
+// Authenticate verifies the bearer token and attaches the caller to the
+// request context, where handlers and domain code read it with
+// domain.PrincipalFrom.
 func Authenticate(authn domain.Authenticator) gofi.MiddlewareFunc {
 	return func(c gofi.Context) error {
 		token, ok := strings.CutPrefix(c.HeaderVal("authorization"), "Bearer ")
@@ -448,15 +506,27 @@ func Authenticate(authn domain.Authenticator) gofi.MiddlewareFunc {
 		if err != nil {
 			return apperr.Wrap(1793299514202, apperr.Unauthorized, err).WithMsg("invalid bearer token")
 		}
-		gofi.StoreSet(c.DataStore(), principalKey{}, p)
+		if err := gofi.SetRequestContext(c, domain.WithPrincipal(c.Context(), p)); err != nil {
+			return apperr.Wrap(1793299514203, apperr.Internal, err)
+		}
 		return c.Next()
 	}
 }
+```
 
-// GetPrincipal returns the caller stored by Authenticate.
-func GetPrincipal(c gofi.Context) (domain.Principal, bool) {
-	v, _ := gofi.StoreGet(c.DataStore(), principalKey{})
-	p, ok := v.(domain.Principal)
+The domain package owns the key and its accessors:
+
+```go
+type principalKey struct{}
+
+// WithPrincipal returns ctx carrying the authenticated caller.
+func WithPrincipal(ctx context.Context, p Principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, p)
+}
+
+// PrincipalFrom returns the caller stored by WithPrincipal.
+func PrincipalFrom(ctx context.Context) (Principal, bool) {
+	p, ok := ctx.Value(principalKey{}).(Principal)
 	return p, ok
 }
 ```
@@ -487,9 +557,13 @@ func GetPrincipal(c gofi.Context) (domain.Principal, bool) {
 - **MDW-3 (MUST)** A middleware that needs dependencies is a constructor that
   takes them and returns `gofi.MiddlewareFunc` (`Authenticate(authn)`). One
   that needs none is a plain function (`RequestID`).
-- **MDW-4 (MUST)** A middleware that stores a value for later code uses an
-  unexported empty struct key with `c.DataStore()`, and exports a getter in
-  the same file (`GetPrincipal`, `GetRequestID`). Callers never touch the key.
+- **MDW-4 (MUST)** A value that only HTTP-layer code reads (request ID,
+  parsed headers) goes in `c.DataStore()` under an unexported empty struct
+  key, with an exported getter in the same file (`GetRequestID`). Callers
+  never touch the key.
+- **MDW-11 (MUST)** A value that domain code reads goes on the request
+  context: derive it from `c.Context()` and install it with
+  `gofi.SetRequestContext` before calling `c.Next()` (CTX-5).
 - **MDW-5 (MUST)** Middleware reports failures by returning an error, like a
   handler. To stop the chain, return without calling `c.Next()`.
 - **MDW-6 (MUST)** Return the error from `c.Next()` unchanged unless the
@@ -646,7 +720,11 @@ func TestGetProjectHandler_OtherOwner_Returns404(t *testing.T) {
 
 ## 12. OpenAPI documentation
 
-Gofi builds the OpenAPI document from your route schemas and `Info`.
+Gofi builds the OpenAPI document from your route schemas, each handler's
+`Info`, and `DocsOptions`. Everything about the document is declared in those
+three places; routing and middleware never carry documentation.
+
+### Route information
 
 - **DOC-1 (MUST)** Every handler's `Info` has exactly one tag, the lowercase
   kebab-case tag its package is named after, and a `Description`.
@@ -654,13 +732,110 @@ Gofi builds the OpenAPI document from your route schemas and `Info`.
 - **DOC-2 (SHOULD)** Write `Description` for API consumers: what the route
   does, who may call it, and any non-obvious behavior ("a project owned by
   someone else answers 404").
+
+### Security
+
+OpenAPI ignores a header parameter named `Authorization`, so the
+`schemas.AuthHeader` block in a route schema validates the header at runtime
+but documents nothing about authentication. Docs UIs show an "Authorize"
+button, and code generators add credentials to clients, only from security
+schemes and requirements:
+
+```go
+// DocsOptions describes the API for the docs UI and the spec export tool.
+// Every route requires BearerAuth unless its Info.Security says otherwise.
+func DocsOptions() gofi.DocsOptions {
+	return gofi.DocsOptions{
+		Info: gofi.DocsInfoOptions{Title: "Projects API", Version: "1.0.0"},
+		SecuritySchemes: map[string]any{
+			"BearerAuth": fluid.BearerAuth(
+				fluid.WithBearerFormat(""),
+				fluid.WithSecurityDescription("Opaque access token issued to the caller."),
+			),
+		},
+		Security: []gofi.SecurityRequirement{{"BearerAuth": nil}},
+		Views: []gofi.DocsView{
+			{RoutePrefix: "/docs", Template: gofi.StopLight()},
+		},
+	}
+}
+```
+
+A route that needs no credentials says so in its own `Info`:
+
+```go
+// GetHealthHandler reports that the service is up.
+var GetHealthHandler = gofi.DefineHandler(gofi.RouteOptions{
+	Info: gofi.Info{
+		Tags:        []string{"health"},
+		Description: "Reports that the service is up. Needs no credentials.",
+		Security:    gofi.NoSecurity,
+	},
+```
+
+- **SEC-1 (MUST)** A router whose routes require credentials declares every
+  scheme in `DocsOptions.SecuritySchemes`, built with `fluid`
+  (`fluid.BearerAuth`, `fluid.APIKeyAuth`, `fluid.BasicAuth`,
+  `fluid.OAuth2Auth`, `fluid.OpenIDConnectAuth`).
+- **SEC-2 (MUST)** Set `DocsOptions.Security` to the requirement most routes
+  have, so routes inherit it without repeating it.
+- **SEC-3 (MUST)** Set `Info.Security` only on routes that differ from the
+  default: `gofi.NoSecurity` for public routes (login, health, signup), or a
+  different requirement such as `[]gofi.SecurityRequirement{{"AdminAuth":
+  nil}}`. Do not write an empty slice literal for public routes; use
+  `gofi.NoSecurity`.
+- **SEC-4 (MUST)** Keep the documented security in step with the auth
+  middleware: a route behind `Authenticate` must not be documented as public,
+  and a public route must say `gofi.NoSecurity`. Cover both in the route's
+  tests (TST-6).
+- **SEC-5 (SHOULD)** `fluid.BearerAuth` documents a JWT by default. For
+  opaque tokens or API keys, clear it with `fluid.WithBearerFormat("")`, and
+  always add `fluid.WithSecurityDescription`.
+
+`gofi.ServeDocs` returns an error if any requirement names a scheme that is
+not declared, so a typo cannot publish a broken document.
+
+### What Gofi generates from your rules
+
+You do not write these by hand; knowing them helps you read the document.
+
+- `min`/`max` (and `gte`/`lte`) become `minimum`/`maximum` on numbers,
+  `minLength`/`maxLength` on strings, `minItems`/`maxItems` on slices, and
+  `minProperties`/`maxProperties` on maps, matching what the rules check at
+  runtime.
+- Path parameters `:name` and `*name` are written as `{name}`.
+- Request and response bodies are documented as `application/json` unless
+  the schema declares another content type.
+- A `json.RawMessage` or `any` body is documented as free-form JSON; give the
+  `Body` field a `description` to say what it holds.
+- `time.Time` fields are documented from their layout (TAG-9).
+
+### Reusable components with fluid
+
+[`fluid`](docs/fluid-components.md) builds OpenAPI component objects with
+type-checked builders instead of `map[string]any`.
+
+- **FLD-1 (MUST)** Build every security scheme with `fluid`.
+- **FLD-2 (SHOULD)** Use `DocsView.Components.Schemas` with `fluid` schemas
+  only for documentation Gofi cannot generate from route schemas, such as a
+  shared model described in prose for clients. Do not hand-write schemas for
+  types your route schemas already describe; Gofi generates those and keeps
+  them in step with the code.
+- **FLD-3 (SHOULD)** Declare schemes once in `DocsOptions.SecuritySchemes`.
+  Use a view's `Components.SecuritySchemes` only when one docs view needs a
+  scheme the others do not.
+
+### Serving and exporting
+
 - **DOC-3 (SHOULD)** Serve the docs UI from `server.New` with
-  `gofi.ServeDocs`, and keep the `DocsOptions` in one function so the export
-  tool uses the same options.
+  `gofi.ServeDocs`, check its error, and keep the `DocsOptions` in one
+  function so the export tool uses the same options.
 - **DOC-4 (SHOULD)** Provide a command (`cmd/openapi`) that builds the server
   through `server.New` with dependencies that do no I/O and writes
   `gofi.OpenAPISpec(srv.Router(), server.DocsOptions())`. Commit its output if
   clients generate code from it.
+- **DOC-5 (MUST NOT)** Do not post-process the generated document to fix it
+  up. If Gofi's output is wrong, fix Gofi.
 
 ---
 
@@ -673,12 +848,30 @@ returns.
   `context.Context` (database calls, HTTP clients). It is cancelled when the
   client disconnects.
 - **CTX-2 (MUST NOT)** Do not use `c.Request().Context()`. It returns the raw
-  fasthttp request, not a `context.Context`.
+  fasthttp request, not the request's `context.Context`. When you genuinely
+  need fasthttp itself (the peer address, the raw response), call
+  `c.Request().FastHTTPContext()`, which says so. For the client IP, use
+  `gofi.ClientIP(c)`.
 - **CTX-3 (MUST)** Before starting a goroutine that uses request data, call
   `c.Copy()` and give the goroutine the copy. Its `Context()` is
-  `context.Background()`, so the work is not cancelled when the request ends.
+  `context.Background()`: not cancelled when the request ends, and carrying
+  none of the request's context values.
 - **CTX-4 (MUST NOT)** Do not keep a `gofi.Context` after the handler
   returns, store it in a struct, or send it on a channel.
+- **CTX-5 (MUST)** To pass a value to code that reads it from a
+  `context.Context`, derive a context from `c.Context()` and install it with
+  `gofi.SetRequestContext(c, ctx)`. Every later `c.Context()` call in the
+  request, in middleware and handlers, returns it. The package that owns the
+  value owns the key and provides `With<Value>`/`<Value>From` functions
+  (`domain.WithPrincipal`, `domain.PrincipalFrom`).
+- **CTX-6 (MUST NOT)** Do not store values on the fasthttp request
+  (`SetUserValue` on `c.Request().Context()` or `FastHTTPContext()`).
+  `c.Context()` does not see them. Releases up to v0.8.11 did, so code that
+  relies on it breaks on upgrade.
+- **CTX-7 (MUST)** A goroutine that needs the request's context values but
+  must outlive the request gets `context.WithoutCancel(c.Context())`, taken
+  before the handler returns. It keeps the values and drops the
+  cancellation.
 
 ---
 
@@ -711,10 +904,11 @@ over:
 | `c.Param("id")` in a handler | `s.Request.Path.ID` |
 | `/users/{id}` | `/users/:id` |
 | `http.Handler`, `ServeHTTP`, `httptest.NewRecorder` | Not available; test with `Router.Test` |
-| `validate:"omitempty,..."`, `dive`, `required_if` | Not Gofi rules (TAG-6, TAG-7) |
+| `dive`, `keys`, `required_if`, `excluded_with` | Not Gofi rules; registration panics (TAG-6). Nested structs are validated through their own tags |
 | `r.GET`, `r.POST` | `r.Get`, `r.Post` |
 | `gofi.New()` | `gofi.NewRouter()` |
 | `c.Request().Context()` | `c.Context()` |
+| `c.Locals(k, v)`, `c.Set(k, v)`, `ctx.SetUserValue(k, v)` | `gofi.SetRequestContext` for values domain code reads; `gofi.StoreSet(c.DataStore(), ...)` for HTTP-layer values |
 | Writing an error response in the handler | Return the error (ERR-1) |
 | Handler struct with dependencies as fields | Package-level handler variable and `deps.MustGet(c)` |
 
@@ -728,7 +922,8 @@ over:
 4. Write the handler: bind, wrap the validation error, get deps, work, fill
    `s.<Status>.Body`, `c.Send`.
 5. Give every returned error a new error ID (see the error-handling doc).
-6. Register the route in the right `r.Route` block in `routes`.
+6. Register the route in the right `r.Route` block in `routes`. If it needs
+   no credentials, set `Info.Security: gofi.NoSecurity`.
 7. Write `<operation>_test.go`: success, each documented error, auth.
 8. Run `go test ./...` and regenerate the OpenAPI document if it is committed.
 
@@ -759,6 +954,8 @@ Rules that are easy to get wrong:
 - Every schema declares `Err schemas.ErrSchema`.
 - Return errors; never write error responses in handlers.
 - Dependencies via `deps.MustGet(c)`; pass `c.Context()` to domain code.
-- Path params are `:name`. No `validate:"omitempty"`.
+- Values for domain code go on the context: `gofi.SetRequestContext(c, domain.WithX(c.Context(), x))`; never `c.Request().Context()` or `SetUserValue`.
+- Path params are `:name`. Only Gofi validate rules (no `dive`, `required_if`); `omitempty` never with `required`.
+- Document auth in `DocsOptions.SecuritySchemes`/`Security`; public routes set `Info.Security: gofi.NoSecurity`.
 - Test through the full router with `Router.Test`, from an external `_test` package.
 ```

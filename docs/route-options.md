@@ -130,13 +130,19 @@ The `Info` struct provides metadata primarily used for generating OpenAPI docume
 
 ```go
 gofi.Info{
-    Summary:     "Get User",
+    Tags:        []string{"users"},
     Description: "Retrieves a user by their ID",
-    OperationId: "getUserById",
+    Summary:     "Get User",           // optional
+    OperationId: "getUserById",        // optional
     Deprecated:  false,
-    Hidden:      false, // If true, hides from documentation
+    Hidden:      false,                // If true, hides from documentation
+    Security:    nil,                  // nil inherits DocsOptions.Security; gofi.NoSecurity marks a public route
 }
 ```
+
+`Security` overrides the router-wide requirement in `DocsOptions.Security`
+for this route. See [GUIDELINES.md](../GUIDELINES.md#security) for when to
+set it.
 
 ### 2. Schema (`Schema`)
 Defines the request and response structure. See the [Schema Guide](schema-info.md) for full details.

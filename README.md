@@ -217,7 +217,7 @@ A panic in a handler, middleware or error handler is recovered by the router: it
 
 ### Registration happens before serving
 
-Register routes, middleware, validators, body parsers and configuration before the server starts. `Listen`, `ListenTLS`, `ListenTLSMutual` and `Handler()` seal the router (and every router derived from it with `Route`, `Group` or `With`); later registration panics, because requests read these tables without locks. `gofi.Seal(r)` seals earlier. `Use` applies only to routes registered after it, and logs a warning when routes already exist.
+Register routes, middleware, validators, body parsers and configuration before the server starts. `Listen`, `ListenTLS`, `ListenTLSMutual` and `Handler()` seal the router (and every router derived from it with `Route`, `Group` or `With`); later registration panics, because requests read these tables without locks. `gofi.Seal(r)` seals earlier. `Use` applies only to routes registered after it.
 
 ### Plugins
 
@@ -346,6 +346,32 @@ func(c gofi.Context) error {
 ```
 
 > **Avoid `c.Request().Context()`** for standard-library context usage. That method returns the raw `*fasthttp.RequestCtx`, which is not a `context.Context`. On a `c.Copy()`-ed context the fasthttp struct is freshly allocated and its Go context is `nil`, causing a panic in anything that calls `Done()`, `Deadline()`, or `Value()` on it.
+
+#### Passing values to domain code
+
+Middleware that needs to hand a value to code below the handler (the
+authenticated caller, the tenant, a trace span) derives a context from
+`c.Context()` and installs it with `gofi.SetRequestContext`. Every later
+`c.Context()` call in the request returns it:
+
+```go
+p, err := authn.Authenticate(c.Context(), token)
+if err != nil {
+    return err
+}
+if err := gofi.SetRequestContext(c, domain.WithPrincipal(c.Context(), p)); err != nil {
+    return err
+}
+return c.Next()
+```
+
+Do not store values with `SetUserValue` on `c.Request().Context()`:
+`c.Context()` does not see them. Releases up to v0.8.11 did, so code that
+relies on it breaks on upgrade. Values only HTTP-layer code reads can go in
+`c.DataStore()` instead. A goroutine that must outlive the request but needs
+these values takes `context.WithoutCancel(c.Context())` before the handler
+returns; `c.Copy().Context()` carries no values. See
+[GUIDELINES.md](GUIDELINES.md#13-context-and-goroutines).
 
 ### Middleware
 
@@ -522,6 +548,26 @@ Supported UI templates:
 - `RapidDoc()`
 - `StopLight()`
 
+### Documenting authentication
+
+OpenAPI ignores `Authorization` header parameters, so declare how clients
+authenticate in `DocsOptions`. Every route inherits `Security`; a route that
+needs no credentials sets `Info.Security: gofi.NoSecurity`.
+
+```go
+gofi.ServeDocs(r, gofi.DocsOptions{
+    Info: gofi.DocsInfoOptions{Title: "My API", Version: "1.0.0"},
+    SecuritySchemes: map[string]any{
+        "BearerAuth": fluid.BearerAuth(fluid.WithSecurityDescription("Access token issued to the caller.")),
+    },
+    Security: []gofi.SecurityRequirement{{"BearerAuth": nil}},
+    Views:    []gofi.DocsView{{RoutePrefix: "/docs", Template: gofi.StopLight()}},
+})
+```
+
+`ServeDocs` returns an error if a requirement names an undeclared scheme. See
+[GUIDELINES.md](GUIDELINES.md#security) for the rules.
+
 ### Enriching Docs with Fluid (Typed OpenAPI Components)
 
 Use the [`fluid`](docs/fluid-components.md) companion package to build reusable
@@ -544,9 +590,9 @@ gofi.DocsComponent{
 }
 ```
 
-Fluid supports the full OpenAPI 3.0.3 component vocabulary — schemas,
-parameters, responses, request bodies, headers, examples, and security
-schemes — all with fluent `With*()` builders and IDE auto-completion.
+Gofi accepts fluid schemas in `DocsComponent.Schemas` and fluid security
+schemes in `DocsOptions.SecuritySchemes`; fluid also has typed builders for
+the other OpenAPI component types.
 See the [Fluid guide](docs/fluid-components.md) for the complete reference.
 
 ### Custom Documentation UI
@@ -755,7 +801,7 @@ type streamSchema struct {
         Header struct {
             ContentType string `json:"content-type" default:"text/event-stream"`
         }
-        Body string `validate:"required" pattern:"event-stream"`
+        Body string `validate:"required"`
     }
 }
 

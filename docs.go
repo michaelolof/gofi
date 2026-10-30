@@ -24,21 +24,57 @@ type DocsOptions struct {
 	Servers      []DocsServerOptions `json:"servers,omitempty"`
 	ExternalDocs *ExternalDocs       `json:"externalDocs,omitempty"`
 	Tags         []DocsInfoTag       `json:"tags,omitempty"`
-	Views        []DocsView          `json:"-"`
+	// SecuritySchemes declares the authentication schemes routes can
+	// require, by name. Build values with the fluid package, for example
+	// fluid.BearerAuth(). They are written to components.securitySchemes in
+	// every view.
+	SecuritySchemes map[string]any `json:"-"`
+	// Security is the requirement every documented route gets unless its
+	// Info.Security overrides it.
+	Security []SecurityRequirement `json:"security,omitempty"`
+	Views    []DocsView            `json:"-"`
 }
 
 func (d *DocsOptions) getMatchingDocs(m *serveMux, match func(url string) bool) Docs {
 	mpaths := make(docsPaths)
 	for url, v := range m.paths {
 		if match(url) {
-			mpaths[url] = v
+			mpaths[openapiPath(url)] = v
 		}
 	}
 	return Docs{
 		OpenApi:     "3.0.3",
 		Paths:       &mpaths,
 		DocsOptions: d,
+		Components:  d.components(DocsComponent{}),
 	}
+}
+
+// openapiPath rewrites a Gofi route pattern into an OpenAPI path template:
+// ":name" and "*name" become "{name}". As in the router, a parameter runs
+// from its ':' or '*' to the next '/'.
+func openapiPath(pattern string) string {
+	if !strings.ContainsAny(pattern, ":*") {
+		return pattern
+	}
+	var b strings.Builder
+	b.Grow(len(pattern) + 2)
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		if ch != ':' && ch != '*' {
+			b.WriteByte(ch)
+			continue
+		}
+		end := i + 1
+		for end < len(pattern) && pattern[end] != '/' {
+			end++
+		}
+		b.WriteByte('{')
+		b.WriteString(pattern[i+1 : end])
+		b.WriteByte('}')
+		i = end - 1
+	}
+	return b.String()
 }
 
 type DocsInfoOptions struct {
@@ -104,7 +140,66 @@ type DocsView struct {
 }
 
 type DocsComponent struct {
-	Schemas map[string]any `json:"schemas"`
+	Schemas map[string]any `json:"schemas,omitempty"`
+	// SecuritySchemes adds or replaces schemes for one view, on top of
+	// DocsOptions.SecuritySchemes.
+	SecuritySchemes map[string]any `json:"securitySchemes,omitempty"`
+}
+
+// components returns view with d.SecuritySchemes merged in; schemes the view
+// declares itself take precedence.
+func (d *DocsOptions) components(view DocsComponent) DocsComponent {
+	if d == nil || len(d.SecuritySchemes) == 0 {
+		return view
+	}
+	merged := make(map[string]any, len(d.SecuritySchemes)+len(view.SecuritySchemes))
+	for name, scheme := range d.SecuritySchemes {
+		merged[name] = scheme
+	}
+	for name, scheme := range view.SecuritySchemes {
+		merged[name] = scheme
+	}
+	view.SecuritySchemes = merged
+	return view
+}
+
+// checkSecurity reports a security requirement that names a scheme no view
+// declares.
+func (d *DocsOptions) checkSecurity(m *serveMux) error {
+	views := d.Views
+	if len(views) == 0 {
+		views = []DocsView{{}}
+	}
+	for _, view := range views {
+		schemes := d.components(view.Components).SecuritySchemes
+		check := func(where string, reqs []SecurityRequirement) error {
+			for _, req := range reqs {
+				for name := range req {
+					if _, ok := schemes[name]; !ok {
+						return fmt.Errorf("gofi: %s requires security scheme %q, which is not declared in DocsOptions.SecuritySchemes or the view's Components.SecuritySchemes", where, name)
+					}
+				}
+			}
+			return nil
+		}
+		if err := check("DocsOptions.Security", d.Security); err != nil {
+			return err
+		}
+		for url, ops := range m.paths {
+			if view.URLMatch != nil && !view.URLMatch(url) {
+				continue
+			}
+			for method, op := range ops {
+				if op.Security == nil {
+					continue
+				}
+				if err := check("route "+strings.ToUpper(method)+" "+url, *op.Security); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 type DocsUiTemplate interface {
@@ -378,7 +473,7 @@ func (d Docs) FilterByRoutePrefix(routePrefix string) Docs {
 			if view.URLMatch != nil {
 				filtered = d.Filter(view.URLMatch)
 			}
-			filtered.Components = view.Components
+			filtered.Components = d.DocsOptions.components(view.Components)
 			return filtered
 		}
 	}
@@ -400,6 +495,9 @@ func ServeDocs(r Router, opts DocsOptions) error {
 	m, ok := r.(*serveMux)
 	if !ok {
 		return errors.New("invalid server mux passed when serving docs")
+	}
+	if err := opts.checkSecurity(m); err != nil {
+		return err
 	}
 
 	for _, vopt := range opts.Views {
@@ -424,7 +522,7 @@ func ServeDocs(r Router, opts DocsOptions) error {
 						d = opts.getMatchingDocs(m, viewOpt.URLMatch)
 					}
 
-					d.Components = viewOpt.Components
+					d.Components = opts.components(viewOpt.Components)
 					// In the event of a marshal error, it will just leave specJSON as []byte{}
 					// which will be served as an empty response. This is acceptable for a fatal developer error.
 					state.specJSON, _ = json.Marshal(d)
