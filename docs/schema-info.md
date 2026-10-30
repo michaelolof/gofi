@@ -24,7 +24,7 @@ The `Request` struct defines the expected input. Gofi binds data from the HTTP r
 
 | Field | Source | description |
 | :--- | :--- | :--- |
-| **`Path`** | URL Path | Maps to path parameters (e.g., `/users/{id}`). |
+| **`Path`** | URL Path | Maps to path parameters (e.g., `/users/:id`). |
 | **`Query`** | URL Query | Maps to query string parameters (e.g., `?page=1`). |
 | **`Header`** | HTTP Headers | Maps to request headers. |
 | **`Cookie`** | HTTP Cookies | Maps to request cookies. Supports `string` or `http.Cookie`. |

@@ -1,7 +1,9 @@
 package gofi
 
 import (
+	"encoding/json"
 	"errors"
+	"math"
 
 	"github.com/michaelolof/gofi/cont"
 )
@@ -14,6 +16,12 @@ type openapiSchema struct {
 	Default              any                      `json:"default,omitempty"`
 	Minimum              *float64                 `json:"minimum,omitempty"`
 	Maximum              *float64                 `json:"maximum,omitempty"`
+	MinLength            *uint64                  `json:"minLength,omitempty"`
+	MaxLength            *uint64                  `json:"maxLength,omitempty"`
+	MinItems             *uint64                  `json:"minItems,omitempty"`
+	MaxItems             *uint64                  `json:"maxItems,omitempty"`
+	MinProperties        *uint64                  `json:"minProperties,omitempty"`
+	MaxProperties        *uint64                  `json:"maxProperties,omitempty"`
 	Enum                 []any                    `json:"enum,omitempty"`
 	OneOf                []openapiSchema          `json:"oneOf,omitempty"`
 	Discriminator        *openapiDiscriminator    `json:"discriminator,omitempty"`
@@ -51,6 +59,46 @@ func newOpenapiSchema(format string, typ string, pattn string, deflt any, min *f
 		Example:              example,
 		ParentRequired:       pRequired,
 	}
+}
+
+// setBounds documents min/max rules with the keyword OpenAPI uses for the
+// schema's type: minimum/maximum for numbers, minLength/maxLength for
+// strings, minItems/maxItems for arrays and minProperties/maxProperties for
+// maps. Gofi's runtime rules apply to the same quantities.
+func (o *openapiSchema) setBounds(min, max *float64, isTime bool) {
+	o.Minimum, o.Maximum = nil, nil
+	switch o.Type {
+	case "integer", "number":
+		o.Minimum, o.Maximum = min, max
+	case "string":
+		if isTime || o.Format == "binary" {
+			return
+		}
+		o.MinLength, o.MaxLength = boundCount(min, true), boundCount(max, false)
+	case "array":
+		o.MinItems, o.MaxItems = boundCount(min, true), boundCount(max, false)
+	case "object":
+		if o.AdditionalProperties != nil {
+			o.MinProperties, o.MaxProperties = boundCount(min, true), boundCount(max, false)
+		}
+	}
+}
+
+// boundCount converts a min (rounded up) or max (rounded down) rule value to
+// a non-negative count.
+func boundCount(v *float64, isMin bool) *uint64 {
+	if v == nil {
+		return nil
+	}
+	f := math.Floor(*v)
+	if isMin {
+		f = math.Ceil(*v)
+	}
+	if f < 0 {
+		f = 0
+	}
+	n := uint64(f)
+	return &n
 }
 
 func (o *openapiSchema) IsEmpty() bool {
@@ -125,10 +173,15 @@ type openapiOperationObject struct {
 	Responses    map[string]openapiResponseObject `json:"responses,omitempty"`
 	ExternalDocs []ExternalDocs                   `json:"externalDocs,omitempty"`
 	Tags         []string                         `json:"tags,omitempty"`
+	Security     *[]SecurityRequirement           `json:"security,omitempty"`
 
-	urlPath             string
-	method              string
-	bodySchema          openapiSchema
+	urlPath    string
+	method     string
+	bodySchema openapiSchema
+	// bodyDeclared records that the schema has a Request.Body field. A
+	// free-form body (json.RawMessage, any) has a schema with no type, so
+	// bodySchema alone cannot tell it apart from no body.
+	bodyDeclared        bool
 	websocketSchema     openapiSchema
 	responsesParameters map[string]openapiParameters
 	responsesSchema     map[string]openapiSchema
@@ -147,8 +200,10 @@ func (o *openapiOperationObject) normalize(method string, path string) {
 	o.method = method
 	o.urlPath = path
 
-	if !o.bodySchema.IsEmpty() {
-		var contentType = string(cont.AnyContenType)
+	if o.bodyDeclared || !o.bodySchema.IsEmpty() {
+		// Matches schemaRules.reqContent: bodies are JSON unless the schema
+		// declares another content type.
+		var contentType = string(cont.ApplicationJson)
 		if v := o.Parameters.findByNameIn("content-type", "header"); v != nil {
 			if def, ok := v.Schema.Default.(string); ok && def != "" {
 				contentType = def
@@ -198,7 +253,9 @@ func (o *openapiOperationObject) normalize(method string, path string) {
 			sinfo := statuses[field]
 
 			for _, sinfo := range sinfo {
-				contentType := string(cont.AnyContenType)
+				// Matches schemaRules.respContent: responses are JSON unless
+				// the schema declares another content type.
+				contentType := string(cont.ApplicationJson)
 				if v, ok := o.Responses[sinfo.Code]; ok {
 					v.Description = sinfo.Description
 					if c, ok := v.Headers["content-type"]; ok {
@@ -255,7 +312,34 @@ type Info struct {
 	Description  string
 	ExternalDocs []ExternalDocs
 	Tags         []string
+	// Security overrides DocsOptions.Security for this route. Leave it nil
+	// to use the router-wide default; set it to NoSecurity for a route that
+	// needs no credentials.
+	Security []SecurityRequirement
 }
+
+// SecurityRequirement names the security schemes a route needs, mapped to
+// the scopes required from each (empty for bearer, basic and API-key
+// schemes). Every scheme named must be declared in DocsOptions.SecuritySchemes
+// or a view's Components.SecuritySchemes.
+type SecurityRequirement map[string][]string
+
+// MarshalJSON writes a scheme with no scopes as [] rather than null, as
+// OpenAPI requires.
+func (r SecurityRequirement) MarshalJSON() ([]byte, error) {
+	out := make(map[string][]string, len(r))
+	for name, scopes := range r {
+		if scopes == nil {
+			scopes = []string{}
+		}
+		out[name] = scopes
+	}
+	return json.Marshal(out)
+}
+
+// NoSecurity marks a route as public in Info.Security: it is documented with
+// an empty security requirement, overriding DocsOptions.Security.
+var NoSecurity = []SecurityRequirement{}
 
 type schemaField string
 

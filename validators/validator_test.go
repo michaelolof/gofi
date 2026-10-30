@@ -150,3 +150,22 @@ func TestValidateStruct(t *testing.T) {
 func countStringOccurrences(s, substr string) int {
 	return strings.Count(s, substr)
 }
+
+func TestValidate_UnknownRuleIsAnError(t *testing.T) {
+	err := Validate("abc", "required,dive")
+	if err == nil || err.Error() != `unknown validation rule "dive"` {
+		t.Fatalf("got %v, want unknown validation rule error", err)
+	}
+}
+
+func TestValidate_OmitEmpty(t *testing.T) {
+	if err := Validate("", "omitempty,email"); err != nil {
+		t.Fatalf("empty value with omitempty: got %v, want nil", err)
+	}
+	if err := Validate("nope", "omitempty,email"); err == nil {
+		t.Fatal("non-empty invalid value with omitempty: got nil, want error")
+	}
+	if err := Validate([]string{}, "omitempty,min=2"); err != nil {
+		t.Fatalf("empty slice with omitempty: got %v, want nil", err)
+	}
+}

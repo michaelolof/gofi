@@ -9,10 +9,30 @@ Gofi uses a **radix tree** (compressed trie) for route lookup, giving O(path-len
 | Syntax | Example | Matches |
 |--------|---------|---------|
 | Static segment | `/users/me` | Exactly `/users/me` |
-| Named parameter | `/users/:id` | `/users/alice`, `/users/123`, etc. The captured value is available via `c.PathParam("id")`. |
-| Catch-all | `/files/*filepath` | `/files/a`, `/files/a/b/c`, etc. The captured value (including the leading `/`) is available via `c.PathParam("filepath")`. |
+| Named parameter | `/users/:id` | `/users/alice`, `/users/123`, etc. The captured value is bound to the `Request.Path` field tagged `json:"id"`; middleware can read it with `c.Param("id")`. |
+| Catch-all | `/files/*filepath` | `/files/a`, `/files/a/b/c`, etc. The captured value, without the leading `/`, is bound to the `Request.Path` field tagged `json:"filepath"`; middleware can read it with `c.Param("filepath")`. |
 
-Parameter names must start with a letter and contain only letters and digits (`[A-Za-z][A-Za-z0-9]*`).
+### Where a parameter starts and ends
+
+A `:` or `*` **anywhere** in a pattern starts a parameter, and the parameter
+runs to the next `/` or the end of the pattern. Everything in that span after
+the `:` or `*` is its name.
+
+| Pattern | Parameters | Matches |
+|---------|------------|---------|
+| `/users/:user_id` | `user_id` | `/users/42` |
+| `/files/*filepath` | `filepath` | `/files/a/b.txt` |
+| `/events:batch` | `batch` | `/events:batch`, `/eventsfoo`, `/events123`: any path starting with `/events` and without a further `/` |
+| `/users/:id:complete` | none | Panics at registration: one segment can hold only one parameter |
+
+Gofi has no syntax for a literal `:` or `*` in a pattern. A route such as
+`POST /events:batch` (an API-style custom method) is a parameter route that
+matches more than the one URL. Use a separate segment instead:
+`POST /events/batch`.
+
+Each segment holds at most one parameter, and a catch-all must be the last
+segment. A parameter name must not be empty. In the OpenAPI document,
+`:name` and `*name` are written as `{name}`.
 
 ---
 

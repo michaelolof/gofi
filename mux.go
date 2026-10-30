@@ -190,9 +190,6 @@ func (s *serveMux) Group(fn func(r Router)) Router {
 
 func (s *serveMux) Use(middlewares ...MiddlewareFunc) {
 	s.lifecycle.mustBeOpen("Use")
-	if n := s.routeCount(); n > 0 {
-		log.Printf("gofi: Use called after %d route(s) were registered; middleware applies only to routes registered afterwards", n)
-	}
 	s.middlewares = append(s.middlewares, middlewares...)
 }
 
@@ -647,16 +644,6 @@ func (l *routerLifecycle) mustBeOpen(what string) {
 	if l.sealed.Load() {
 		panic("gofi: " + what + " called after the router started serving; register routes, middleware and configuration before Listen, ListenTLS, ListenTLSMutual or Handler")
 	}
-}
-
-func (s *serveMux) routeCount() int {
-	n := 0
-	for _, root := range s.trees {
-		if root != nil {
-			n++
-		}
-	}
-	return n
 }
 
 // Seal stops further registration on r and on every router derived from it.

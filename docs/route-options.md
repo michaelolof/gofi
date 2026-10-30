@@ -98,22 +98,31 @@ func(c gofi.Context) error {
 
 `RouteOptions` is the configuration struct used when registering a route. It separates the handler logic from configuration metadata.
 
-It is recommended to use `gofi.DefineHandler` to define your route options variables. This provides a clean way to organize your handlers.
+Define every handler with `gofi.DefineHandler`, assigned to an exported package-level variable, with its schema directly below it. [GUIDELINES.md](../GUIDELINES.md#2-handlers) has the full rules.
 
 ```go
-var GetUser = gofi.DefineHandler(gofi.RouteOptions{
+// GetUserHandler returns a user by ID.
+var GetUserHandler = gofi.DefineHandler(gofi.RouteOptions{
     Info: gofi.Info{
-        Summary: "Get User",
-        Description: "Returns a user by ID",
+        Tags:        []string{"users"},
+        Description: "Returns a user by ID.",
     },
-    Schema: &UserSchema{},
+
+    Schema: &getUserSchema{},
+
     Handler: func(c gofi.Context) error {
-        return c.Send(200, UserResponse{})
+        s, err := gofi.ValidateAndBind[getUserSchema](c)
+        if err != nil {
+            return err
+        }
+
+        s.Ok.Body = lookUpUser(s.Request.Path.UserID)
+        return c.Send(200, s.Ok)
     },
 })
 
 // Registering the handler
-r.Get("/users/{id}", GetUser)
+r.Get("/users/:user_id", GetUserHandler)
 ```
 
 ### 1. Route Information (`Info`)
@@ -121,13 +130,19 @@ The `Info` struct provides metadata primarily used for generating OpenAPI docume
 
 ```go
 gofi.Info{
-    Summary:     "Get User",
+    Tags:        []string{"users"},
     Description: "Retrieves a user by their ID",
-    OperationId: "getUserById",
+    Summary:     "Get User",           // optional
+    OperationId: "getUserById",        // optional
     Deprecated:  false,
-    Hidden:      false, // If true, hides from documentation
+    Hidden:      false,                // If true, hides from documentation
+    Security:    nil,                  // nil inherits DocsOptions.Security; gofi.NoSecurity marks a public route
 }
 ```
+
+`Security` overrides the router-wide requirement in `DocsOptions.Security`
+for this route. See [GUIDELINES.md](../GUIDELINES.md#security) for when to
+set it.
 
 ### 2. Schema (`Schema`)
 Defines the request and response structure. See the [Schema Guide](schema-info.md) for full details.

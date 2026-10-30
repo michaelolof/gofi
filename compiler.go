@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"fmt"
 	"log"
 	"reflect"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/michaelolof/gofi/utils"
+	"github.com/michaelolof/gofi/validators"
 )
 
 var tagFieldRegex = regexp.MustCompile(`([a-zA-Z0-9_]+)(?:=([^,]+)|@([^,]+))?`)
@@ -38,6 +40,10 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	optsObj.Tags = info.Tags
 	if info.Deprecated {
 		optsObj.Deprecated = &info.Deprecated
+	}
+	if info.Security != nil {
+		security := slices.Clone(info.Security)
+		optsObj.Security = &security
 	}
 
 	for _, sf := range reflect.VisibleFields(strct) {
@@ -100,6 +106,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					name := getFieldName(rqf)
 					ruleDefs := s.getFieldRuleDefs(rqf, name, val)
 					optsObj.bodySchema = s.getTypeInfo(rqf.Type, val, name, ruleDefs)
+					optsObj.bodyDeclared = true
 					ruleDefs.jsonBindMaxDepth = compileJSONBindMaxDepth(ruleDefs)
 					sRules.setReq(sf.Name, ruleDefs)
 				}
@@ -107,7 +114,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 		} else if sf.Name == string(schemaWebSocket) {
 			if protocol, ok := ExtractWebSocketSchema(schema); ok {
 				optsObj.websocketSchema = s.compileWebSocketSchema(protocol)
-				sRules.websocket = compileWebSocketContract(protocol)
+				sRules.websocket = compileWebSocketContract(protocol, s.opts.customValidatorsOrNil())
 			}
 		} else if _, ok := statuses[sf.Name]; ok {
 			for _, rqf := range reflect.VisibleFields(sf.Type) {
@@ -219,11 +226,26 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 
 				vtags := strings.Split(tag, ",")
 
-				var allowZero bool
+				var allowZero, omitEmpty bool
+				// Rules on a pointer field check the value it points to.
+				ruleType := sf.Type
+				for ruleType.Kind() == reflect.Pointer {
+					ruleType = ruleType.Elem()
+				}
 				rules = make([]ruleOpts, 0, len(vtags))
 				for _, tag := range vtags {
 					maches := tagFieldRegex.FindStringSubmatch(tag)
+					if maches == nil {
+						panic(fmt.Sprintf("gofi: malformed validate tag %q on field %s", sf.Tag.Get("validate"), sf.Name))
+					}
 					ruleName := maches[1]
+					if !s.opts.isKnownRule(ruleName) {
+						panic(fmt.Sprintf("gofi: unknown validation rule %q in validate tag %q on field %s; register custom rules with RegisterValidator before the routes that use them", ruleName, sf.Tag.Get("validate"), sf.Name))
+					}
+					if ruleName == validators.OmitEmpty {
+						omitEmpty = true
+						continue
+					}
 					optionStr := maches[2]
 
 					if v := maches[3]; len(v) != 0 {
@@ -254,7 +276,7 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 						}
 					}
 
-					rules = append(rules, newRuleOpts(sf.Type, sf.Type.Kind(), ruleName, options, s.opts))
+					rules = append(rules, newRuleOpts(ruleType, ruleType.Kind(), ruleName, options, s.opts))
 				}
 
 				// Normalize required+allow_zero → present: relax zero-value check to nil-only.
@@ -263,9 +285,26 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 					present = true
 					for i, r := range rules {
 						if r.rule == "required" {
-							rules[i] = newRuleOpts(sf.Type, sf.Type.Kind(), "present", nil, s.opts)
+							rules[i] = newRuleOpts(ruleType, ruleType.Kind(), "present", nil, s.opts)
 							break
 						}
+					}
+				}
+
+				// omitempty skips every other rule on the field when its value
+				// is empty, so it cannot be combined with rules that demand a value.
+				if omitEmpty {
+					if required || present {
+						panic(fmt.Sprintf("gofi: omitempty cannot be combined with required or present in validate tag %q on field %s", sf.Tag.Get("validate"), sf.Name))
+					}
+					for i := range rules {
+						rules[i] = rules[i].skipWhenEmpty()
+					}
+				}
+
+				if sf.Type.Kind() == reflect.Pointer {
+					for i := range rules {
+						rules[i] = rules[i].derefPointers()
 					}
 				}
 			}
@@ -306,6 +345,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 	requiredProps := make([]string, 0)
 
 	var pRequired bool
+	var isTime bool
 
 	if ruleDefs != nil {
 		minOpts := ruleDefs.ruleOptions("min")
@@ -444,10 +484,17 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			case utils.TimeType:
 				enum = optsMapper(optStr, nil)
 				typeStr = "string"
-				format = string(utils.TimeObjectFormat)
 				ruleDefs.format = utils.TimeObjectFormat
 				if pattern == "" {
 					pattern = time.RFC3339Nano
+				}
+				isTime = true
+				var layoutExample string
+				format, layoutExample = timeLayoutDocs(pattern)
+				if v, ok := ruleDefs.tags["example"]; ok && len(v) > 0 {
+					example = v[0]
+				} else if layoutExample != "" {
+					example = layoutExample
 				}
 
 			case utils.CookieType:
@@ -490,12 +537,19 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 		}
 	}
 
+	// The runtime parses and formats times with pattern (a Go layout).
+	// OpenAPI's pattern is a regular expression, so a time layout is
+	// documented through format and example instead.
 	ruleDefs.pattern = pattern
+	docPattern := pattern
+	if isTime {
+		docPattern = ""
+	}
 
 	rtn := newOpenapiSchema(
 		format,
 		typeStr,
-		pattern,
+		docPattern,
 		value,
 		min,
 		max,
@@ -509,8 +563,27 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 		example,
 		pRequired,
 	)
+	rtn.setBounds(min, max, isTime)
 
 	return rtn
+}
+
+// timeLayoutReference is formatted with a field's layout to show clients the
+// shape of a time value. The day is above 12 so day and month cannot be
+// confused.
+var timeLayoutReference = time.Date(2026, time.March, 14, 15, 4, 5, 0, time.UTC)
+
+// timeLayoutDocs returns the OpenAPI format for a Go time layout, and an
+// example value when no standard format describes it.
+func timeLayoutDocs(layout string) (format string, example string) {
+	sample := timeLayoutReference.Format(layout)
+	if _, err := time.Parse(time.RFC3339Nano, sample); err == nil {
+		return "date-time", ""
+	}
+	if _, err := time.Parse(time.DateOnly, sample); err == nil {
+		return "date", ""
+	}
+	return "", sample
 }
 
 func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any {

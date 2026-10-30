@@ -69,6 +69,17 @@ Selective validation and binding maintain backward compatibility while improving
 
 Here is the complete list of supported validation tags in Gofi.
 
+Only these rules, `omitempty`, and custom rules you register are accepted. A
+rule Gofi does not know (a typo, or a rule borrowed from another validator
+such as `dive` or `required_if`) makes route registration panic with the rule
+and field name, so a misspelled rule can never silently validate nothing.
+The same applies to WebSocket message types declared in `Schema.WebSocket`,
+which also accept your custom rules.
+
+`validators.Validate` knows only the built-in rules and returns an
+`unknown validation rule` error for anything else; use
+`validators.ValidateWith` to include custom rules.
+
 ### Comparison & Length
 | Tag | Description | Example |
 | :--- | :--- | :--- |
@@ -247,8 +258,39 @@ The built-in `required` tag enforces **both**, which means it rejects legitimate
 | `validate:"required"` | ERROR | ERROR | OK |
 | `validate:"present"` | ERROR | OK | OK |
 | `validate:"required,allow_zero"` | ERROR | OK | OK |
+| `validate:"omitempty,..."` | OK | OK, other rules skipped | OK, other rules applied |
 
 > `present` and `required,allow_zero` are semantically identical. Both are supported for ergonomics — `present` is more concise, `required,allow_zero` is more explicit.
+
+### `omitempty`
+
+Gofi never validates a field the request leaves out (unless it is `required`
+or `present`), and it treats an empty query parameter (`?site=`) as left out.
+`omitempty` covers the remaining case: a value that is sent but empty. With
+`omitempty` anywhere in the tag, the field's other rules are skipped when its
+value is empty: `""`, `0`, `false`, `nil`, or a slice or map of length zero.
+
+```go
+Body struct {
+    // "" passes; "nope" fails the email rule
+    Email string `json:"email" validate:"omitempty,email"`
+    // [] passes; ["a"] fails min=2
+    Tags []string `json:"tags" validate:"omitempty,min=2"`
+}
+```
+
+`omitempty` cannot be combined with `required` or `present`; route
+registration panics if it is.
+
+### Pointer fields
+
+Rules on a pointer field check the value it points to, so
+``Age *int `validate:"gte=18"` `` accepts `30` and rejects `3`, and
+``Choice *string `validate:"oneof=a b"` `` accepts `"a"`. A nil pointer, from a
+field left out or sent as `null`, skips every rule except `required` and
+`present`, which reject it. Custom validators receive the pointed-to type in
+`ValidatorContext.Type` and the pointed-to value at runtime. Pointer fields
+bind in the body, query, path, header and cookie.
 
 ### Usage Examples
 
@@ -398,7 +440,9 @@ func (v *CoolValidator) Rule(c gofi.ValidatorContext) func(arg any) error {
 
 ### Registering the Validator
 
-Register your custom validator with the router instance.
+Register your custom validator with the router instance, before any route
+that uses it. Rules are resolved when a route is registered, so a route that
+uses a rule registered later panics as an unknown rule.
 
 ```go
 func main() {

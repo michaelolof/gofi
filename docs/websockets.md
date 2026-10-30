@@ -232,7 +232,7 @@ type ChatSocketSchema struct {
 			RoomID string `json:"room_id" validate:"required"`
 		}
 		Header struct {
-			Authorization string `json:"Authorization" validate:"required"`
+			Authorization string `json:"authorization" validate:"required"`
 		}
 	}
 
@@ -543,7 +543,7 @@ type ChatSocketSchema struct {
 			RoomID string `json:"room_id" validate:"required"`
 		}
 		Header struct {
-			Authorization string `json:"Authorization" validate:"required"`
+			Authorization string `json:"authorization" validate:"required"`
 		}
 	}
 }
@@ -599,6 +599,12 @@ Typical helpers involved:
 - `WriteError(v)` validates against `WebSocket.Error`
 
 This phase decides whether a frame is valid for the active websocket protocol.
+
+Message types use the same `validate` rules as HTTP schemas, including
+`omitempty` and custom rules registered with `RegisterValidator`. Only a
+message type's top-level fields are checked. An unknown rule in a type
+declared in `Schema.WebSocket` makes route registration panic; register
+custom rules before the routes that use them.
 
 That distinction explains why websocket handler errors are not normal HTTP response errors. Once the connection is upgraded, you are no longer in the standard HTTP response lifecycle.
 

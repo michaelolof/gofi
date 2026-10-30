@@ -294,7 +294,7 @@ import (
 )
 
 func main() {
-    app := gofi.New()
+    app := gofi.NewRouter()
 
     // ... register routes ...
 
@@ -356,11 +356,12 @@ func main() {
 
 ## Beyond Schemas — Other Component Types
 
-While `DocsComponent.Schemas` is the primary way to enrich your OpenAPI spec
-today, `fluid` also provides typed structs for every OpenAPI component type.
-These are ready for future Gofi versions that may support global
-`parameters`, `responses`, `requestBodies`, `headers`, `examples`, and
-`securitySchemes` in `DocsComponent`.
+Gofi accepts `fluid` values in two places: schemas in
+`DocsComponent.Schemas`, and security schemes in
+`DocsOptions.SecuritySchemes` (or a view's `DocsComponent.SecuritySchemes`).
+The other component types below (`parameters`, `responses`,
+`requestBodies`, `headers`, `examples`) have typed structs but no place in
+`DocsComponent` yet.
 
 ### ParameterObject
 
@@ -445,7 +446,27 @@ upload := fluid.MultipartRequestBody(
 
 ### SecuritySchemeObject
 
-Declare authentication methods:
+Declare authentication methods, then register them in
+`DocsOptions.SecuritySchemes` and require them with `DocsOptions.Security`
+(router-wide) or `Info.Security` (one route):
+
+```go
+gofi.DocsOptions{
+    SecuritySchemes: map[string]any{
+        "BearerAuth": fluid.BearerAuth(
+            fluid.WithBearerFormat(""), // opaque token, not a JWT
+            fluid.WithSecurityDescription("Access token issued to the caller."),
+        ),
+    },
+    Security: []gofi.SecurityRequirement{{"BearerAuth": nil}},
+}
+```
+
+A public route opts out with `Info.Security: gofi.NoSecurity`.
+`gofi.ServeDocs` returns an error if a requirement names a scheme that is not
+declared. [GUIDELINES.md](../GUIDELINES.md#security) has the rules.
+
+The available constructors:
 
 ```go
 bearer := fluid.BearerAuth(
@@ -634,8 +655,11 @@ opt-in improvement, not a breaking change.
 
 ## Integration with Gofi Docs
 
-`fluid` works anywhere Gofi accepts raw OpenAPI JSON. The primary integration
-point is `DocsComponent.Schemas`:
+`fluid` works anywhere Gofi accepts raw OpenAPI JSON:
+`DocsOptions.SecuritySchemes`, `DocsComponent.SecuritySchemes`, and
+`DocsComponent.Schemas`. Use `Schemas` only for documentation Gofi cannot
+generate from your route schemas; route request and response bodies are
+generated for you.
 
 ```go
 func(c gofi.Context) error {

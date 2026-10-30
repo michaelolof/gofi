@@ -3,6 +3,7 @@ package gofi
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -262,10 +263,9 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 
 					if shouldBind {
 						sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
-						if sf.Kind() == reflect.Pointer {
-							sf.Elem().Set(reflect.ValueOf(cvs).Convert(sf.Elem().Type()))
-						} else {
-							sf.Set(reflect.ValueOf(cvs).Convert(sf.Type()))
+						if !setParamField(sf, reflect.ValueOf(cvs)) {
+							errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "typeMismatch",
+								fmt.Errorf("cannot convert %T to %s", cvs, sf.Type())))
 						}
 					}
 				}
@@ -447,13 +447,31 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 	if shouldBind {
 		sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
 		rv := reflect.ValueOf(val)
-		if rv.Type().ConvertibleTo(sf.Type()) {
-			sf.Set(rv.Convert(sf.Type()))
-		} else {
-			slog.Error(newErrReport(ResponseErr, schemaBody, def.field, "typeMismatch",
+		if !setParamField(sf, rv) {
+			slog.Error(newErrReport(RequestErr, field, def.field, "typeMismatch",
 				errors.New("cannot convert "+rv.Type().String()+" to "+sf.Type().String())).Error())
 		}
 	}
 
 	return nil
+}
+
+// setParamField stores val, a parsed parameter value, in field. A pointer
+// field gets a newly allocated value. It reports false if val cannot be
+// converted to the field's type.
+func setParamField(field reflect.Value, val reflect.Value) bool {
+	target := field
+	var ptr reflect.Value
+	if field.Kind() == reflect.Pointer {
+		ptr = reflect.New(field.Type().Elem())
+		target = ptr.Elem()
+	}
+	if !val.Type().ConvertibleTo(target.Type()) {
+		return false
+	}
+	target.Set(val.Convert(target.Type()))
+	if ptr.IsValid() {
+		field.Set(ptr)
+	}
+	return true
 }
