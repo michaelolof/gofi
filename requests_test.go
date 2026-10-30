@@ -1880,32 +1880,6 @@ func TestJSONBinding_CompiledFieldIndexes(t *testing.T) {
 	})
 }
 
-func TestRequestFieldByIndex_InvalidPathReturnsError(t *testing.T) {
-	type target struct {
-		Value string
-	}
-
-	value := reflect.ValueOf(&target{}).Elem()
-	field, err := requestFieldByIndex(value, []int{1})
-	assert.Error(t, err)
-	assert.False(t, field.IsValid())
-}
-
-func TestRequestFieldByIndex_InitializedPointerEmbed(t *testing.T) {
-	type embedded struct {
-		Value string
-	}
-	type target struct {
-		*embedded
-	}
-
-	value := reflect.ValueOf(&target{embedded: &embedded{}}).Elem()
-	field, err := requestFieldByIndex(value, []int{0, 0})
-	require.NoError(t, err)
-	field.SetString("bound")
-	assert.Equal(t, "bound", value.Interface().(target).Value)
-}
-
 // =============================================================================
 // Multipart required file-field validation tests
 // =============================================================================

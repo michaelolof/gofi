@@ -59,12 +59,21 @@ func (c *context) Send(code int, obj any) error {
 		bdef = v
 	}
 
-	bs, err := sz.ValidateAndEncodeResponse(obj, ResponseOptions{
+	opts := ResponseOptions{
 		Context:     &parserContext{c: c},
 		SchemaRules: &bdef,
 		Body:        rv.FieldByName(string(schemaBody)),
-	})
-	if err != nil {
+	}
+	var bs []byte
+	if jp, ok := sz.(*JSONBodyParser); ok {
+		// Encode into a pooled buffer; SetBody below copies it once.
+		buf := getJSONBuffer()
+		defer putJSONBuffer(buf)
+		if err := jp.encodeResponse(buf, opts); err != nil {
+			return err
+		}
+		bs = buf.Bytes()
+	} else if bs, err = sz.ValidateAndEncodeResponse(obj, opts); err != nil {
 		return err
 	}
 
@@ -140,9 +149,7 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 			if err != nil {
 				return err
 			}
-
-			c.fctx.Response.Header.Set(key, val)
-			return nil
+			return c.setSchemaHeader(key, val)
 		}
 
 		if spec, ok := c.serverOpts.customSpecs.Find(string(val.format)); ok {
@@ -172,7 +179,9 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 					return err
 				}
 
-				c.fctx.Response.Header.Set(key, fmt.Sprintf("%v", hv))
+				if err := c.setSchemaHeader(key, fmt.Sprintf("%v", hv)); err != nil {
+					return err
+				}
 
 			case val.format == utils.TimeObjectFormat:
 				switch hf.Kind() {
@@ -191,7 +200,9 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return err
 					}
 
-					c.fctx.Response.Header.Set(key, tv.Format(val.pattern))
+					if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
+						return err
+					}
 
 				case reflect.Struct:
 					tv, ok := hv.(time.Time)
@@ -208,12 +219,24 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 						return err
 					}
 
-					c.fctx.Response.Header.Set(key, tv.Format(val.pattern))
+					if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
 
+	return nil
+}
+
+// setSchemaHeader writes a schema-defined response header, rejecting names
+// and values that contain CR, LF or NUL.
+func (c *context) setSchemaHeader(key, val string) error {
+	if !validHeaderField(key) || !validHeaderField(val) {
+		return newErrReport(ResponseErr, schemaHeaders, key, "header", errors.New("header contains CR, LF or NUL"))
+	}
+	c.fctx.Response.Header.Set(key, val)
 	return nil
 }
 
@@ -226,11 +249,12 @@ type cookieSetter interface {
 // response or in the ResponseWriter adapter's pending header map.
 func (c *context) cookieAlreadyWritten(name string) bool {
 	found := false
-	c.fctx.Response.Header.VisitAllCookie(func(key, _ []byte) {
+	for key := range c.fctx.Response.Header.Cookies() {
 		if string(key) == name {
 			found = true
+			break
 		}
-	})
+	}
 	if found {
 		return true
 	}

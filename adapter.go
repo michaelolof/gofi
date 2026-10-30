@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/michaelolof/gofi/utils"
@@ -17,12 +18,36 @@ type ResponseWriter interface {
 	http.ResponseWriter
 }
 
-// responseWriter implements ResponseWriter by wrapping fasthttp.RequestCtx
+// responseWriter implements ResponseWriter by wrapping fasthttp.RequestCtx.
+//
+// Header() is a view of the response headers: on first access it is filled
+// with the headers already set on the native response, except headers the
+// transport manages (Content-Length, Connection, Date, Server, Trailer,
+// Transfer-Encoding) and native cookies. The view is written back once, on the
+// first Write or WriteHeader or when the request finishes, as net/http
+// commits headers. Only keys changed through the view are written back:
+// a changed key replaces the native values of that name, a deleted key removes
+// them, and Set-Cookie values are always added. Edits made through the view
+// after it is written back have no effect.
 type responseWriter struct {
-	ctx        *fasthttp.RequestCtx
-	header     http.Header
-	headerSync bool // whether headers have been synced to fasthttp
-	headerInit bool // whether header map was allocated
+	ctx            *fasthttp.RequestCtx
+	header         http.Header
+	initial        http.Header // native headers copied into header on first access
+	headerSync     bool        // whether headers have been synced to fasthttp
+	headerInit     bool        // whether header map was allocated
+	rejectedHeader bool        // whether a header containing CR, LF or NUL was dropped
+}
+
+// transportManagedHeaders are owned by fasthttp's response framing and are
+// not exposed through, or written back from, the Header() view.
+var transportManagedHeaders = map[string]bool{
+	"Connection":        true,
+	"Content-Length":    true,
+	"Date":              true,
+	"Server":            true,
+	"Set-Cookie":        true,
+	"Trailer":           true,
+	"Transfer-Encoding": true,
 }
 
 func newResponseWriter(ctx *fasthttp.RequestCtx) *responseWriter {
@@ -36,12 +61,23 @@ func (w *responseWriter) reset(ctx *fasthttp.RequestCtx) {
 	w.ctx = ctx
 	w.headerSync = false
 	w.headerInit = false
+	w.rejectedHeader = false
 	w.header = nil
+	w.initial = nil
 }
 
 func (w *responseWriter) Header() http.Header {
 	if !w.headerInit {
 		w.header = make(http.Header)
+		w.initial = make(http.Header)
+		for key, value := range w.ctx.Response.Header.All() {
+			name := http.CanonicalHeaderKey(string(key))
+			if transportManagedHeaders[name] {
+				continue
+			}
+			w.header.Add(name, string(value))
+			w.initial.Add(name, string(value))
+		}
 		w.headerInit = true
 	}
 	return w.header
@@ -66,11 +102,38 @@ func (w *responseWriter) syncHeaders() {
 		return // no headers ever set, or already flushed to fasthttp
 	}
 	w.headerSync = true
-	for key, vals := range w.header {
-		for _, val := range vals {
-			w.ctx.Response.Header.Add(key, val)
+	native := &w.ctx.Response.Header
+	for key := range w.initial {
+		if _, ok := w.header[key]; !ok {
+			native.Del(key)
 		}
 	}
+	for key, vals := range w.header {
+		if !validHeaderField(key) {
+			w.rejectedHeader = true
+			continue
+		}
+		cookies := http.CanonicalHeaderKey(key) == "Set-Cookie"
+		if !cookies && slices.Equal(vals, w.initial[key]) {
+			continue // unchanged through the view; keep later native writes
+		}
+		if !cookies {
+			native.Del(key)
+		}
+		for _, val := range vals {
+			if !validHeaderField(val) {
+				w.rejectedHeader = true
+				continue
+			}
+			native.Add(key, val)
+		}
+	}
+}
+
+// validHeaderField reports whether a header name or value is free of CR, LF
+// and NUL, which would otherwise allow response splitting.
+func validHeaderField(s string) bool {
+	return !strings.ContainsAny(s, "\r\n\x00")
 }
 
 // Request wraps a fasthttp.RequestCtx to provide *http.Request-like access for backward compatibility.
@@ -176,16 +239,13 @@ func newRequest(ctx *fasthttp.RequestCtx, pattern string) *Request {
 		remoteAddr = ip.String()
 	}
 
-	var proto string
-	var protoMajor, protoMinor int
-	if ctx.IsTLS() {
-		proto = "HTTP/2.0"
-		protoMajor = 2
+	// fasthttp serves HTTP/1.x only; report the protocol from the request
+	// line rather than inferring it from TLS.
+	proto := "HTTP/1.1"
+	protoMajor, protoMinor := 1, 1
+	if !ctx.Request.Header.IsHTTP11() {
+		proto = "HTTP/1.0"
 		protoMinor = 0
-	} else {
-		proto = "HTTP/1.1"
-		protoMajor = 1
-		protoMinor = 1
 	}
 
 	return &Request{
@@ -297,8 +357,18 @@ func (r *Request) PostFormValue(key string) string {
 	return ""
 }
 
-// ParseMultipartForm parses the multipart form data from the request body.
+// ParseMultipartForm parses query and URL-encoded body values into Form and
+// PostForm and, for multipart requests, the multipart form data as well.
+//
+// maxMemory is accepted for net/http compatibility but is not applied:
+// fasthttp has already buffered the request body (bounded by the server body
+// limit) and keeps up to 16 MiB of parts in memory before using temp files.
+// It returns fasthttp.ErrNoMultipartForm for non-multipart requests, after
+// populating Form and PostForm.
 func (r *Request) ParseMultipartForm(maxMemory int64) error {
+	if err := r.ParseForm(); err != nil {
+		return err
+	}
 	if r.parsedMultipart {
 		return nil
 	}
@@ -309,15 +379,36 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
 		return err
 	}
 	r.MultipartForm = form
+	for key, values := range form.Value {
+		for _, value := range values {
+			r.PostForm.Add(key, value)
+			r.Form.Add(key, value)
+		}
+	}
 	return nil
 }
 
 // WrapMiddleware converts a standard net/http middleware into a Gofi MiddlewareFunc.
-// This enables backward compatibility with existing net/http middleware libraries.
+//
+// The wrapped middleware receives a server-style *http.Request carrying the
+// method, target, headers, host, remote address and TLS state. When it calls
+// the next handler, the request it passes is propagated to downstream Gofi
+// handlers as follows: its context becomes c.Context() (so values attached
+// with r.WithContext, such as an authenticated principal, are visible), and
+// its headers replace the request headers. Changes to the method, URL, body
+// or remote address are not propagated. Flusher, Hijacker and Pusher are not
+// supported.
 func WrapMiddleware(mw func(http.Handler) http.Handler) MiddlewareFunc {
 	return func(c Context) error {
 		var innerErr error
 		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r != nil {
+				if err := SetRequestContext(c, r.Context()); err != nil {
+					innerErr = err
+					return
+				}
+				syncRequestHeaders(c, r.Header, r.Host)
+			}
 			innerErr = c.Next()
 		})
 
@@ -330,8 +421,39 @@ func WrapMiddleware(mw func(http.Handler) http.Handler) MiddlewareFunc {
 			return c.Next()
 		}
 
-		wrapped.ServeHTTP(rw, nil)
+		r, err := convertFasthttpToHTTPRequest(c)
+		if err != nil {
+			return NewHTTPError(http.StatusBadRequest, http.StatusText(http.StatusBadRequest))
+		}
+		wrapped.ServeHTTP(rw, r)
 		return innerErr
+	}
+}
+
+// syncRequestHeaders makes the fasthttp request headers match h, as modified
+// by a wrapped net/http middleware.
+func syncRequestHeaders(c Context, h http.Header, host string) {
+	req := &c.Request().FastHTTPContext().Request
+	var stale []string
+	for key := range req.Header.All() {
+		name := http.CanonicalHeaderKey(string(key))
+		if name != "Host" && h[name] == nil {
+			stale = append(stale, name)
+		}
+	}
+	for _, name := range stale {
+		req.Header.Del(name)
+	}
+	for name, values := range h {
+		req.Header.Del(name)
+		for _, v := range values {
+			if validHeaderField(name) && validHeaderField(v) {
+				req.Header.Add(name, v)
+			}
+		}
+	}
+	if host != "" && validHeaderField(host) {
+		req.Header.SetHost(host)
 	}
 }
 

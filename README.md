@@ -180,14 +180,23 @@ You can define a custom error handler for all routes using `UseErrorHandler`:
 
 ```go
 r.UseErrorHandler(func(err error, c gofi.Context) {
-    // Custom error handling logic
+    // Log the full error; send clients only what is safe for them to see.
     log.Printf("Error occurred: %v", err)
-    c.Send(http.StatusInternalServerError, map[string]string{
-        "error": "Internal Server Error",
-        "details": err.Error(),
-    })
+    c.SendString(http.StatusInternalServerError, "Internal Server Error")
 })
 ```
+
+Without a custom handler, Gofi responds with a JSON envelope (`{"status":"error","statusCode":...,"message":...}`, `Content-Type: application/json`):
+
+- request validation errors return `400` with the validation message;
+- a `gofi.NewHTTPError` with a `4xx` code returns that code and its message;
+- any other error, including a `5xx` `HTTPError`, returns its status with the generic status text, and the full error is logged.
+
+A panic in a handler, middleware or error handler is recovered by the router: it is logged and the client receives a generic `500`, even without the `Recover` middleware.
+
+### Registration happens before serving
+
+Register routes, middleware, validators, body parsers and configuration before the server starts. `Listen`, `ListenTLS`, `ListenTLSMutual` and `Handler()` seal the router (and every router derived from it with `Route`, `Group` or `With`); later registration panics, because requests read these tables without locks. `gofi.Seal(r)` seals earlier. `Use` applies only to routes registered after it, and logs a warning when routes already exist.
 
 ### Plugins
 
@@ -658,7 +667,7 @@ func main() {
 
 ## Streaming (Server-Sent Events)
 
-Gofi provides an ergonomic `SendStream` helper that takes the status code, schema definition and securely propagates network disconnects up to the global HTTP error handler.
+Gofi provides an ergonomic `SendStream` helper that takes the status code and schema definition, validates the response headers, and streams each flushed chunk to the client as the callback writes it.
 
 Use streaming when:
 
@@ -704,7 +713,9 @@ Operational notes:
 
 - `SendStream` validates response headers and cookies before the stream body starts.
 - The stream writer is responsible for writing event frames and calling `Flush()`.
-- Write and disconnect errors should be returned from the callback so the caller can observe stream failure.
+- `SendStream` returns as soon as the stream is registered; the callback runs on its own goroutine after the handler returns. The context, path parameters and bound request data stay valid for the callback until it returns.
+- Write and disconnect errors should be returned from the callback. Register `gofi.OnStreamError(c, fn)` before `SendStream` to receive them; otherwise they are logged.
+- Streamed responses bypass the `Cache` and `ETag` middleware and are rejected under `Timeout`.
 - For SSE, the response schema should normally declare `content-type: text/event-stream`.
 
 Recommended build order for a streaming route:
@@ -882,7 +893,9 @@ resp, err := r.Test(gofi.TestOptions{
 })
 ```
 
-If the handler panics, `Test` recovers, invokes the configured error handler, and returns a `500` response alongside a non-nil error.
+If the handler panics, `Test` returns the same generic `500` response a live server sends, alongside a non-nil error describing the panic.
+
+If the request cannot be parsed (for example, a header beyond the server's limits), `Test` and `Inject` return an error and the handler does not run, matching a live server that rejects the request.
 
 ### TestOptions, InjectOptions & InjectResponse
 

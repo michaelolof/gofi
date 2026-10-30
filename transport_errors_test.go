@@ -390,6 +390,9 @@ func TestNativeListenerConstructionWiring(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			m := newRouter()
 			m.Configure(Config{BodyLimit: 32})
+			// Listening seals the router, so register the interceptor first.
+			var intercepted int
+			m.UseErrorHandler(func(err error, c Context) { intercepted++ })
 			// Fail binding deterministically, then inspect the constructed server.
 			// Transport behavior itself is exercised on pre-bound TCP/TLS listeners above.
 			var err error
@@ -404,15 +407,13 @@ func TestNativeListenerConstructionWiring(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected invalid address to fail")
 			}
-			s := m.activeServer
+			s := m.lifecycle.server()
 			if s == nil || s.server.ErrorHandler == nil || s.server.MaxRequestBodySize != 32 {
 				t.Fatal("native listener is missing shared server configuration")
 			}
-			var intercepted int
-			m.UseErrorHandler(func(err error, c Context) { intercepted++ })
 			s.server.ErrorHandler(new(fasthttp.RequestCtx), fasthttp.ErrBodyTooLarge)
 			if intercepted != 1 {
-				t.Error("native listener did not use the current interceptor")
+				t.Error("native listener did not use the configured interceptor")
 			}
 		})
 	}

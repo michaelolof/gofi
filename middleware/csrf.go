@@ -5,7 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
+	"encoding/base64"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,156 +17,157 @@ import (
 
 // CSRFConfig defines the config for the CSRF middleware.
 type CSRFConfig struct {
+	// SigningKey signs tokens. Required: at least 32 bytes, identical on
+	// every instance that serves the same users. Rotate it deliberately;
+	// rotation invalidates outstanding tokens.
+	SigningKey []byte
+
+	// SessionID returns the identifier of the caller's authenticated session,
+	// or "" for anonymous requests. Required. A token is valid only for the
+	// session it was issued to, so a token planted by another site, or
+	// issued before login, is rejected.
+	SessionID func(c gofi.Context) string
+
+	// TrustedOrigins lists additional origins (scheme://host[:port]) allowed
+	// to send unsafe requests. An unsafe request whose Origin header is
+	// neither its own origin nor listed is rejected; requests without an
+	// Origin header (non-browser clients) are checked by token only.
+	TrustedOrigins []string
+
 	// KeyLookup is a string in the form of "<source>:<key>" that is used
 	// to extract token from the request.
 	// Optional. Default: "header:X-CSRF-Token"
-	// Possible values:
-	// - "header:<name>"
-	// - "query:<name>"
-	// - "param:<name>"
-	// - "form:<name>"
+	// Possible values: "header:<name>", "query:<name>", "param:<name>", "form:<name>"
 	KeyLookup string
 
-	// CookieName is the name of the session cookie.
+	// CookieName is the name of the CSRF cookie.
 	// Optional. Default: "csrf_"
 	CookieName string
 
-	// CookieDomain is the domain of the session cookie.
+	// CookieDomain is the domain of the CSRF cookie.
 	// Optional. Default: ""
 	CookieDomain string
 
-	// CookiePath is the path of the session cookie.
-	// Optional. Default: ""
+	// CookiePath is the path of the CSRF cookie.
+	// Optional. Default: "/"
 	CookiePath string
 
-	// CookieSecure indicates if the session cookie is secure.
+	// CookieSecure forces the Secure attribute. It is also set whenever the
+	// request scheme (gofi.Scheme) is https.
 	// Optional. Default: false
 	CookieSecure bool
 
-	// CookieHTTPOnly indicates if the session cookie is HTTP only.
+	// CookieHTTPOnly hides the cookie from JavaScript. Leave it false when
+	// client code reads the token from the cookie to send it back.
 	// Optional. Default: false
 	CookieHTTPOnly bool
 
-	// CookieSameSite indicates the SameSite attribute of the session cookie.
+	// CookieSameSite is Lax, Strict or None (None requires CookieSecure).
 	// Optional. Default: "Lax"
 	CookieSameSite string
 
-	// Expiration is the duration before the CSRF token will expire.
+	// Expiration is the cookie lifetime and the default token lifetime.
 	// Optional. Default: 1 * time.Hour
 	Expiration time.Duration
 
-	// KeyGenerator creates a new CSRF token
-	// Optional. Default: random 32 byte hex string
-	KeyGenerator func() string
+	// TokenTTL bounds token age independently of the cookie lifetime.
+	// Optional. Default: Expiration
+	TokenTTL time.Duration
 
-	// ErrorHandler is executed when an extracted CSRF token is invalid.
+	// ErrorHandler is executed when a request fails the CSRF check.
 	// Optional. Default: returns 403 Forbidden.
 	ErrorHandler gofi.HandlerFunc
-
-	// SignTokens enables signed CSRF tokens using HMAC-SHA256.
-	// Optional. Default: false
-	SignTokens bool
-
-	// SigningKey is used to sign/verify CSRF tokens when SignTokens is enabled.
-	// If empty and SignTokens is true, an ephemeral key is generated at startup.
-	SigningKey []byte
 }
 
-// DefaultCSRFGenerator generates a random 32-byte hex string
-func DefaultCSRFGenerator() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func defaultCSRFSigningKey() []byte {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return b
-}
-
-func signCSRFToken(raw string, key []byte) string {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(raw))
-	sig := mac.Sum(nil)
-	return raw + "." + hex.EncodeToString(sig)
-}
-
-func verifySignedCSRFToken(signed string, key []byte) bool {
-	idx := strings.LastIndexByte(signed, '.')
-	if idx <= 0 || idx == len(signed)-1 {
-		return false
-	}
-
-	raw := signed[:idx]
-	sigHex := signed[idx+1:]
-	sig, err := hex.DecodeString(sigHex)
-	if err != nil {
-		return false
-	}
-
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(raw))
-	expected := mac.Sum(nil)
-	return subtle.ConstantTimeCompare(sig, expected) == 1
-}
-
-// CSRFConfigDefault is the default config
+// CSRFConfigDefault holds the defaults applied to optional fields.
 var CSRFConfigDefault = CSRFConfig{
 	KeyLookup:      "header:X-CSRF-Token",
 	CookieName:     "csrf_",
+	CookiePath:     "/",
 	CookieSameSite: "Lax",
 	Expiration:     1 * time.Hour,
-	KeyGenerator:   DefaultCSRFGenerator,
 	ErrorHandler: func(c gofi.Context) error {
 		return gofi.NewHTTPError(http.StatusForbidden, "invalid CSRF token")
 	},
 }
 
-// CSRF creates a new middleware handler
-func CSRF(config ...CSRFConfig) gofi.MiddlewareFunc {
-	// Set default config
-	cfg := CSRFConfigDefault
+const csrfTokenVersion = "v1"
 
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
-
-		if cfg.KeyLookup == "" {
-			cfg.KeyLookup = CSRFConfigDefault.KeyLookup
-		}
-		if cfg.CookieName == "" {
-			cfg.CookieName = CSRFConfigDefault.CookieName
-		}
-		if cfg.Expiration == 0 {
-			cfg.Expiration = CSRFConfigDefault.Expiration
-		}
-		if cfg.KeyGenerator == nil {
-			cfg.KeyGenerator = CSRFConfigDefault.KeyGenerator
-		}
-		if cfg.ErrorHandler == nil {
-			cfg.ErrorHandler = CSRFConfigDefault.ErrorHandler
-		}
-		if cfg.CookieSameSite == "" {
-			cfg.CookieSameSite = CSRFConfigDefault.CookieSameSite
+// CSRF creates a CSRF middleware using session-bound, expiring, signed
+// tokens (signed double-submit). The token is set in a cookie on every
+// response, and unsafe requests (anything but GET, HEAD, OPTIONS, TRACE) must
+// send the same token through KeyLookup, from an allowed origin. Token
+// format: v1.<expiry unix seconds>.<random>.<signature>, where the HMAC-SHA256
+// signature covers the version, expiry, random value and session ID.
+func CSRF(cfg CSRFConfig) (gofi.MiddlewareFunc, error) {
+	if len(cfg.SigningKey) < 32 {
+		return nil, errors.New("gofi/middleware: CSRF SigningKey must be at least 32 bytes")
+	}
+	if cfg.SessionID == nil {
+		return nil, errors.New("gofi/middleware: CSRF SessionID is required")
+	}
+	d := CSRFConfigDefault
+	if cfg.KeyLookup == "" {
+		cfg.KeyLookup = d.KeyLookup
+	}
+	if cfg.CookieName == "" {
+		cfg.CookieName = d.CookieName
+	}
+	if cfg.CookiePath == "" {
+		cfg.CookiePath = d.CookiePath
+	}
+	if cfg.CookieSameSite == "" {
+		cfg.CookieSameSite = d.CookieSameSite
+	}
+	if cfg.Expiration < 0 || cfg.TokenTTL < 0 {
+		return nil, errors.New("gofi/middleware: negative CSRF duration")
+	}
+	if cfg.Expiration == 0 {
+		cfg.Expiration = d.Expiration
+	}
+	if cfg.TokenTTL == 0 {
+		cfg.TokenTTL = cfg.Expiration
+	}
+	if cfg.ErrorHandler == nil {
+		cfg.ErrorHandler = d.ErrorHandler
+	}
+	for name, value := range map[string]string{
+		"CookieName": cfg.CookieName, "CookieDomain": cfg.CookieDomain,
+		"CookiePath": cfg.CookiePath, "CookieSameSite": cfg.CookieSameSite,
+	} {
+		if strings.ContainsAny(value, ";,\r\n\x00 ") {
+			return nil, errors.New("gofi/middleware: invalid CSRF " + name)
 		}
 	}
-
-	if cfg.SignTokens && len(cfg.SigningKey) == 0 {
-		cfg.SigningKey = defaultCSRFSigningKey()
+	var sameSite http.SameSite
+	switch strings.ToLower(cfg.CookieSameSite) {
+	case "lax":
+		sameSite = http.SameSiteLaxMode
+	case "strict":
+		sameSite = http.SameSiteStrictMode
+	case "none":
+		if !cfg.CookieSecure {
+			return nil, errors.New("gofi/middleware: CSRF SameSite=None requires CookieSecure")
+		}
+		sameSite = http.SameSiteNoneMode
+	default:
+		return nil, errors.New("gofi/middleware: CSRF CookieSameSite must be Lax, Strict or None")
+	}
+	source, key, ok := strings.Cut(cfg.KeyLookup, ":")
+	if !ok || key == "" {
+		return nil, errors.New("gofi/middleware: CSRF KeyLookup must be <source>:<key>")
+	}
+	switch source {
+	case "header", "query", "param", "form":
+	default:
+		return nil, errors.New("gofi/middleware: CSRF KeyLookup source must be header, query, param or form")
+	}
+	trusted := map[string]bool{}
+	for _, o := range cfg.TrustedOrigins {
+		trusted[strings.TrimSuffix(o, "/")] = true
 	}
 
-	// Parse KeyLookup
-	source := "header"
-	key := "X-CSRF-Token"
-	lookupParts := strings.SplitN(cfg.KeyLookup, ":", 2)
-	if len(lookupParts) == 2 {
-		source = lookupParts[0]
-		key = lookupParts[1]
-	}
-
-	// Internal extractor function
-	extractToken := func(c gofi.Context) string {
+	extract := func(c gofi.Context) string {
 		switch source {
 		case "header":
 			return c.HeaderVal(key)
@@ -173,88 +175,80 @@ func CSRF(config ...CSRFConfig) gofi.MiddlewareFunc {
 			return c.Query(key)
 		case "param":
 			return c.Param(key)
-		case "form":
+		default:
 			_ = c.Request().ParseForm()
 			return c.Request().PostForm.Get(key)
 		}
-		return ""
+	}
+	sign := func(expiry, random, session string) string {
+		mac := hmac.New(sha256.New, cfg.SigningKey)
+		// Length-prefix each part so no two inputs share an encoding.
+		for _, part := range []string{csrfTokenVersion, expiry, random, session} {
+			mac.Write([]byte(strconv.Itoa(len(part)) + ":" + part))
+		}
+		return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	}
+	issue := func(session string) string {
+		b := make([]byte, 32)
+		_, _ = rand.Read(b)
+		random := base64.RawURLEncoding.EncodeToString(b)
+		expiry := strconv.FormatInt(time.Now().Add(cfg.TokenTTL).Unix(), 10)
+		return strings.Join([]string{csrfTokenVersion, expiry, random, sign(expiry, random, session)}, ".")
+	}
+	valid := func(token, session string) bool {
+		if len(token) > 256 {
+			return false
+		}
+		parts := strings.Split(token, ".")
+		if len(parts) != 4 || parts[0] != csrfTokenVersion {
+			return false
+		}
+		expiry, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || time.Now().Unix() > expiry {
+			return false
+		}
+		return subtle.ConstantTimeCompare([]byte(sign(parts[1], parts[2], session)), []byte(parts[3])) == 1
 	}
 
 	return func(c gofi.Context) error {
-		// Action safe methods don't need CSRF validation, but we still generate/refresh the token
 		method := c.Method()
-		isSafe := method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions || method == http.MethodTrace
+		safe := method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions || method == http.MethodTrace
+		session := cfg.SessionID(c)
 
-		// 1. Check if the token already exists in the cookie
-		var token string
-		cookieValid := false
-		cookie, err := c.Request().Cookie(cfg.CookieName)
-		if err == nil && cookie != nil && cookie.Value != "" {
-			token = cookie.Value
-			if cfg.SignTokens {
-				cookieValid = verifySignedCSRFToken(token, cfg.SigningKey)
-			} else {
-				cookieValid = true
-			}
+		cookieToken := ""
+		if cookie, err := c.Request().Cookie(cfg.CookieName); err == nil && valid(cookie.Value, session) {
+			cookieToken = cookie.Value
 		}
 
-		// 2. Generate a new token if missing/invalid
-		if token == "" || !cookieValid {
-			raw := cfg.KeyGenerator()
-			if cfg.SignTokens {
-				token = signCSRFToken(raw, cfg.SigningKey)
-			} else {
-				token = raw
-			}
-		}
-
-		// 3. For state-changing methods, validate the token against the extracted client token
-		if !isSafe {
-			clientToken := extractToken(c)
-
-			if cfg.SignTokens {
-				if !cookieValid {
-					return cfg.ErrorHandler(c)
-				}
-				if clientToken == "" || !verifySignedCSRFToken(clientToken, cfg.SigningKey) {
+		if !safe {
+			if origin := c.HeaderVal("Origin"); origin != "" {
+				self := gofi.Scheme(c) + "://" + gofi.Host(c)
+				if origin != self && !trusted[origin] {
 					return cfg.ErrorHandler(c)
 				}
 			}
-
-			// Constant time comparison to prevent timing attacks
-			if clientToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(clientToken)) != 1 {
+			clientToken := extract(c)
+			if cookieToken == "" || clientToken == "" ||
+				subtle.ConstantTimeCompare([]byte(cookieToken), []byte(clientToken)) != 1 {
 				return cfg.ErrorHandler(c)
 			}
 		}
 
-		// 4. Set the CSRF token in the response cookie so the client has it for future requests
-		// Using fast builtin header formatting in gofi context
-		cookieHeader := cfg.CookieName + "=" + token + "; Path="
-
-		if cfg.CookiePath != "" {
-			cookieHeader += cfg.CookiePath
-		} else {
-			cookieHeader += "/"
+		token := cookieToken
+		if token == "" {
+			token = issue(session)
 		}
-
-		if cfg.CookieDomain != "" {
-			cookieHeader += "; Domain=" + cfg.CookieDomain
+		cookie := &http.Cookie{
+			Name:     cfg.CookieName,
+			Value:    token,
+			Path:     cfg.CookiePath,
+			Domain:   cfg.CookieDomain,
+			MaxAge:   int(cfg.Expiration.Seconds()),
+			HttpOnly: cfg.CookieHTTPOnly,
+			Secure:   cfg.CookieSecure || gofi.Scheme(c) == "https",
+			SameSite: sameSite,
 		}
-
-		// Set Expiration using Max-Age
-		cookieHeader += "; Max-Age=" + strconv.Itoa(int(cfg.Expiration.Seconds()))
-
-		if cfg.CookieHTTPOnly {
-			cookieHeader += "; HttpOnly"
-		}
-		secureCookie := cfg.CookieSecure || c.Request().Context().IsTLS()
-		if secureCookie {
-			cookieHeader += "; Secure"
-		}
-		cookieHeader += "; SameSite=" + cfg.CookieSameSite
-
-		c.Writer().Header().Add("Set-Cookie", cookieHeader)
-
+		c.Writer().Header().Add("Set-Cookie", cookie.String())
 		return c.Next()
-	}
+	}, nil
 }

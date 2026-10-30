@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/url"
 	"strings"
 
 	"github.com/michaelolof/gofi"
@@ -46,17 +47,7 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 	}
 
 	// Pre-process wildcard rules internally to split exact vs wildcard matching
-	exactRules := make(map[string]string)
-	wildcardRules := make(map[string]string)
-
-	for pattern, replacement := range cfg.Rules {
-		if strings.HasSuffix(pattern, "/*") {
-			prefix := pattern[:len(pattern)-2]
-			wildcardRules[prefix] = replacement
-		} else {
-			exactRules[pattern] = replacement
-		}
-	}
+	exactRules, wildcardRules := compilePrefixRules(cfg.Rules)
 
 	return func(c gofi.Context) error {
 		path := c.Path()
@@ -70,13 +61,17 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 		// 2. Check wildcard matches
 		// E.g., rule "/old/*" -> "/new/$1"
 		// If path is "/old/docs", prefix matched is "/old", capture is "/docs"
-		for prefix, replacement := range wildcardRules {
-			if strings.HasPrefix(path, prefix) {
+		// Rules match on segment boundaries, longest prefix first.
+		if rule, ok := matchPrefixRule(wildcardRules, path); ok {
+			prefix, replacement := rule.prefix, rule.replacement
+			{
 				// The wildcard capture starts right after the prefix
 				capture := path[len(prefix):]
 
-				// Apply capture to replacement template
-				target := strings.ReplaceAll(replacement, "$1", capture)
+				// Apply capture to replacement template. The capture comes from the
+				// decoded request path, so re-escape it: CR/LF would otherwise split
+				// the response, and '\', '?' or '#' would change the target's meaning.
+				target := strings.ReplaceAll(replacement, "$1", escapeRedirectCapture(capture))
 
 				// Strip double slashes just in case the template was "/new$1" and capture was "/docs"
 				target = strings.ReplaceAll(target, "//", "/")
@@ -88,4 +83,10 @@ func Redirect(config ...RedirectConfig) gofi.MiddlewareFunc {
 
 		return c.Next()
 	}
+}
+
+// escapeRedirectCapture percent-encodes a decoded path capture for use in a
+// Location header, keeping '/' separators.
+func escapeRedirectCapture(capture string) string {
+	return (&url.URL{Path: capture}).EscapedPath()
 }

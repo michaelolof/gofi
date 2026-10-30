@@ -50,7 +50,6 @@ const (
 	latitudeRegexString              = "^[-+]?([1-8]?\\d(\\.\\d+)?|90(\\.0+)?)$"
 	longitudeRegexString             = "^[-+]?(180(\\.0+)?|((1[0-7]\\d)|([1-9]?\\d))(\\.\\d+)?)$"
 	sSNRegexString                   = `^[0-9]{3}[ -]?(0[1-9]|[1-9][0-9])[ -]?([1-9][0-9]{3}|[0-9][1-9][0-9]{2}|[0-9]{2}[1-9][0-9]|[0-9]{3}[1-9])$`
-	hostnameRegexStringRFC952        = `^[a-zA-Z]([a-zA-Z0-9\-]+[\.]?)*[a-zA-Z0-9]$`                                                                   // https://tools.ietf.org/html/rfc952
 	hostnameRegexStringRFC1123       = `^([a-zA-Z0-9]{1}[a-zA-Z0-9-]{0,62}){1}(\.[a-zA-Z0-9]{1}[a-zA-Z0-9-]{0,62})*?$`                                 // accepts hostname starting with a digit https://tools.ietf.org/html/rfc1123
 	fqdnRegexStringRFC1123           = `^([a-zA-Z0-9]{1}[a-zA-Z0-9-]{0,62})(\.[a-zA-Z0-9]{1}[a-zA-Z0-9-]{0,62})*?(\.[a-zA-Z]{1}[a-zA-Z0-9]{0,62})\.?$` // same as hostnameRegexStringRFC1123 but must contain a non numerical TLD (possibly ending with '.')
 	btcAddressRegexString            = `^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$`                                                                             // bitcoin address
@@ -63,11 +62,9 @@ const (
 	hTMLEncodedRegexString           = `&#[x]?([0-9a-fA-F]{2})|(&gt)|(&lt)|(&quot)|(&amp)+[;]?`
 	hTMLRegexString                  = `<[/]?([a-zA-Z]+).*?>`
 	jWTRegexString                   = "^[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]*$"
-	splitParamsRegexString           = `'[^']*'|\S+`
 	bicRegexString                   = `^[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?$`
 	semverRegexString                = `^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$` // numbered capture groups https://semver.org/
-	dnsRegexStringRFC1035Label       = "^[a-z]([-a-z0-9]*[a-z0-9]){0,62}$"
-	cveRegexString                   = `^CVE-(1999|2\d{3})-(0[^0]\d{2}|0\d[^0]\d{1}|0\d{2}[^0]|[1-9]{1}\d{3,})$` // CVE Format Id https://cve.mitre.org/cve/identifiers/syntaxchange.html
+	cveRegexString                   = `^CVE-(1999|2\d{3})-(0[^0]\d{2}|0\d[^0]\d{1}|0\d{2}[^0]|[1-9]{1}\d{3,})$`                                                                                                             // CVE Format Id https://cve.mitre.org/cve/identifiers/syntaxchange.html
 	mongodbRegexString               = "^[a-f\\d]{24}$"
 	cronRegexString                  = `(@(annually|yearly|monthly|weekly|daily|hourly|reboot))|(@every (\d+(ns|us|µs|ms|s|m|h))+)|((((\d+,)+\d+|(\d+(\/|-)\d+)|\d+|\*) ?){5,7})`
 	spicedbIDRegexString             = `^(([a-zA-Z0-9/_|\-=+]{1,})|\*)$`
@@ -123,7 +120,6 @@ var (
 	LatitudeRegex              = regexp.MustCompile(latitudeRegexString)
 	LongitudeRegex             = regexp.MustCompile(longitudeRegexString)
 	SSNRegex                   = regexp.MustCompile(sSNRegexString)
-	HostnameRegexRFC952        = regexp.MustCompile(hostnameRegexStringRFC952)
 	HostnameRegexRFC1123       = regexp.MustCompile(hostnameRegexStringRFC1123)
 	FqdnRegexRFC1123           = regexp.MustCompile(fqdnRegexStringRFC1123)
 	BtcAddressRegex            = regexp.MustCompile(btcAddressRegexString)
@@ -134,10 +130,8 @@ var (
 	HTMLEncodedRegex           = regexp.MustCompile(hTMLEncodedRegexString)
 	HTMLRegex                  = regexp.MustCompile(hTMLRegexString)
 	JWTRegex                   = regexp.MustCompile(jWTRegexString)
-	SplitParamsRegex           = regexp.MustCompile(splitParamsRegexString)
 	BicRegex                   = regexp.MustCompile(bicRegexString)
 	SemverRegex                = regexp.MustCompile(semverRegexString)
-	DnsRegexRFC1035Label       = regexp.MustCompile(dnsRegexStringRFC1035Label)
 	CveRegex                   = regexp.MustCompile(cveRegexString)
 	MongodbRegex               = regexp.MustCompile(mongodbRegexString)
 	CronRegex                  = regexp.MustCompile(cronRegexString)

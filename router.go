@@ -26,8 +26,9 @@ type Router interface {
 	// Route mounts a sub-Router along a `pattern` string.
 	Route(pattern string, fn func(r Router)) Router
 
-	// Group adds a new inline router along the current routing path
-	// with a fresh middleware stack for the inline router
+	// Group adds a new inline router along the current routing path. The
+	// inline router starts with a copy of the current middleware stack;
+	// middleware it adds does not affect the parent or sibling routers.
 	Group(fn func(r Router)) Router
 
 	// Use appends one or more middleware onto the router stack
@@ -58,11 +59,16 @@ type Router interface {
 	// Shutdown gracefully shuts down the server, waiting for active connections to finish.
 	Shutdown() error
 
-	// ShutdownWithContext gracefully shuts down the server, forcefully closing after context is canceled.
+	// ShutdownWithContext stops accepting connections and waits for open ones
+	// to close until ctx is done. If ctx ends first it returns ctx.Err();
+	// handlers and hijacked connections that are still running are not stopped.
 	ShutdownWithContext(ctx stdcontext.Context) error
 
 	// Handler returns the underlying fasthttp.RequestHandler, allowing the router to be
-	// embedded within custom fasthttp.Server configurations natively.
+	// embedded within custom fasthttp.Server configurations natively. The
+	// caller then owns the transport: body limit (Config.BodyLimit does not
+	// apply), timeouts, connection limits, ErrorHandler for request-read
+	// failures, and shutdown.
 	Handler() fasthttp.RequestHandler
 
 	// GlobalStore returns the router-wide, shared key/value store. It is not

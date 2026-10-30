@@ -18,11 +18,23 @@ import (
 type FasthttpServer struct {
 	mux    *serveMux
 	server *fasthttp.Server
+	// bodyCeiling is the ServerOptions body limit; zero without ServerOptions.
+	bodyCeiling int
 }
 
-// NewFasthttpServer creates a FasthttpServer backed by a new serveMux.
-func NewFasthttpServer() *FasthttpServer {
-	return newRouter().newFasthttpServer()
+// NewFasthttpServer creates a FasthttpServer backed by a new router. Without
+// ServerOptions, fasthttp's transport defaults apply, which leave timeouts and
+// connection counts unbounded. Invalid options panic; check them first with
+// ValidateServerOptions when they come from configuration.
+func NewFasthttpServer(opts ...ServerOptions) *FasthttpServer {
+	if len(opts) == 0 {
+		return newRouter().newFasthttpServer()
+	}
+	s, err := newFasthttpServerWithOptions(opts[0])
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 // newFasthttpServer keeps all native listener paths wired identically.
@@ -47,7 +59,10 @@ func (s *FasthttpServer) Router() Router {
 
 // Listen starts the fasthttp server on the given address (e.g. ":4000").
 func (s *FasthttpServer) Listen(addr string) error {
-	ln, err := net.Listen("tcp4", addr)
+	if err := s.applyRouterConfig(); err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -56,11 +71,24 @@ func (s *FasthttpServer) Listen(addr string) error {
 
 // ListenTLS starts the fasthttp server with TLS encryption.
 func (s *FasthttpServer) ListenTLS(addr, certFile, keyFile string) error {
-	return s.server.ListenAndServeTLS(listenAddr(addr), certFile, keyFile)
+	if err := s.applyRouterConfig(); err != nil {
+		return err
+	}
+	if s.server.TLSConfig == nil {
+		s.server.TLSConfig = serverTLSConfig(nil)
+	}
+	ln, err := net.Listen("tcp", listenAddr(addr))
+	if err != nil {
+		return err
+	}
+	return s.server.ServeTLS(ln, certFile, keyFile)
 }
 
 // ListenTLSMutual starts the fasthttp server with mutual TLS (mTLS) authentication.
 func (s *FasthttpServer) ListenTLSMutual(addr, certFile, keyFile, clientCertFile string) error {
+	if err := s.applyRouterConfig(); err != nil {
+		return err
+	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return fmt.Errorf("gofi: cannot load TLS certificate: %w", err)
@@ -76,13 +104,12 @@ func (s *FasthttpServer) ListenTLSMutual(addr, certFile, keyFile, clientCertFile
 		return fmt.Errorf("gofi: failed to append client cert to pool")
 	}
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    clientCertPool,
-	}
+	tlsConfig := serverTLSConfig(s.server.TLSConfig)
+	tlsConfig.Certificates = append(tlsConfig.Certificates, cert)
+	tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	tlsConfig.ClientCAs = clientCertPool
 
-	ln, err := net.Listen("tcp4", listenAddr(addr))
+	ln, err := net.Listen("tcp", listenAddr(addr))
 	if err != nil {
 		return err
 	}
@@ -94,16 +121,23 @@ func (s *FasthttpServer) ListenTLSMutual(addr, certFile, keyFile, clientCertFile
 // ListenOnListener starts the fasthttp server on a pre-created listener.
 // Useful for tests that need a random port.
 func (s *FasthttpServer) ListenOnListener(ln net.Listener) error {
+	if err := s.applyRouterConfig(); err != nil {
+		return err
+	}
 	return s.server.Serve(ln)
 }
 
 // Shutdown gracefully shuts down the server.
 func (s *FasthttpServer) Shutdown() error {
+	s.mux.lifecycle.cancel()
 	return s.server.Shutdown()
 }
 
-// ShutdownWithContext gracefully shuts down the server with a timeout context.
+// ShutdownWithContext stops accepting connections and waits for open ones to
+// close until ctx is done. If ctx ends first it returns ctx.Err(); handlers
+// and hijacked connections that are still running are not stopped.
 func (s *FasthttpServer) ShutdownWithContext(ctx stdcontext.Context) error {
+	s.mux.lifecycle.cancel()
 	return s.server.ShutdownWithContext(ctx)
 }
 

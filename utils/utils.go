@@ -8,65 +8,11 @@ import (
 	"math"
 	"reflect"
 	"strconv"
-	"strings"
 	"unsafe"
 )
 
-func Pop[T any](arr *[]T) {
-	if arr == nil {
-		return
-	}
-
-	if len(*arr) == 0 {
-		return
-	}
-
-	var sb = *arr
-	*arr = sb[:len(sb)-1]
-}
-
 func Append[T any](arr *[]T, val T) {
 	*arr = append(*arr, val)
-}
-
-func Push[T comparable](arr *[]T, val T) []T {
-	var d T
-	if arr == nil && val != d {
-		return []T{val}
-	} else if arr != nil && val == d {
-		return *arr
-	} else {
-		return append(*arr, val)
-	}
-}
-
-func LastItem[T any](arr *[]T) *T {
-	var t T
-	if arr == nil {
-		return &t
-	}
-
-	if len(*arr) == 0 {
-		return &t
-	}
-
-	return &(*arr)[len(*arr)-1]
-}
-
-func UpdateItem[T any](arr *[]T, fn func(b *T)) {
-	if arr == nil {
-		return
-	}
-
-	if len(*arr) == 0 {
-		return
-	}
-
-	fn(&(*arr)[len(*arr)-1])
-}
-
-func ToUpperFirst(s string) string {
-	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
 }
 
 func KindIsNumber(k reflect.Kind) bool {
@@ -149,6 +95,16 @@ func TryAsReader(m any) io.Reader {
 func SafeConvert(v reflect.Value, t reflect.Type) (reflect.Value, error) {
 	if !v.IsValid() {
 		return reflect.Value{}, fmt.Errorf("cannot convert invalid value to %v", t)
+	}
+
+	// Numbers convert with range and fraction checks; a plain reflect
+	// conversion would wrap or truncate silently.
+	if KindIsNumber(v.Kind()) && KindIsNumber(t.Kind()) {
+		out := reflect.New(t).Elem()
+		if _, err := SetNumberChecked(out, v); err != nil {
+			return reflect.Value{}, err
+		}
+		return out, nil
 	}
 
 	if v.Type().ConvertibleTo(t) {

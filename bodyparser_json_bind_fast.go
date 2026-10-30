@@ -115,6 +115,10 @@ func bindCompiledJSONNode(rule *RuleDef, value *fastjson.Value, destination refl
 		if err != nil {
 			return false
 		}
+		// Overflowing values fall back to the generic walker, which reports them.
+		if destination.OverflowInt(int64(parsed)) {
+			return false
+		}
 		destination.SetInt(int64(parsed))
 		return true
 
@@ -131,6 +135,9 @@ func bindCompiledJSONNode(rule *RuleDef, value *fastjson.Value, destination refl
 		if err != nil {
 			return false
 		}
+		if destination.OverflowUint(uint64(parsed)) {
+			return false
+		}
 		destination.SetUint(uint64(parsed))
 		return true
 
@@ -145,6 +152,9 @@ func bindCompiledJSONNode(rule *RuleDef, value *fastjson.Value, destination refl
 	case reflect.Float32, reflect.Float64:
 		parsed, err := value.Float64()
 		if err != nil {
+			return false
+		}
+		if destination.OverflowFloat(parsed) {
 			return false
 		}
 		destination.SetFloat(parsed)

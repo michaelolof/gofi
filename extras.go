@@ -88,12 +88,34 @@ type GofiStore interface {
 // new methods, so adding struct-key support is a fully backward-compatible
 // change. *gofiStore is the sole implementation.
 type anyKeyStore interface {
+	anyKeyReader
 	setAny(key any, val any)
+}
+
+// anyKeyReader is the read side of anyKeyStore, implemented by both
+// *gofiStore and the read-only view handed to request contexts.
+type anyKeyReader interface {
 	getAny(key any) (any, bool)
 	hasAny(key any) bool
 	tryGetAny(key any) any
 	allAny() iter.Seq2[any, any]
 }
+
+// readOnlyStore is the view of the global store that request contexts
+// receive. It has no Set method, so a handler cannot type-assert it back to a
+// writable GofiStore.
+type readOnlyStore struct {
+	s *gofiStore
+}
+
+func (r readOnlyStore) Has(key string) bool         { return r.s.Has(key) }
+func (r readOnlyStore) Get(key string) (any, bool)  { return r.s.Get(key) }
+func (r readOnlyStore) TryGet(key string) any       { return r.s.TryGet(key) }
+func (r readOnlyStore) All() iter.Seq2[string, any] { return r.s.All() }
+func (r readOnlyStore) getAny(key any) (any, bool)  { return r.s.getAny(key) }
+func (r readOnlyStore) hasAny(key any) bool         { return r.s.hasAny(key) }
+func (r readOnlyStore) tryGetAny(key any) any       { return r.s.tryGetAny(key) }
+func (r readOnlyStore) allAny() iter.Seq2[any, any] { return r.s.allAny() }
 
 // newGlobalStore creates the single store backing a router's GlobalStore(). It
 // is intentionally unexported: the router is the sole owner of the global
@@ -219,27 +241,27 @@ func StoreSet[K comparable](s GofiStore, key K, val any) {
 
 // StoreHas reports whether a value exists for key in the store.
 func StoreHas[K comparable](s ReadOnlyStore, key K) bool {
-	return s.(anyKeyStore).hasAny(key)
+	return s.(anyKeyReader).hasAny(key)
 }
 
 // StoreGet returns the value stored under key and whether it was found.
 // Converting the returned value to the appropriate type is the caller's
 // responsibility, e.g. db, ok := gofi.StoreGet(s, dbKey{}); db.(*Database).
 func StoreGet[K comparable](s ReadOnlyStore, key K) (any, bool) {
-	return s.(anyKeyStore).getAny(key)
+	return s.(anyKeyReader).getAny(key)
 }
 
 // StoreTryGet returns the value stored under key. It panics if the key is
 // missing. Converting the returned value to the appropriate type is the
 // caller's responsibility.
 func StoreTryGet[K comparable](s ReadOnlyStore, key K) any {
-	return s.(anyKeyStore).tryGetAny(key)
+	return s.(anyKeyReader).tryGetAny(key)
 }
 
 // StoreAll returns an iterator over every key/value pair in the store,
 // including struct keys (unlike the deprecated ReadOnlyStore.All).
 func StoreAll(s ReadOnlyStore) iter.Seq2[any, any] {
-	return s.(anyKeyStore).allAny()
+	return s.(anyKeyReader).allAny()
 }
 
 type metaMap map[string]map[string]any
@@ -281,8 +303,18 @@ func (m metaMap) TryRoute(path, method string) any {
 	}
 }
 
+// All returns a copy of the route metadata. Editing the returned maps does
+// not change the router's metadata; stored values themselves are shared.
 func (m metaMap) All() map[string]map[string]any {
-	return m
+	out := make(map[string]map[string]any, len(m))
+	for path, methods := range m {
+		inner := make(map[string]any, len(methods))
+		for method, meta := range methods {
+			inner[method] = meta
+		}
+		out[path] = inner
+	}
+	return out
 }
 
 func (m metaMap) Filter(fn func(path, method string) bool) map[string]map[string]any {

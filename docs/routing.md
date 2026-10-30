@@ -169,10 +169,12 @@ method mismatch still returns 405.
 
 ## Parameter value lifetime
 
-`Param.Value` is a zero-copy slice into the raw request buffer, obtained via `c.PathParam(name)`. The value is valid for the **duration of the handler chain**. Do not retain it in a goroutine that outlives the handler. If you need to keep the value, copy it:
+`Param.Value` is a zero-copy slice into the raw request buffer, obtained via `c.Param(name)`. The value is valid for the **duration of the handler chain**: the next request on the same connection overwrites the bytes, so a retained string changes without warning. Do not retain it in a goroutine, queue, cache or map key that outlives the handler. If you need to keep the value, copy it:
 
 ```go
-id := string([]byte(c.PathParam("id"))) // always safe to retain
+id := strings.Clone(c.Param("id")) // always safe to retain
 ```
+
+Path fields bound by `gofi.ValidateAndBind`, values from `c.Copy().Param(name)` and `gofi.SnapshotRequest` are already copies and safe to retain; see [Result lifetime](validations.md#result-lifetime).
 
 For WebSocket handlers, which take ownership of the connection, the fasthttp request buffer remains pinned for the connection lifetime and param values remain safe to read within the WebSocket goroutine.

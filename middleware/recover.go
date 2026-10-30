@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"runtime/debug"
@@ -30,8 +29,9 @@ type RecoverConfig struct {
 var RecoverConfigDefault = RecoverConfig{
 	EnableStackTrace: false,
 	Output:           log.New(os.Stderr, "", log.LstdFlags),
+	// The panic value is logged by the middleware and never sent to clients.
 	ErrorHandler: func(c gofi.Context, r any) error {
-		return gofi.NewHTTPError(500, fmt.Sprintf("panic recovered: %v", r))
+		return gofi.NewHTTPError(500, "Internal Server Error")
 	},
 }
 

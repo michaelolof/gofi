@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
@@ -70,17 +69,15 @@ type RuleDef struct {
 	tags         map[string][]string
 	accessor     fieldAccessor
 	jsonKeyBytes []byte
+	omitEmpty    bool // json:",omitempty"
+	skipJSON     bool // json:"-"
 }
 
 func preComputeJSONKey(name string) []byte {
 	if name == "" {
 		return nil
 	}
-	buf := make([]byte, 0, len(name)+4)
-	buf = append(buf, '"')
-	buf = append(buf, name...)
-	buf = append(buf, '"', ':')
-	return buf
+	return append(appendJSONString(make([]byte, 0, len(name)+3), name), ':')
 }
 
 func newRuleDef(sf reflect.StructField, defStr string, defVal any, rules []ruleOpts, required bool, present bool, max *float64, properties map[string]*RuleDef, items *RuleDef, addProps *RuleDef) *RuleDef {
@@ -218,23 +215,13 @@ type schemaRules struct {
 	req        map[string]RuleDef
 	responses  map[string]map[string]RuleDef
 	websocket  *compiledWebSocketContract
-	schemaPool *sync.Pool
 	schemaType reflect.Type
 }
 
 func newSchemaRules(typ reflect.Type) schemaRules {
-	var pool *sync.Pool
-	if typ != nil {
-		pool = &sync.Pool{
-			New: func() any {
-				return reflect.New(typ).Interface()
-			},
-		}
-	}
 	return schemaRules{
 		req:        make(map[string]RuleDef),
 		responses:  make(map[string]map[string]RuleDef),
-		schemaPool: pool,
 		schemaType: typ,
 	}
 }

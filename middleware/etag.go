@@ -45,8 +45,9 @@ func ETag(config ...ETagConfig) gofi.MiddlewareFunc {
 		fctx := c.Request().Context()
 		statusCode := fctx.Response.StatusCode()
 
-		// Mostly check 200 OK since we don't need to tag errors typically
-		if statusCode != 200 {
+		// Mostly check 200 OK since we don't need to tag errors typically.
+		// Streamed bodies cannot be hashed without buffering the whole stream.
+		if statusCode != 200 || fctx.Response.IsBodyStream() {
 			return err
 		}
 
@@ -63,8 +64,9 @@ func ETag(config ...ETagConfig) gofi.MiddlewareFunc {
 			etag = "W/" + etag
 		}
 
-		// Set ETag header
-		c.Writer().Header().Set("ETag", etag)
+		// Set ETag header natively: the handler may already have committed
+		// the Writer() header view, after which view edits have no effect.
+		fctx.Response.Header.Set("ETag", etag)
 
 		// Check If-None-Match header
 		clientETag := c.HeaderVal("If-None-Match")

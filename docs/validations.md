@@ -16,6 +16,12 @@ type User struct {
 
 When you call `gofi.ValidateAndBind[T](c)`, Gofi validates the input data against these rules. If validation fails, it returns a structured error detailing which fields failed and why.
 
+## Result lifetime
+
+The `*T` returned by `gofi.ValidateAndBind` belongs to the caller. Each call allocates a new struct, Gofi never reuses it for another request, and bound path parameters are copied into it. You can hand the pointer to a goroutine, queue or cache.
+
+Values read directly from the context are different: `c.Param(name)` returns a view into the request buffer that is only valid until the handler returns (see [Parameter value lifetime](routing.md#parameter-value-lifetime)). For background work that needs the request itself, use `gofi.SnapshotRequest(c, gofi.SnapshotOptions{})`, which returns an immutable copy of the method, path, query, headers, parameters and, optionally, a bounded copy of the body.
+
 ## Validation Only (No Binding)
 
 If you only want to validate the request without binding the data to a struct (for example, if you want to inspect `c.Request()` manually afterwards), you can use `gofi.Validate(c)`.

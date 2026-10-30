@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/michaelolof/gofi"
@@ -26,7 +27,18 @@ var LoggerConfigDefault = LoggerConfig{
 	Output: log.New(os.Stdout, "", 0),
 }
 
-// Logger creates a new middleware handler
+// maxLogField bounds each request-derived field written to the log.
+const maxLogField = 512
+
+// Logger creates a new middleware handler.
+//
+// The logged IP is gofi.ClientIP: the socket peer, or the client resolved by
+// a gofi.TrustPolicy middleware registered earlier. Forwarding headers are
+// never trusted on their own. When the chain returns an error the logged
+// status is the one the default error handler sends (gofi.StatusForError); a
+// panic is logged with status 500 and then propagated to the router's
+// recovery. Request-derived fields are stripped of control characters and
+// truncated.
 func Logger(config ...LoggerConfig) gofi.MiddlewareFunc {
 	// Set default config
 	cfg := LoggerConfigDefault
@@ -43,38 +55,47 @@ func Logger(config ...LoggerConfig) gofi.MiddlewareFunc {
 		}
 	}
 
-	return func(c gofi.Context) error {
-		start := time.Now()
-
-		// Pass down the chain
-		err := c.Next()
-
-		latency := time.Since(start).String()
-
-		statusCode := strconv.Itoa(c.Request().Context().Response.StatusCode())
-		if statusCode == "0" {
+	write := func(c gofi.Context, start time.Time, status int) {
+		statusCode := strconv.Itoa(status)
+		if status == 0 {
 			statusCode = "200"
 		}
+		line := strings.NewReplacer(
+			"${time}", time.Now().Format("2006/01/02 - 15:04:05"),
+			"${status}", statusCode,
+			"${latency}", time.Since(start).String(),
+			"${ip}", sanitizeLogField(gofi.ClientIP(c)),
+			"${method}", sanitizeLogField(c.Method()),
+			"${path}", sanitizeLogField(c.Path()),
+		).Replace(cfg.Format)
+		cfg.Output.Print(line)
+	}
 
-		ip := c.HeaderVal("X-Forwarded-For")
-		if ip == "" {
-			ip = "unknown"
+	return func(c gofi.Context) (err error) {
+		start := time.Now()
+		defer func() {
+			if r := recover(); r != nil {
+				write(c, start, 500)
+				panic(r)
+			}
+		}()
+
+		// Pass down the chain
+		err = c.Next()
+
+		status := c.Request().Context().Response.StatusCode()
+		if err != nil {
+			status = gofi.StatusForError(err)
 		}
-		ip = sanitizeLogField(ip)
-		method := sanitizeLogField(c.Method())
-		path := sanitizeLogField(c.Path())
-		timestr := time.Now().Format("2006/01/02 - 15:04:05")
-
-		// Super simple format string replacement for performance instead of regex
-		// For a full-fledged router, a buffer-writer template would be even faster
-		cfg.Output.Printf("%s | %s | %s | %s | %s | %s\n",
-			timestr, statusCode, latency, ip, method, path)
-
+		write(c, start, status)
 		return err
 	}
 }
 
 func sanitizeLogField(s string) string {
+	if len(s) > maxLogField {
+		s = s[:maxLogField] + "..."
+	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] == 0x7f {
 			buf := make([]byte, len(s))

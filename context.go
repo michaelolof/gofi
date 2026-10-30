@@ -3,9 +3,14 @@ package gofi
 import (
 	"bufio"
 	stdcontext "context"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/michaelolof/gofi/utils"
 	"github.com/valyala/fasthttp"
@@ -43,9 +48,13 @@ type Context interface {
 	SendString(code int, s string) error
 	SendBytes(code int, b []byte) error
 
-	// SetBodyStreamWriter sets a chunked stream writer for the response body
+	// SetBodyStreamWriter registers a chunked stream writer for the response
+	// body and returns without waiting for it. The writer runs on its own
+	// goroutine; the context stays valid for it until it returns. Its error is
+	// delivered to OnStreamError, not returned here.
 	SetBodyStreamWriter(sw func(w *bufio.Writer) error) error
-	// SendStream simplifies SSE. Sets headers based on schema definition and takes over the connection.
+	// SendStream simplifies SSE. It validates and sets headers from the schema
+	// definition, then registers sw as SetBodyStreamWriter does.
 	SendStream(code int, s any, sw func(w *bufio.Writer) error) error
 
 	GetSchemaRules(pattern, method string) any
@@ -73,15 +82,24 @@ type Context interface {
 	// set — either by a middleware writing directly to the fasthttp response or via c.Writer().
 	// Useful for middleware idempotency checks where a header may have been set upstream.
 	HasResponseHeader(key string) bool
-	// Context returns a standard library context.Context that is safe for both synchronous and
-	// asynchronous use. On the original (live) context it is backed by the fasthttp connection
-	// context so cancellation signals propagate naturally. On a Copy()-ed context it is a
-	// detached context.Background(), keeping the copy independent from the connection lifetime.
+	// Context returns the request's Go context. It is cancelled when the
+	// request finishes (after any stream producer returns) or when the
+	// router's server shuts down; it is not cancelled when the client
+	// disconnects. Middleware can replace it with SetRequestContext (for
+	// example ContextTimeout). Routers embedded through Handler() cancel it at
+	// request completion only, as gofi does not own that server's shutdown.
+	// On a Copy()-ed context it is context.Background().
 	Context() stdcontext.Context
 	// getParser returns the context-bound fastjson.Parser, securely isolating JSON parsing memory per request
 	getParser() *fastjson.Parser
 
-	// Copy creates a deep copy of the Context that is safe to use in a background goroutine.
+	// Copy returns a Context for use after the handler returns, for example in
+	// a background goroutine. It owns copies of the request (method, URI,
+	// headers, body), path parameters, route pattern and peer address, and a
+	// new data store holding the same item values. It is not a deep clone:
+	// values stored in the data store or global store, and a result already
+	// returned by ValidateAndBind, are shared with the original. Its Go
+	// context is context.Background(), and it reports no TLS state.
 	Copy() Context
 }
 
@@ -109,17 +127,30 @@ type context struct {
 	rw                *responseWriter  // cached response writer adapter
 	req               *Request         // cached request adapter
 	jsonParser        *fastjson.Parser // request-bound fastjson parser
+
+	// pool is the pool this context returns to; nil for Copy()-ed contexts.
+	pool *sync.Pool
+	// refs counts holders of a pooled context: dispatch plus every stream
+	// producer still running. The context returns to the pool at zero.
+	refs atomic.Int32
+	// streamErrHandler receives terminal stream producer errors (OnStreamError).
+	streamErrHandler func(err error)
+	// base is the router's lifetime context; cancel ends the request context
+	// derived from it by Context().
+	base   stdcontext.Context
+	cancel stdcontext.CancelFunc
+	// rulesOverride holds schema rules compiled by Inject, so injected
+	// handlers never replace a live route's rules.
+	rulesOverride *schemaRules
+	// clientIP and scheme are resolved by a TrustPolicy middleware.
+	clientIP string
+	scheme   string
+	host     string
+	// err is the error rendered by the router's error handler, if any.
+	err error
 }
 
 func (c *context) reset(fctx *fasthttp.RequestCtx) {
-	if c.bindedCacheResult.bound && c.bindedCacheResult.val != nil {
-		if rules := c.rules(); rules != nil && rules.schemaPool != nil {
-			// Zero out the struct before returning it to the pool
-			reflect.ValueOf(c.bindedCacheResult.val).Elem().SetZero()
-			rules.schemaPool.Put(c.bindedCacheResult.val)
-		}
-	}
-
 	c.fctx = fctx
 	c.stdCtx = nil // cleared on each request; live context reads from fctx lazily
 	c.opts = contextOptions{}
@@ -129,6 +160,12 @@ func (c *context) reset(fctx *fasthttp.RequestCtx) {
 	c.params = c.params[:0]
 	c.handlers = nil
 	c.handlerIdx = -1
+	c.streamErrHandler = nil
+	c.clientIP = ""
+	c.scheme = ""
+	c.host = ""
+	c.err = nil
+	c.rulesOverride = nil
 
 	// Reset adapters in-place instead of nil-ing to avoid re-allocation
 	if c.rw != nil {
@@ -154,6 +191,9 @@ func (c *context) Request() *Request {
 }
 
 func (c *context) GlobalStore() ReadOnlyStore {
+	if gs, ok := c.globalStore.(*gofiStore); ok {
+		return readOnlyStore{gs}
+	}
 	return c.globalStore
 }
 
@@ -177,15 +217,27 @@ func (c *context) getParser() *fastjson.Parser {
 }
 
 func (c *context) Copy() Context {
-	// Deep copy to prevent data races when this is used in background goroutines
 	cc := &context{
-		opts:              c.opts,
-		routeMeta:         c.routeMeta,
-		globalStore:       c.globalStore,
-		serverOpts:        c.serverOpts,
-		bindedCacheResult: c.bindedCacheResult, // Be careful here if caching pointers, but mostly it's fine for simple flags
+		// Method and Pattern can be views into the pooled request buffer (the
+		// pattern is the raw path on 404/405 chains); the copy owns them.
+		opts: contextOptions{
+			Pattern: strings.Clone(c.opts.Pattern),
+			Method:  strings.Clone(c.opts.Method),
+		},
+		routeMeta:   c.routeMeta,
+		globalStore: c.globalStore,
+		serverOpts:  c.serverOpts,
+		// Bound results are never recycled, so sharing the pointer cannot
+		// expose another request's data.
+		bindedCacheResult: c.bindedCacheResult,
 		handlerIdx:        c.handlerIdx,
 		fctx:              new(fasthttp.RequestCtx),
+		base:              c.base,
+		// The copy has no TLS connection, so carry the resolved client IP and
+		// scheme across explicitly.
+		clientIP: strings.Clone(ClientIP(c)),
+		scheme:   Scheme(c),
+		host:     strings.Clone(Host(c)),
 	}
 
 	// Preserve handler chain state so copied contexts can continue middleware flow.
@@ -194,16 +246,19 @@ func (c *context) Copy() Context {
 		copy(cc.handlers, c.handlers)
 	}
 
-	// Copy path parameters
+	// Copy path parameters. Values are views into the request path buffer,
+	// which the next request on the connection overwrites, so clone them.
 	if len(c.params) > 0 {
 		cc.params = make(Params, len(c.params))
-		copy(cc.params, c.params)
+		for i, p := range c.params {
+			cc.params[i] = Param{Key: p.Key, Value: strings.Clone(p.Value)}
+		}
 	}
 
-	// RequestCtx cloning logic (to detach from the sync.Pool lifecycle)
-	// We only copy essential information that a background task might need
-	// like Method, URI, and Request Headers.
-	c.fctx.Request.CopyTo(&cc.fctx.Request)
+	// Detach the request from the pooled RequestCtx. Init copies the request,
+	// keeps the peer address, and attaches fasthttp's placeholder server so
+	// the copy's RequestCtx is safe to use as a context.Context.
+	cc.fctx.Init(&c.fctx.Request, c.fctx.RemoteAddr(), nil)
 
 	// Detach the Go context from the connection lifecycle. The copied context
 	// must not share the original connection's Done channel — the connection
@@ -221,6 +276,38 @@ func (c *context) Copy() Context {
 	}
 
 	return cc
+}
+
+// releaseRef drops one hold on a pooled context and returns it to its pool
+// when no dispatch or stream producer still uses it.
+func (c *context) releaseRef() {
+	if c.refs.Add(-1) == 0 && c.pool != nil {
+		c.cancelContext()
+		c.pool.Put(c)
+	}
+}
+
+// cancelContext ends the request context returned by Context(), if one was
+// created.
+func (c *context) cancelContext() {
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+}
+
+// finishWriter flushes adapter headers into the response. If a header was
+// rejected for containing CR, LF or NUL, the response fails with a generic 500
+// instead of being sent without it.
+func (c *context) finishWriter() {
+	if c.rw == nil {
+		return
+	}
+	c.rw.syncHeaders()
+	if c.rw.rejectedHeader {
+		log.Println("gofi: rejected a response header containing CR, LF or NUL")
+		writeInternalServerError(c.fctx)
+	}
 }
 
 func (c *context) GetSchemaRules(pattern, method string) any {
@@ -274,13 +361,47 @@ func (c *context) HasResponseHeader(key string) bool {
 }
 
 func (c *context) Context() stdcontext.Context {
-	// For Copy()-ed contexts stdCtx is pre-set to context.Background().
+	// For Copy()-ed contexts stdCtx is pre-set to context.Background();
+	// SetRequestContext also sets it.
 	if c.stdCtx != nil {
 		return c.stdCtx
 	}
-	// For live contexts, delegate to the fasthttp connection context which
-	// carries cancellation signals (e.g. client disconnect).
+	// Live contexts get a request context on first use. It is cancelled when
+	// the request (including any stream producer) finishes, or when the
+	// router's server shuts down.
+	if c.base != nil {
+		c.stdCtx, c.cancel = stdcontext.WithCancel(c.base)
+		return c.stdCtx
+	}
 	return c.fctx
+}
+
+// ServerContext returns a context that is cancelled only when the router's
+// server shuts down. Work that outlives the request, such as a WebSocket
+// session or a background job started from a handler, should derive its own
+// cancellable context from it rather than from c.Context(), which ends with
+// the request.
+func ServerContext(c Context) stdcontext.Context {
+	if cc, ok := c.(*context); ok && cc.base != nil {
+		return cc.base
+	}
+	return stdcontext.Background()
+}
+
+// SetRequestContext replaces the Go context that c.Context() returns for the
+// rest of the request. Middleware that derives a deadline should restore the
+// previous context when its downstream chain returns. It rejects a nil
+// context and contexts not created by gofi.
+func SetRequestContext(c Context, ctx stdcontext.Context) error {
+	if ctx == nil {
+		return errors.New("gofi: nil request context")
+	}
+	cc, ok := c.(*context)
+	if !ok {
+		return errors.New("unknown context object passed")
+	}
+	cc.stdCtx = ctx
+	return nil
 }
 
 func (c *context) HeaderBytes(name string) []byte {
@@ -307,6 +428,9 @@ func (c *context) setContextSettings(opts contextOptions, routeMeta metaMap, glo
 }
 
 func (c *context) rules() *schemaRules {
+	if c.rulesOverride != nil {
+		return c.rulesOverride
+	}
 	return c.serverOpts.schemaRules.GetRules(c.opts.Pattern, c.opts.Method)
 }
 
@@ -336,8 +460,6 @@ type walkFinishStatus struct{}
 
 var walkFinished = walkFinishStatus{}
 
-const DEFAULT_ARRAY_SIZE = 50
-
 // setConvertedReflectValue uses typed setters for the primitive conversions
 // performed on nearly every JSON field. Uncommon conversions retain the
 // existing SafeConvert fallback and its error behavior.
@@ -358,41 +480,12 @@ func setConvertedReflectValue(dst reflect.Value, val any) error {
 			dst.SetBool(src.Bool())
 			return nil
 		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		switch src.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			dst.SetInt(src.Int())
-			return nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			dst.SetInt(int64(src.Uint()))
-			return nil
-		case reflect.Float32, reflect.Float64:
-			dst.SetInt(int64(src.Float()))
-			return nil
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		switch src.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			dst.SetUint(uint64(src.Int()))
-			return nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			dst.SetUint(src.Uint())
-			return nil
-		case reflect.Float32, reflect.Float64:
-			dst.SetUint(uint64(src.Float()))
-			return nil
-		}
-	case reflect.Float32, reflect.Float64:
-		switch src.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			dst.SetFloat(float64(src.Int()))
-			return nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			dst.SetFloat(float64(src.Uint()))
-			return nil
-		case reflect.Float32, reflect.Float64:
-			dst.SetFloat(src.Float())
-			return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		// Reject overflow, sign and fractional loss instead of wrapping.
+		if ok, err := utils.SetNumberChecked(dst, src); ok {
+			return err
 		}
 	}
 

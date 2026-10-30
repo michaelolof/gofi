@@ -53,12 +53,33 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 	if bsMax == 0 {
 		bsMax = 32 << 20 // 32MB default for multipart
 	}
+	if bsMax < 0 {
+		return fmt.Errorf("gofi: negative multipart MaxRequestSize %d", bsMax)
+	}
 
-	// Get multipart form from fasthttp via the adapter
+	// Get multipart form from fasthttp via the adapter. The transport has
+	// already buffered the body, so enforce the parser limit before parsing.
 	fctx := req.Context()
+	size := int64(fctx.Request.Header.ContentLength())
+	if size < 0 {
+		size = int64(len(fctx.Request.Body()))
+	}
+	if size > bsMax {
+		return newBodyTooLargeError()
+	}
 	form, err := fctx.MultipartForm()
 	if err != nil {
 		return newErrReport(RequestErr, schemaBody, "", "parser", err)
+	}
+	parts := 0
+	for _, vals := range form.Value {
+		parts += len(vals)
+	}
+	for _, files := range form.File {
+		parts += len(files)
+	}
+	if parts > requestLimits(opts.Context).MaxMultipartParts {
+		return newLimitError("multipart part count")
 	}
 
 	if opts.SchemaRules == nil {

@@ -301,6 +301,12 @@ func (s *Session) Close() error
 func (s *Session) CloseWithReason(code int, reason string) error
 ```
 
+### Concurrency
+
+`WriteMessage`, `WriteJSON` and `WriteError` are serialized internally, so a broadcaster goroutine can write to a session while its handler also writes. Reads (`ReadMessage`, `ReadJSON`) must stay on one goroutine at a time. Writing through `Conn()` directly bypasses the session lock: the underlying connection supports one writer at a time and panics on concurrent writes.
+
+A panic inside a session handler is recovered, logged and reported to `Hooks.OnSessionError`; the session is closed and the server keeps running.
+
 ### `Context()`
 
 Returns the copied `gofi.Context` associated with the original HTTP upgrade request.

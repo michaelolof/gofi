@@ -1,6 +1,10 @@
 package middleware
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -9,8 +13,9 @@ import (
 
 // CORSConfig defines the config for the CORS middleware.
 type CORSConfig struct {
-	// AllowOrigin defines a list of origins that may access the resource.
-	// Optional. Default: "*"
+	// AllowOrigins is a comma-separated list of origins (scheme://host[:port])
+	// that may access the resource, or "*" for any origin.
+	// Required.
 	AllowOrigins string
 
 	// AllowMethods defines a list methods allowed when accessing the resource.
@@ -38,35 +43,66 @@ type CORSConfig struct {
 	MaxAge int
 }
 
-// CORSConfigDefault is the default config
+// CORSConfigDefault holds the defaults applied to optional fields.
 var CORSConfigDefault = CORSConfig{
-	AllowOrigins:     "*",
-	AllowMethods:     "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
-	AllowHeaders:     "",
-	AllowCredentials: false,
-	ExposeHeaders:    "",
-	MaxAge:           0,
+	AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
 }
 
-// CORS creates a new middleware handler
-func CORS(config ...CORSConfig) gofi.MiddlewareFunc {
-	// Set default config
-	cfg := CORSConfigDefault
-
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
-
-		if cfg.AllowOrigins == "" {
-			cfg.AllowOrigins = CORSConfigDefault.AllowOrigins
+// CORS validates cfg and creates a CORS middleware. It rejects a wildcard
+// origin combined with credentials, origins that are not scheme://host[:port],
+// and a negative MaxAge. Requested headers are allowed only if listed in
+// AllowHeaders, and a preflight for a method not in AllowMethods receives no
+// allow headers.
+//
+// Responses whose CORS headers depend on the request Origin carry
+// "Vary: Origin", including responses to disallowed origins, so shared caches
+// do not reuse one origin's decision for another. Only an OPTIONS request with
+// an Access-Control-Request-Method header is answered as a preflight; other
+// OPTIONS requests continue down the chain.
+func CORS(cfg CORSConfig) (gofi.MiddlewareFunc, error) {
+	if cfg.AllowOrigins == "" {
+		return nil, errors.New("gofi/middleware: CORS AllowOrigins is required")
+	}
+	if cfg.AllowMethods == "" {
+		cfg.AllowMethods = CORSConfigDefault.AllowMethods
+	}
+	if cfg.MaxAge < 0 {
+		return nil, errors.New("gofi/middleware: negative CORS MaxAge")
+	}
+	if cfg.AllowOrigins == "*" {
+		if cfg.AllowCredentials {
+			return nil, errors.New("gofi/middleware: CORS cannot allow credentials for every origin")
 		}
-
-		if cfg.AllowMethods == "" {
-			cfg.AllowMethods = CORSConfigDefault.AllowMethods
+	} else {
+		for _, o := range splitList(cfg.AllowOrigins) {
+			u, err := url.Parse(o)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+				return nil, fmt.Errorf("gofi/middleware: invalid CORS origin %q", o)
+			}
 		}
+	}
+	return newCORSHandler(cfg), nil
+}
+
+func newCORSHandler(cfg CORSConfig) gofi.MiddlewareFunc {
+	wildcard := cfg.AllowOrigins == "*"
+	origins := map[string]bool{}
+	if !wildcard {
+		for _, o := range splitList(cfg.AllowOrigins) {
+			origins[o] = true
+		}
+	}
+	allowedMethods := map[string]bool{}
+	for _, m := range splitList(cfg.AllowMethods) {
+		allowedMethods[strings.ToUpper(m)] = true
 	}
 
 	return func(c gofi.Context) error {
+		h := c.Writer().Header()
+		if !wildcard {
+			addVary(h, "Origin")
+		}
+
 		origin := c.HeaderVal("Origin")
 
 		// If no Origin header, continue
@@ -74,61 +110,68 @@ func CORS(config ...CORSConfig) gofi.MiddlewareFunc {
 			return c.Next()
 		}
 
-		// Check allowed origins
-		allowOrigin := ""
-		if cfg.AllowOrigins == "*" {
-			allowOrigin = "*"
-		} else {
-			origins := strings.Split(cfg.AllowOrigins, ",")
-			for _, o := range origins {
-				o = strings.TrimSpace(o)
-				if o == origin {
-					allowOrigin = origin
-					break
-				}
-			}
-		}
-
-		// Origin not allowed
-		if allowOrigin == "" {
-			// We can either abort with 403 or just pass without appending headers.
-			// Passing allows other handlers to decide.
+		// Origin not allowed: pass without CORS headers. The browser withholds
+		// the response; the request itself is not rejected here.
+		if !wildcard && !origins[origin] {
 			return c.Next()
 		}
+		allowOrigin := "*"
+		if !wildcard {
+			allowOrigin = origin
+		}
 
-		c.Writer().Header().Set("Access-Control-Allow-Origin", allowOrigin)
+		h.Set("Access-Control-Allow-Origin", allowOrigin)
 
 		if cfg.AllowCredentials {
-			c.Writer().Header().Set("Access-Control-Allow-Credentials", "true")
+			h.Set("Access-Control-Allow-Credentials", "true")
 		}
 
 		if cfg.ExposeHeaders != "" {
-			c.Writer().Header().Set("Access-Control-Expose-Headers", cfg.ExposeHeaders)
+			h.Set("Access-Control-Expose-Headers", cfg.ExposeHeaders)
 		}
 
-		// Handle Preflight requests
-		if c.Method() == "OPTIONS" {
-			// Access-Control-Allow-Methods
-			c.Writer().Header().Set("Access-Control-Allow-Methods", cfg.AllowMethods)
+		requestedMethod := c.HeaderVal("Access-Control-Request-Method")
+		if c.Method() != "OPTIONS" || requestedMethod == "" {
+			return c.Next()
+		}
 
-			// Access-Control-Allow-Headers
+		// Preflight
+		addVary(h, "Access-Control-Request-Method")
+		addVary(h, "Access-Control-Request-Headers")
+		if allowedMethods[strings.ToUpper(requestedMethod)] {
+			h.Set("Access-Control-Allow-Methods", cfg.AllowMethods)
+
 			if cfg.AllowHeaders != "" {
-				c.Writer().Header().Set("Access-Control-Allow-Headers", cfg.AllowHeaders)
-			} else {
-				h := c.HeaderVal("Access-Control-Request-Headers")
-				if h != "" {
-					c.Writer().Header().Set("Access-Control-Allow-Headers", h)
-				}
+				h.Set("Access-Control-Allow-Headers", cfg.AllowHeaders)
 			}
 
-			// Access-Control-Max-Age
 			if cfg.MaxAge > 0 {
-				c.Writer().Header().Set("Access-Control-Max-Age", strconv.Itoa(cfg.MaxAge))
+				h.Set("Access-Control-Max-Age", strconv.Itoa(cfg.MaxAge))
 			}
-
-			return c.SendString(204, "")
 		}
 
-		return c.Next()
+		return c.SendString(204, "")
 	}
+}
+
+// addVary merges token into the Vary header without duplicating it.
+func addVary(h http.Header, token string) {
+	for _, v := range h.Values("Vary") {
+		for _, existing := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(existing), token) {
+				return
+			}
+		}
+	}
+	h.Add("Vary", token)
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
