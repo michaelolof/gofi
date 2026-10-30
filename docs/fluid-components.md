@@ -294,7 +294,7 @@ import (
 )
 
 func main() {
-    app := gofi.New()
+    app := gofi.NewRouter()
 
     // ... register routes ...
 

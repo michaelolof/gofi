@@ -98,22 +98,31 @@ func(c gofi.Context) error {
 
 `RouteOptions` is the configuration struct used when registering a route. It separates the handler logic from configuration metadata.
 
-It is recommended to use `gofi.DefineHandler` to define your route options variables. This provides a clean way to organize your handlers.
+Define every handler with `gofi.DefineHandler`, assigned to an exported package-level variable, with its schema directly below it. [GUIDELINES.md](../GUIDELINES.md#2-handlers) has the full rules.
 
 ```go
-var GetUser = gofi.DefineHandler(gofi.RouteOptions{
+// GetUserHandler returns a user by ID.
+var GetUserHandler = gofi.DefineHandler(gofi.RouteOptions{
     Info: gofi.Info{
-        Summary: "Get User",
-        Description: "Returns a user by ID",
+        Tags:        []string{"users"},
+        Description: "Returns a user by ID.",
     },
-    Schema: &UserSchema{},
+
+    Schema: &getUserSchema{},
+
     Handler: func(c gofi.Context) error {
-        return c.Send(200, UserResponse{})
+        s, err := gofi.ValidateAndBind[getUserSchema](c)
+        if err != nil {
+            return err
+        }
+
+        s.Ok.Body = lookUpUser(s.Request.Path.UserID)
+        return c.Send(200, s.Ok)
     },
 })
 
 // Registering the handler
-r.Get("/users/{id}", GetUser)
+r.Get("/users/:user_id", GetUserHandler)
 ```
 
 ### 1. Route Information (`Info`)

@@ -23,28 +23,54 @@ Gofi is an openapi3 schema-based HTTP router for Golang.
 go get -u github.com/michaelolof/gofi
 ```
 
-## Examples
+## How to write a Gofi service
 
-You can find examples of using a Gofi router [here](https://github.com/michaelolof/gofi-test-utils/tree/7a9bf615e9328d7ee30511bac6ce50677f6be274/cmd/examples) 
+**[GUIDELINES.md](GUIDELINES.md) is the official guide to writing services with
+Gofi**: project layout, handlers, schemas, errors, dependencies, routes,
+middleware, testing and docs, each as a numbered rule. Read it before writing
+Gofi code; coding agents should too. Error handling has its own guide in
+[docs/error-handling.md](docs/error-handling.md).
+
+The [reference service](https://github.com/michaelolof/gofi-test-utils/tree/main/examples/reference-service)
+follows every rule in the guide and is compiled and tested against Gofi. More
+focused examples (JSON, form data, multipart, streaming, WebSockets) are in
+[gofi-test-utils/cmd/examples](https://github.com/michaelolof/gofi-test-utils/tree/main/cmd/examples).
 
 ## Quick Start
 
-Here is a minimal example to get you started with Gofi.
+A complete single-file program. A real service splits this across packages as
+described in [GUIDELINES.md](GUIDELINES.md#1-project-layout).
 
 ```go
 package main
 
 import (
-	"fmt"
 	"log"
-	"net/http"
-	"time"
 
 	"github.com/michaelolof/gofi"
 )
 
-// Define your request/response schema
-type PingSchema struct {
+// PingHandler replies to a message.
+var PingHandler = gofi.DefineHandler(gofi.RouteOptions{
+	Info: gofi.Info{
+		Tags:        []string{"ping"},
+		Description: "Replies to a message.",
+	},
+
+	Schema: &pingSchema{},
+
+	Handler: func(c gofi.Context) error {
+		s, err := gofi.ValidateAndBind[pingSchema](c)
+		if err != nil {
+			return err
+		}
+
+		s.Ok.Body.Reply = "pong: " + s.Request.Body.Message
+		return c.Send(200, s.Ok)
+	},
+})
+
+type pingSchema struct {
 	Request struct {
 		Body struct {
 			Message string `json:"message" validate:"required,min=5"`
@@ -53,51 +79,26 @@ type PingSchema struct {
 
 	Ok struct {
 		Body struct {
-			Reply     string `json:"reply"`
-			Timestamp int64  `json:"timestamp"`
+			Reply string `json:"reply" validate:"required"`
 		}
 	}
 }
 
 func main() {
-	// Initialize the router
 	r := gofi.NewRouter()
 
-	// Define the handler
-	pingHandler := gofi.DefineHandler(gofi.RouteOptions{
-		Schema: &PingSchema{},
-		Handler: func(c gofi.Context) error {
-			// Validate request and bind data to schema
-			s, err := gofi.ValidateAndBind[PingSchema](c)
-			if err != nil {
-				return err
-			}
+	r.Post("/ping", PingHandler)
 
-			// Access validated data directly
-			msg := s.Request.Body.Message
-			fmt.Printf("Received message: %s\n", msg)
-
-			// Populate response
-			s.Ok.Body.Reply = "Pong: " + msg
-			s.Ok.Body.Timestamp = time.Now().Unix()
-
-			// Send response
-			return c.Send(http.StatusOK, s.Ok)
-		},
-	})
-
-	// Register the route
-	r.POST("/ping", pingHandler)
-
-	// Serve Documentation
-	gofi.ServeDocs(r, gofi.DocsOptions{
+	if err := gofi.ServeDocs(r, gofi.DocsOptions{
 		Views: []gofi.DocsView{
 			{RoutePrefix: "/docs", Template: gofi.StopLight()},
 		},
-	})
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	log.Println("Server listening on :8080")
-	r.Listen(":8080")
+	log.Fatal(r.Listen(":8080"))
 }
 ```
 
@@ -105,7 +106,7 @@ func main() {
 
 ### Initialization
 
-Create a new router instance using `NewServeMux()`:
+Create a new router instance using `NewRouter()`:
 
 ```go
 r := gofi.NewRouter()
@@ -116,38 +117,34 @@ r := gofi.NewRouter()
 Schemas are defined as nested structs representing the HTTP request and response structure.
 
 ```go
-type UserSchema struct {
-    // Request definition
+type updateUserSchema struct {
     Request struct {
-        // Path parameters (e.g., /users/:id)
+        // Path parameters (/users/:user_id)
         Path struct {
-            ID string `json:"id" validate:"required,uuid"`
+            UserID string `json:"user_id" validate:"required,uuid"`
         }
-        // Query parameters (e.g., ?page=1)
+        // Query parameters (?notify=true)
         Query struct {
-            Page int `json:"page" default:"1"`
+            Notify bool `json:"notify" default:"false"`
         }
-        // Headers
+        // Headers: names are lowercase
         Header struct {
-            Authorization string `json:"Authorization" validate:"required"`
+            Authorization string `json:"authorization" validate:"required"`
         }
-        // Request Body (JSON)
+        // Request body (JSON unless the Header block declares another content-type)
         Body struct {
             Name  string `json:"name" validate:"required"`
             Email string `json:"email" validate:"required,email"`
         }
     }
 
-    // Response definitions mapped by name (Ok, Created, Err, etc.)
-    Ok struct { // 200 OK
-        Body UserResponse `json:"body"`
+    // Response fields are named after the status they answer (Ok = 200)
+    Ok struct {
+        Body UserResponse
     }
-    NotFound struct { // 404 Not Found
-        Body ErrorResponse `json:"body"`
-    }
-    // Generic error response for 400-599 status codes not implicitly matched
+    // Err covers every 4xx and 5xx status without its own field
     Err struct {
-         Body ErrorResponse `json:"body"`
+        Body ErrorResponse
     }
 }
 ```
@@ -156,35 +153,59 @@ For a detailed guide on defining schemas, supported fields, response types and v
 
 ### Defining a Route Handler
 
-The `RouteOptions` struct is used to configure your route, including metadata, schema, middlewares, and the handler function itself.
+A handler is an exported package-level variable built with `DefineHandler`,
+with its schema directly below it:
 
 ```go
-var UsersHandler = gofi.DefineHandler(gofi.RouteOptions{
-    Info: gofi.Info{ Description: "Returns a list Users" },
-    Schema: &UserListSchema{},
+// UpdateUserHandler updates a user's name and email.
+var UpdateUserHandler = gofi.DefineHandler(gofi.RouteOptions{
+    Info: gofi.Info{
+        Tags:        []string{"users"},
+        Description: "Updates a user's name and email.",
+    },
+
+    Schema: &updateUserSchema{},
+
     Handler: func(c gofi.Context) error {
-        // ... implementation ...
-        return c.Send(200, response)
+        s, err := gofi.ValidateAndBind[updateUserSchema](c)
+        if err != nil {
+            return err
+        }
+
+        user, err := updateUser(c.Context(), s.Request.Path.UserID, s.Request.Body.Name, s.Request.Body.Email)
+        if err != nil {
+            return err
+        }
+
+        s.Ok.Body = toUserResponse(user)
+        return c.Send(200, s.Ok)
     },
 })
 
-r.Get("/users", UsersHandler)
+r.Put("/users/:user_id", UpdateUserHandler)
 ```
 
-For a comprehensive guide on Route Handlers, Context methods, and RouteOptions configuration, please refer to the [Route Options Guide](docs/route-options.md).
+See [GUIDELINES.md](GUIDELINES.md#2-handlers) for the full set of handler rules,
+and the [Route Options Guide](docs/route-options.md) for every `Context` method
+and `RouteOptions` field.
 
 
 ### Global Error Handler
 
-You can define a custom error handler for all routes using `UseErrorHandler`:
+Handlers and middleware return errors; one error handler, registered with
+`UseErrorHandler`, turns them into responses:
 
 ```go
 r.UseErrorHandler(func(err error, c gofi.Context) {
     // Log the full error; send clients only what is safe for them to see.
-    log.Printf("Error occurred: %v", err)
-    c.SendString(http.StatusInternalServerError, "Internal Server Error")
+    log.Printf("request failed: %v", err)
+    _ = c.SendString(gofi.StatusForError(err), "request failed")
 })
 ```
+
+[docs/error-handling.md](docs/error-handling.md) describes the recommended
+pattern: errors that carry a unique ID, a kind that decides the status, and a
+message that is safe to show.
 
 Without a custom handler, Gofi responds with a JSON envelope (`{"status":"error","statusCode":...,"message":...}`, `Content-Type: application/json`):
 
@@ -201,6 +222,8 @@ Register routes, middleware, validators, body parsers and configuration before t
 ### Plugins
 
 You can attach shared state or plugins to the router using the `GlobalStore`, which is accessible in all route handlers. The same applies to the per-request `DataStore()`.
+
+For a service's dependencies (stores, clients, config), wrap the `GlobalStore` in a small typed `deps` package with `Register` and `MustGet`, as described in [GUIDELINES.md](GUIDELINES.md#7-dependencies). The example below shows the underlying store API.
 
 Store keys may be **any comparable value**. The recommended convention is a distinct, empty `struct{}` type per key: it is collision-proof (two different named types can never clash) and the fastest option — boxing a zero-sized value into the store allocates nothing, and lookups short-circuit on the type descriptor. Use the generic `StoreSet` / `StoreGet` helpers to write and read; `StoreGet` returns the stored value as `any` — converting it to the appropriate type is the caller's responsibility, same as reading from a `map[any]any`.
 
@@ -251,8 +274,21 @@ If you are passing `gofi.Context` to other functions where you **cannot strictly
 Instead, you should proactively use `c.Copy()` to safely detach and clone the necessary request paths, parameters, datastores, and headers:
 
 ```go
-r.GET("/process", gofi.DefineHandler(gofi.RouteOptions{
+// ProcessHandler starts a background job and answers immediately.
+var ProcessHandler = gofi.DefineHandler(gofi.RouteOptions{
+    Info: gofi.Info{
+        Tags:        []string{"jobs"},
+        Description: "Starts a background job.",
+    },
+
+    Schema: &processSchema{},
+
     Handler: func(c gofi.Context) error {
+        s, err := gofi.ValidateAndBind[processSchema](c)
+        if err != nil {
+            return err
+        }
+
         // Clone the context safely before leaving the handler chain
         detachedCtx := c.Copy()
 
@@ -261,9 +297,20 @@ r.GET("/process", gofi.DefineHandler(gofi.RouteOptions{
             log.Printf("Background processing for: %s", cc.Path())
         }(detachedCtx)
 
-        return c.SendString(202, "Processing in background")
+        return c.Send(202, s.Accepted)
     },
-}))
+})
+
+type processSchema struct {
+    Accepted struct {
+        Body struct {
+            Status string `json:"status" default:"processing"`
+        }
+    }
+    Err struct {
+        Body ErrorResponse
+    }
+}
 ```
 
 #### Standard Library context.Context
@@ -329,7 +376,7 @@ Group routes with shared middlewares using `Group()`:
 ```go
 r.Group(func(r gofi.Router) {
     r.Use(AuthMiddleware)
-    r.GET("/profile", ProfileHandler)
+    r.Get("/profile", ProfileHandler)
 })
 ```
 ### Route Grouping & Versioning
@@ -340,13 +387,13 @@ The `Route` method allows you to create sub-routers for grouping related endpoin
 r.Route("/api", func(r gofi.Router) {
     // API v1
     r.Route("/v1", func(r gofi.Router) {
-        r.GET("/users", UserListHandler)
-        r.GET("/posts", PostListHandler)
+        r.Get("/users", UserListHandler)
+        r.Get("/posts", PostListHandler)
     })
 
     // API v2
     r.Route("/v2", func(r gofi.Router) {
-        r.GET("/users", UserListHandlerV2)
+        r.Get("/users", UserListHandlerV2)
     })
 })
 ```
@@ -360,8 +407,8 @@ Gofi supports three kinds of path segments:
 | Syntax | Example | Description |
 |--------|---------|-------------|
 | Static | `/users/me` | Matched exactly. |
-| Named parameter | `/users/:id` | Matches any single segment. Value read via `c.PathParam("id")`. |
-| Catch-all | `/files/*filepath` | Matches `/files/` and everything below it (including sub-segments), never `/filesx`. Value read via `c.PathParam("filepath")`, without the leading `/`. |
+| Named parameter | `/users/:id` | Matches any single segment. Bound to the `Request.Path` field tagged `json:"id"`; middleware can read it with `c.Param("id")`. |
+| Catch-all | `/files/*filepath` | Matches `/files/` and everything below it (including sub-segments), never `/filesx`. Bound to the `Request.Path` field tagged `json:"filepath"`, without the leading `/`. |
 
 ### Match priority
 
@@ -449,7 +496,7 @@ err := gofi.ServeDocs(r, gofi.DocsOptions{
         {
             RoutePrefix: "/docs/swagger",
             Template:    gofi.SwaggerTemplate(),
-            Match: func(path string) bool {
+            URLMatch: func(path string) bool {
                 // Serve only for routes that begin with /api/v1/
                 return strings.HasPrefix(path, "/api/v1/")
             },
@@ -539,7 +586,7 @@ This function extracts the `gofi.Docs` struct directly from your router without 
 
 ```go
 func main() {
-    r := gofi.New()
+    r := gofi.NewRouter()
     // ... register all your routes and middlewares ...
 
     // Extract the full OpenAPI 3.0.3 specification
@@ -677,21 +724,18 @@ Use streaming when:
 - you want a simpler HTTP-native real-time transport
 
 ```go
-// Define the schema for the streaming response
-type streamSchema struct {
-    Ok struct {
-        Header struct {
-            ContentType string `json:"content-type" default:"text/event-stream"`
-        }
-        Body string `validate:"required" pattern:"event-stream"`
-    }
-}
+// StreamHandler sends ten events, one per second.
+var StreamHandler = gofi.DefineHandler(gofi.RouteOptions{
+    Info: gofi.Info{
+        Tags:        []string{"events"},
+        Description: "Streams ten server-sent events.",
+    },
 
-r.GET("/stream", gofi.DefineHandler(gofi.RouteOptions{
     Schema: &streamSchema{},
+
     Handler: func(c gofi.Context) error {
         var s streamSchema
-        return c.SendStream(200, s, func(w *bufio.Writer) error {
+        return c.SendStream(200, s.Ok, func(w *bufio.Writer) error {
             for i := 0; i < 10; i++ {
                 if _, err := fmt.Fprintf(w, "data: Chunk %d\n\n", i+1); err != nil {
                     return err
@@ -704,7 +748,18 @@ r.GET("/stream", gofi.DefineHandler(gofi.RouteOptions{
             return nil
         })
     },
-}))
+})
+
+type streamSchema struct {
+    Ok struct {
+        Header struct {
+            ContentType string `json:"content-type" default:"text/event-stream"`
+        }
+        Body string `validate:"required" pattern:"event-stream"`
+    }
+}
+
+r.Get("/stream", StreamHandler)
 ```
 
 This ensures the status code and schema are set before streaming begins. By default, if you do not set a status code, the default (usually 200 OK) is used.
@@ -722,7 +777,7 @@ Recommended build order for a streaming route:
 
 - define the streaming response schema for the status code you plan to send
 - set `content-type: text/event-stream` on the response schema when building SSE
-- call `SendStream(code, schemaValue, callback)` from the handler
+- call `SendStream(code, s.Ok, callback)` from the handler, passing the response block for that status
 - write valid SSE frames such as `data: ...\n\n`
 - flush after each event or batch that should reach the client immediately
 - return callback errors so disconnects and write failures are visible
@@ -762,9 +817,15 @@ import (
     "github.com/michaelolof/gofi/websocket"
 )
 
-registry := websocket.NewSessionRegistry()
+var registry = websocket.NewSessionRegistry()
 
-r.Get("/ws/:room_id", websocket.DefineWebSocket(websocket.WebSocketOptions{
+// ChatHandler echoes every message back to the room.
+var ChatHandler = websocket.DefineWebSocket(websocket.WebSocketOptions{
+    Info: gofi.Info{
+        Tags:        []string{"chat"},
+        Description: "Joins a chat room over WebSocket.",
+    },
+
     Handshake: websocket.HandshakePolicy{Mode: websocket.HandshakeAuto},
     Handler: func(s *websocket.Session) error {
         roomID := s.Context().Param("room_id")
@@ -792,7 +853,9 @@ r.Get("/ws/:room_id", websocket.DefineWebSocket(websocket.WebSocketOptions{
             },
         },
     },
-}))
+})
+
+r.Get("/ws/:room_id", ChatHandler)
 
 // On shutdown, drain active sessions before router shutdown.
 drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -812,72 +875,54 @@ At a high level:
 - use streaming for outbound event feeds and SSE
 - use WebSockets for bidirectional session protocols
 
-## Unit Testing
+## Testing
 
-Gofi provides a convenient way to unit test your handlers without starting a full HTTP server using the `Inject` method.
-
-### The `Inject` Method
-
-The `Inject` method allows you to simulate an HTTP request against your router and returns an `*InjectResponse`.
-
-It is designed to test handlers in isolation. You pass the `RouteOptions` directly to `Inject`, so you don't even need to register the route on the mux to test it.
+Test handlers by sending requests through the full router with `Test`. Build
+the router the same way production does, with test dependencies, so a test
+covers routing, middleware, validation, the handler and the error handler
+together. No listener is started.
 
 ```go
-func TestMyHandler(t *testing.T) {
-    // Initialize a router to provide the environment (stores, validation engine)
-    r := gofi.NewRouter()
+func TestGetProjectHandler_ReturnsCallersProject(t *testing.T) {
+    h := testharness.New(t) // builds the real router with in-memory deps
+    project, err := h.Deps.ProjectStore.Create(context.Background(), domain.Project{Name: "Payments", OwnerID: "alice"})
+    require.NoError(t, err)
 
-    // 1. Define your handler options
-    myHandlerOpts := gofi.DefineHandler(gofi.RouteOptions{
-        Schema: &MySchema{},
-        Handler: func(c gofi.Context) error {
-            return c.SendString(200, "success")
-        },
+    resp, err := h.Test(gofi.TestOptions{
+        Method:  "GET",
+        Path:    "/api/v1/projects/:project_id",
+        Paths:   map[string]string{"project_id": project.ID},
+        Headers: testharness.AuthHeaders("token-alice"),
     })
+    require.NoError(t, err)
+    require.Equal(t, 200, resp.Code(), resp.BodyString())
 
-    // 2. Use Inject to test
-    // Returns *InjectResponse
-    resp, err := r.Inject(gofi.InjectOptions{
-        Method: "GET",
-        Path:   "/test-path",
-        Handler: &myHandlerOpts, // Pass the RouteOptions directly (no need to register)
-        
-        // Optional inputs:
-        Query:   map[string]string{"foo": "bar"},
-        Headers: map[string]string{"Authorization": "Bearer token"},
-        Body:    strings.NewReader(`{"name": "test"}`),
-    })
-
-    if err != nil {
-        t.Fatalf("Inject failed: %v", err)
-    }
-
-    // 3. Assert results
-    if resp.StatusCode != 200 {
-        t.Errorf("Expected 200, got %d", resp.StatusCode)
-    }
+    var out schemas.SuccessBody[schemas.Project]
+    require.NoError(t, resp.BindBody(&out))
+    assert.Equal(t, project.ID, out.Data.ID)
 }
 ```
 
-### Lightweight Testing with `Test()`
+[GUIDELINES.md](GUIDELINES.md#11-testing) describes the test harness and the
+testing rules; the reference service has a complete one.
 
-For quick tests on registered routes, use the `Test()` shorthand. Unlike `Inject`, `Test` dispatches through the full registered route tree (middleware, 404 handling, redirects) and returns both a response and an error.
+### The `Inject` Method
+
+`Inject` runs one `RouteOptions` without registering it, skipping routing and
+route-group middleware. Use it to test a schema or handler in isolation.
 
 ```go
-func TestPing(t *testing.T) {
+func TestPingSchema_RejectsShortMessage(t *testing.T) {
     r := gofi.NewRouter()
-    r.Get("/ping", gofi.RouteOptions{
-        Handler: func(c gofi.Context) error {
-            return c.SendString(200, "pong")
-        },
-    })
 
-    resp, err := r.Test(gofi.TestOptions{
-        Method: "GET",
-        Path:   "/ping",
+    resp, err := r.Inject(gofi.InjectOptions{
+        Method:  "POST",
+        Path:    "/ping",
+        Handler: &PingHandler, // no need to register it
+        Body:    strings.NewReader(`{"message": "hi"}`),
     })
-    assert.NoError(t, err)
-    assert.Equal(t, 200, resp.StatusCode)
+    require.NoError(t, err)
+    assert.Equal(t, 400, resp.Code())
 }
 ```
 
