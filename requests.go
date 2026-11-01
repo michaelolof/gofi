@@ -460,6 +460,12 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 // field gets a newly allocated value. It reports false if val cannot be
 // converted to the field's type.
 func setParamField(field reflect.Value, val reflect.Value) bool {
+	// A custom spec may return the field's own type, pointer included.
+	if val.Type().AssignableTo(field.Type()) {
+		field.Set(val)
+		return true
+	}
+
 	target := field
 	var ptr reflect.Value
 	if field.Kind() == reflect.Pointer {

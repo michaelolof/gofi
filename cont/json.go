@@ -322,6 +322,17 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 	}
 }
 
+// GetRawNode returns node's JSON value for a custom spec to decode, whatever
+// the Go kind of the field it fills: a string, float64 or bool for a scalar,
+// and the raw JSON bytes for an object or array. A missing or null node
+// returns EOF, as GetNodeByKind does.
+func GetRawNode(node *fastjson.Value) (any, error) {
+	if node == nil || node.Type() == fastjson.TypeNull {
+		return EOF, nil
+	}
+	return extractRawValue(node)
+}
+
 func (p *ParsedJson) Exist(keys ...string) bool {
 	return p.pv.Exists(keys...)
 }

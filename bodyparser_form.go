@@ -107,7 +107,9 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				return utils.PrimitiveFromStr(r.kind, v)
 			}
 
-			if rule.kind == reflect.Slice || rule.kind == reflect.Array {
+			// A spec field is one value, whatever its kind; it is bound as a scalar below.
+			_, isSpecField := customSpecs.Find(string(rule.format))
+			if (rule.kind == reflect.Slice || rule.kind == reflect.Array) && !isSpecField {
 				elemRule := rule.item
 				if elemRule == nil {
 					elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
@@ -185,7 +187,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 					return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
 				}
 
-			} else if rule.kind == reflect.Struct {
+			} else if rule.kind == reflect.Struct || isSpecField {
 				// If this struct-like field has a custom spec format, treat it as a scalar
 				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
 					if len(vals) > 0 {
@@ -201,6 +203,8 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 						if err := f.bindValue(fieldVal, val); err != nil {
 							return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
 						}
+					} else if rule.required || rule.present {
+						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 					}
 					continue
 				}
@@ -315,7 +319,9 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			return nil
 		}
 
-		if rule.kind == reflect.Slice || rule.kind == reflect.Array {
+		// A spec field is one value, whatever its kind; it is bound as a scalar below.
+		_, isSpecField := customSpecs.Find(string(rule.format))
+		if (rule.kind == reflect.Slice || rule.kind == reflect.Array) && !isSpecField {
 			elemRule := rule.item
 			if elemRule == nil {
 				elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
@@ -377,13 +383,15 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 					return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
 				}
 			}
-		} else if rule.kind == reflect.Struct {
+		} else if rule.kind == reflect.Struct || isSpecField {
 			// If this struct-like field has a custom spec format, treat it as a scalar
 			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
 				if len(vals) > 0 {
 					if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 						return err
 					}
+				} else if rule.required || rule.present {
+					return newErrReport(RequestErr, schemaBody, name, "required", errors.New("field is required"))
 				}
 				continue
 			}

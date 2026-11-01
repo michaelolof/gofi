@@ -207,12 +207,22 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 				}
 
 				tagList[stag] = strings.Split(tag, ",")
-			case "example", "deprecated", "description", "pattern", "spec":
+			case "example", "deprecated", "description", "pattern":
 				if len(strings.TrimSpace(tag)) == 0 {
 					continue
 				}
 
 				tagList[stag] = []string{parseTagValue(tag, sf.Type)}
+			case "spec":
+				if len(strings.TrimSpace(tag)) == 0 {
+					continue
+				}
+
+				specID := parseTagValue(tag, sf.Type)
+				if _, ok := s.opts.customSpecs.Find(specID); !ok {
+					panic(fmt.Sprintf("gofi: unknown spec %q in spec tag on field %s; register custom specs with RegisterSpec before the routes that use them", specID, sf.Name))
+				}
+				tagList[stag] = []string{specID}
 			case "default":
 				if len(strings.TrimSpace(tag)) == 0 {
 					continue

@@ -157,6 +157,30 @@ func TestCompilerHooksBindedResponse(t *testing.T) {
 	assert.Equal(t, data.Custom.Val(), "doe")
 }
 
+func TestCustomSpecMustBeRegisteredBeforeRoutes(t *testing.T) {
+	type schema struct {
+		Request struct {
+			Body struct {
+				Custom vendorType `json:"custom" spec:"custom"`
+			}
+		}
+	}
+	route := RouteOptions{Schema: &schema{}, Handler: func(c Context) error { return nil }}
+
+	t.Run("spec registered first", func(t *testing.T) {
+		m := NewRouter()
+		m.RegisterSpec(&vendorSpec{})
+		assert.NotPanics(t, func() { m.Post("/x", route) })
+	})
+
+	t.Run("spec registered after the route", func(t *testing.T) {
+		m := NewRouter()
+		assert.PanicsWithValue(t,
+			`gofi: unknown spec "custom" in spec tag on field Custom; register custom specs with RegisterSpec before the routes that use them`,
+			func() { m.Post("/x", route) })
+	})
+}
+
 func TestDynamicStructTags(t *testing.T) {
 	type testSchema struct {
 		Ok struct {
