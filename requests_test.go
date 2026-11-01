@@ -2,12 +2,15 @@ package gofi
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1665,6 +1668,463 @@ func TestCustomSpecBody_Regression(t *testing.T) {
 			},
 		})
 	})
+}
+
+// A custom spec decodes one value from its text form, whatever the Go kind of
+// the type it produces. These types cover the kinds 97e1e9c did not.
+type (
+	specID     [16]byte // a UUID or ULID kept in binary form
+	specTags   []string
+	specCents  int64
+	specLabels map[string]string
+	specName   string
+)
+
+func specKindSpecs() []CustomSpec {
+	text := func(val any) (string, error) {
+		s, ok := val.(string)
+		if !ok {
+			return "", errors.New("want a string")
+		}
+		return s, nil
+	}
+
+	return []CustomSpec{
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-id", Type: "string", Format: "hex",
+			Encode: func(val any) (string, error) { id := val.(specID); return hex.EncodeToString(id[:]), nil },
+			Decode: func(val any) (any, error) {
+				s, err := text(val)
+				if err != nil {
+					return nil, err
+				}
+				b, err := hex.DecodeString(s)
+				if err != nil || len(b) != 16 {
+					return nil, errors.New("want 32 hex digits")
+				}
+				return specID(b), nil
+			},
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-tags", Type: "string",
+			Encode: func(val any) (string, error) { return strings.Join(val.(specTags), ","), nil },
+			Decode: func(val any) (any, error) { s, err := text(val); return specTags(strings.Split(s, ",")), err },
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-cents", Type: "string",
+			Encode: func(val any) (string, error) { return strconv.FormatInt(int64(val.(specCents)), 10), nil },
+			Decode: func(val any) (any, error) {
+				s, err := text(val)
+				if err != nil {
+					return nil, err
+				}
+				n, err := strconv.ParseInt(strings.ReplaceAll(s, ".", ""), 10, 64)
+				return specCents(n), err
+			},
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-labels", Type: "string",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) {
+				s, err := text(val)
+				k, v, _ := strings.Cut(s, "=")
+				return specLabels{k: v}, err
+			},
+		}),
+		// Decode returns a pointer, as CHAIN's OptionalWalletScopeParameterSpec does.
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-ptr", Type: "string",
+			Encode: func(val any) (string, error) { return string(*val.(*specName)), nil },
+			Decode: func(val any) (any, error) {
+				s, err := text(val)
+				name := specName(s)
+				return &name, err
+			},
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-name", Type: "string",
+			Encode: func(val any) (string, error) { return string(val.(specName)), nil },
+			Decode: func(val any) (any, error) { s, err := text(val); return specName(s), err },
+		}),
+		&vendorSpec{},
+	}
+}
+
+const specIDHex = "0123456789abcdef0123456789abcdef"
+
+var wantSpecID = specID{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef}
+
+// bindSpecBody sends body to a fresh route with schema T and returns what
+// ValidateAndBind produced.
+func bindSpecBody[T any](t *testing.T, contentType, body string) (*T, error) {
+	t.Helper()
+
+	m := NewRouter()
+	m.RegisterSpec(specKindSpecs()...)
+
+	var bound *T
+	var bindErr error
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Headers: map[string]string{"Content-Type": contentType},
+		Body:    strings.NewReader(body),
+		Handler: &RouteOptions{
+			Schema: new(T),
+			Handler: func(c Context) error {
+				bound, bindErr = ValidateAndBind[T](c)
+				return nil
+			},
+		},
+	})
+	require.NoError(t, err, "Inject must not panic")
+
+	return bound, bindErr
+}
+
+func TestCustomSpecBody_Kinds_JSON(t *testing.T) {
+	const ct = "application/json"
+
+	t.Run("array kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					ID specID `json:"id" spec:"spec-id" validate:"required"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"id":"`+specIDHex+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, wantSpecID, s.Request.Body.ID)
+	})
+
+	t.Run("pointer to array kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					ID *specID `json:"id" spec:"spec-id"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"id":"`+specIDHex+`"}`)
+		require.NoError(t, err)
+		require.NotNil(t, s.Request.Body.ID)
+		assert.Equal(t, wantSpecID, *s.Request.Body.ID)
+
+		s, err = bindSpecBody[schema](t, ct, `{}`)
+		require.NoError(t, err)
+		assert.Nil(t, s.Request.Body.ID, "an absent optional field stays nil")
+
+		s, err = bindSpecBody[schema](t, ct, `{"id":null}`)
+		require.NoError(t, err)
+		assert.Nil(t, s.Request.Body.ID, "null stays nil")
+	})
+
+	t.Run("pointer to struct kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Custom *vendorType `json:"custom" spec:"custom"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"custom":"hello-world"}`)
+		require.NoError(t, err)
+		require.NotNil(t, s.Request.Body.Custom)
+		assert.Equal(t, "hello-world", s.Request.Body.Custom.Val())
+	})
+
+	t.Run("Decode returns the pointer itself", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Name *specName `json:"name" spec:"spec-ptr"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"name":"deposit"}`)
+		require.NoError(t, err)
+		require.NotNil(t, s.Request.Body.Name)
+		assert.Equal(t, specName("deposit"), *s.Request.Body.Name)
+	})
+
+	t.Run("slice kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Tags specTags `json:"tags" spec:"spec-tags" validate:"required"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"tags":"a,b"}`)
+		require.NoError(t, err)
+		assert.Equal(t, specTags{"a", "b"}, s.Request.Body.Tags)
+	})
+
+	t.Run("map kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Labels specLabels `json:"labels" spec:"spec-labels" validate:"required"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"labels":"env=prod"}`)
+		require.NoError(t, err)
+		assert.Equal(t, specLabels{"env": "prod"}, s.Request.Body.Labels)
+	})
+
+	t.Run("int kind sent as text", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Amount specCents `json:"amount" spec:"spec-cents" validate:"required"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"amount":"12.34"}`)
+		require.NoError(t, err)
+		assert.Equal(t, specCents(1234), s.Request.Body.Amount)
+	})
+
+	t.Run("missing required field is still rejected", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					ID specID `json:"id" spec:"spec-id" validate:"required"`
+				}
+			}
+		}
+		_, err := bindSpecBody[schema](t, ct, `{}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "required")
+	})
+
+	t.Run("Decode error is reported against the field", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					ID specID `json:"id" spec:"spec-id" validate:"required"`
+				}
+			}
+		}
+		_, err := bindSpecBody[schema](t, ct, `{"id":"not-hex"}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "want 32 hex digits")
+	})
+}
+
+func TestCustomSpecBody_Kinds_FormAndMultipart(t *testing.T) {
+	type schema struct {
+		Request struct {
+			Body struct {
+				ID    specID  `json:"id" spec:"spec-id" validate:"required"`
+				Other *specID `json:"other" spec:"spec-id"`
+			}
+		}
+	}
+
+	t.Run("form", func(t *testing.T) {
+		s, err := bindSpecBody[schema](t, "application/x-www-form-urlencoded", "id="+specIDHex+"&other="+specIDHex)
+		require.NoError(t, err)
+		assert.Equal(t, wantSpecID, s.Request.Body.ID)
+		require.NotNil(t, s.Request.Body.Other)
+		assert.Equal(t, wantSpecID, *s.Request.Body.Other)
+	})
+
+	t.Run("multipart", func(t *testing.T) {
+		part := func(name, value string) string {
+			return "--XX\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"
+		}
+		body := part("id", specIDHex) + part("other", specIDHex) + "--XX--\r\n"
+		s, err := bindSpecBody[schema](t, "multipart/form-data; boundary=XX", body)
+		require.NoError(t, err)
+		assert.Equal(t, wantSpecID, s.Request.Body.ID)
+		require.NotNil(t, s.Request.Body.Other)
+		assert.Equal(t, wantSpecID, *s.Request.Body.Other)
+	})
+}
+
+// A pointer parameter binds whether Decode returns the pointer or the value it
+// points to. A mismatch here is only logged: ValidateAndBind returns no error
+// and the field stays nil, so these tests assert on the field.
+func TestCustomSpecParam_PointerField(t *testing.T) {
+	t.Run("Decode returns the pointer", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					Name *specName `json:"name" spec:"spec-ptr"`
+				}
+			}
+		}
+		s := bindSpecQuery[schema](t, map[string]string{"name": "deposit"})
+		require.NotNil(t, s.Request.Query.Name)
+		assert.Equal(t, specName("deposit"), *s.Request.Query.Name)
+	})
+
+	t.Run("Decode returns the value", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					Name *specName `json:"name" spec:"spec-name"`
+				}
+			}
+		}
+		s := bindSpecQuery[schema](t, map[string]string{"name": "deposit"})
+		require.NotNil(t, s.Request.Query.Name)
+		assert.Equal(t, specName("deposit"), *s.Request.Query.Name)
+	})
+}
+
+func bindSpecQuery[T any](t *testing.T, query map[string]string) *T {
+	t.Helper()
+
+	m := NewRouter()
+	m.RegisterSpec(specKindSpecs()...)
+
+	var bound *T
+	_, err := m.Inject(InjectOptions{
+		Method: "GET",
+		Path:   "/test",
+		Query:  query,
+		Handler: &RouteOptions{
+			Schema: new(T),
+			Handler: func(c Context) error {
+				var bindErr error
+				bound, bindErr = ValidateAndBind[T](c)
+				require.NoError(t, bindErr)
+				return nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	return bound
+}
+
+// A required spec field that was not sent is rejected, whatever its kind. A key
+// under the field's name ("v.x"), or a sibling in a nested struct ("n.other"),
+// reaches the field's branch without supplying a value for it.
+func TestCustomSpecBody_Kinds_RequiredNotSent(t *testing.T) {
+	t.Run("array kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specID `json:"v" spec:"spec-id" validate:"required"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "v.x")
+	})
+
+	t.Run("slice kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specTags `json:"v" spec:"spec-tags" validate:"required"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "v.x")
+	})
+
+	t.Run("struct kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V vendorType `json:"v" spec:"custom" validate:"required"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "v.x")
+	})
+
+	t.Run("present rule", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specID `json:"v" spec:"spec-id" validate:"present"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "v.x")
+	})
+
+	t.Run("nested array kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					N struct {
+						V specID `json:"v" spec:"spec-id" validate:"required"`
+					} `json:"n"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "n.other")
+	})
+
+	t.Run("nested slice kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					N struct {
+						V specTags `json:"v" spec:"spec-tags" validate:"required"`
+					} `json:"n"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "n.other")
+	})
+
+	t.Run("nested struct kind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					N struct {
+						V vendorType `json:"v" spec:"custom" validate:"required"`
+					} `json:"n"`
+				}
+			}
+		}
+		rejectsUnsentSpecField[schema](t, "n.other")
+	})
+
+	t.Run("an optional field that was not sent stays empty", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specID `json:"v" spec:"spec-id"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, "application/x-www-form-urlencoded", "v.x=1")
+		require.NoError(t, err)
+		assert.Equal(t, specID{}, s.Request.Body.V)
+
+		s, err = bindSpecBody[schema](t, "multipart/form-data; boundary=XX", specMultipartPart("v.x"))
+		require.NoError(t, err)
+		assert.Equal(t, specID{}, s.Request.Body.V)
+	})
+}
+
+func rejectsUnsentSpecField[T any](t *testing.T, key string) {
+	t.Helper()
+
+	t.Run("form", func(t *testing.T) {
+		_, err := bindSpecBody[T](t, "application/x-www-form-urlencoded", key+"=1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field is required")
+	})
+
+	t.Run("multipart", func(t *testing.T) {
+		_, err := bindSpecBody[T](t, "multipart/form-data; boundary=XX", specMultipartPart(key))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field is required")
+	})
+}
+
+func specMultipartPart(key string) string {
+	return "--XX\r\nContent-Disposition: form-data; name=\"" + key + "\"\r\n\r\n1\r\n--XX--\r\n"
 }
 
 // =============================================================================

@@ -1069,6 +1069,18 @@ type Schema struct {
 }
 ```
 
+A spec field can have any Go type: a struct, a string, a `[16]byte` ID, a slice, a map,
+or a pointer to any of these. `Decode` receives the value as the client sent it:
+
+| Where the value comes from | `Decode` receives |
+|---|---|
+| Path, query, header, form or multipart field | `string` |
+| JSON body | `string`, `float64` or `bool` for a scalar; the raw JSON bytes for an object or array |
+
+`Decode` returns a value of the field's type, or of the type a pointer field points to.
+Register every spec with `RegisterSpec` before the routes that use it. A `spec` tag that
+names an unregistered spec panics when the route is registered.
+
 
 
 ## Decoding Requests and Encoding Responses

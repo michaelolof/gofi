@@ -267,7 +267,18 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		return nil, newErrReport(RequestErr, schemaField, path.String(), "depth", errors.New("max recursion depth exceeded"))
 	}
 
-	val, err := cont.GetNodeByKind(node, opts.SchemaRules.kind, opts.SchemaRules.format)
+	// A custom spec decodes the JSON value itself, so a spec field is never
+	// read by its Go kind: a [16]byte ID, a pointer or an int sent as text
+	// all reach spec.Decode as the value the client sent.
+	spec, isSpec := opts.Context.CustomSpecs().Find(string(opts.SchemaRules.format))
+
+	var val any
+	var err error
+	if isSpec {
+		val, err = cont.GetRawNode(node)
+	} else {
+		val, err = cont.GetNodeByKind(node, opts.SchemaRules.kind, opts.SchemaRules.format)
+	}
 	if err != nil {
 		return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 	}
@@ -317,7 +328,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	}
 
 	// Check for custom spec types on body fields (e.g., struct fields tagged with spec:"custom")
-	if spec, ok := opts.Context.CustomSpecs().Find(string(opts.SchemaRules.format)); ok {
+	if isSpec {
 		decoded, err := spec.Decode(val)
 		if err != nil {
 			return nil, newErrReport(RequestErr, schemaField, path.String(), "typeCast", err)
@@ -328,7 +339,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		}
 
 		if opts.ShouldBind && opts.HasBody {
-			if err = j.decodeFieldValue(opts.Body, decoded, ""); err != nil {
+			if err = j.bindSpecValue(opts.Body, decoded); err != nil {
 				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
 		}
@@ -659,6 +670,31 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	}
 
 	return &walkFinished, nil
+}
+
+// bindSpecValue stores a custom spec's decoded value in field. Decode returns
+// the field's own type, or the type a pointer field points to, so that value
+// is assigned as is, whatever its kind. Anything else is converted as before.
+func (j *JSONBodyParser) bindSpecValue(field reflect.Value, decoded any) error {
+	v := reflect.ValueOf(decoded)
+	if !v.IsValid() {
+		return nil
+	}
+
+	target := field
+	if field.Kind() == reflect.Pointer && v.Type().AssignableTo(field.Type().Elem()) {
+		if field.IsNil() {
+			field.Set(reflect.New(field.Type().Elem()))
+		}
+		target = field.Elem()
+	}
+
+	if v.Type().AssignableTo(target.Type()) {
+		target.Set(v)
+		return nil
+	}
+
+	return j.decodeFieldValue(field, decoded, "")
 }
 
 func (j *JSONBodyParser) decodeFieldValue(field reflect.Value, val any, timeLayout string) error {
