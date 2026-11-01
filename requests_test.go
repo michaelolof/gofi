@@ -1746,6 +1746,35 @@ func specKindSpecs() []CustomSpec {
 			Encode: func(val any) (string, error) { return string(val.(specName)), nil },
 			Decode: func(val any) (any, error) { s, err := text(val); return specName(s), err },
 		}),
+		// An unchecked assertion. A string field is only ever given a string, so
+		// a client can't make this panic.
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-unchecked", Type: "string",
+			Encode: func(val any) (string, error) { return string(val.(specName)), nil },
+			Decode: func(val any) (any, error) { return specName(val.(string)), nil },
+		}),
+		// Unchecked assertions on fields that can receive a type they don't expect.
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-unchecked-id", Type: "string",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { return specID{val.(string)[0]}, nil },
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-unchecked-count", Type: "integer",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { return specCents(val.(int64)), nil },
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-count", Type: "integer",
+			Encode: func(val any) (string, error) { return strconv.FormatInt(int64(val.(specCents)), 10), nil },
+			Decode: func(val any) (any, error) {
+				n, ok := val.(int64)
+				if !ok {
+					return nil, errors.New("want an int64")
+				}
+				return specCents(n), nil
+			},
+		}),
 		&vendorSpec{},
 	}
 }
@@ -2125,6 +2154,303 @@ func rejectsUnsentSpecField[T any](t *testing.T, key string) {
 
 func specMultipartPart(key string) string {
 	return "--XX\r\nContent-Disposition: form-data; name=\"" + key + "\"\r\n\r\n1\r\n--XX--\r\n"
+}
+
+// A client chooses the JSON type it sends, so a string field rejects any other
+// type before Decode runs. On v0.10.1 these reached Decode, and an unchecked
+// assertion turned a 400 into a panic.
+func TestCustomSpecBody_Kinds_WrongTypeOnStringField(t *testing.T) {
+	const ct = "application/json"
+	type schema struct {
+		Request struct {
+			Body struct {
+				Name  specName  `json:"name" spec:"spec-unchecked"`
+				Alias *specName `json:"alias" spec:"spec-unchecked"`
+			}
+		}
+	}
+
+	for _, value := range []string{`123`, `1.5`, `true`, `{"a":1}`, `[1]`} {
+		t.Run("string field given "+value, func(t *testing.T) {
+			_, err := bindSpecBody[schema](t, ct, `{"name":`+value+`}`)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "value doesn't contain string")
+		})
+
+		t.Run("pointer field given "+value, func(t *testing.T) {
+			_, err := bindSpecBody[schema](t, ct, `{"alias":`+value+`}`)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "value doesn't contain string")
+		})
+	}
+
+	t.Run("a string still binds", func(t *testing.T) {
+		s, err := bindSpecBody[schema](t, ct, `{"name":"a","alias":"b"}`)
+		require.NoError(t, err)
+		assert.Equal(t, specName("a"), s.Request.Body.Name)
+		require.NotNil(t, s.Request.Body.Alias)
+		assert.Equal(t, specName("b"), *s.Request.Body.Alias)
+	})
+
+	t.Run("an absent or null pointer stays nil", func(t *testing.T) {
+		s, err := bindSpecBody[schema](t, ct, `{"alias":null}`)
+		require.NoError(t, err)
+		assert.Nil(t, s.Request.Body.Alias)
+	})
+}
+
+// Integers above 2^53 don't survive a float64, so a number field is read as its
+// own kind. On v0.10.1 they reached Decode as a float64 and bound the wrong value.
+func TestCustomSpecBody_Kinds_LargeIntegerStaysExact(t *testing.T) {
+	const want = specCents(9007199254740993)
+	type schema struct {
+		Request struct {
+			Body struct {
+				N specCents  `json:"n" spec:"spec-count"`
+				P *specCents `json:"p" spec:"spec-count"`
+			}
+		}
+	}
+
+	s, err := bindSpecBody[schema](t, "application/json", `{"n":9007199254740993,"p":9007199254740993}`)
+	require.NoError(t, err)
+	assert.Equal(t, want, s.Request.Body.N)
+	require.NotNil(t, s.Request.Body.P)
+	assert.Equal(t, want, *s.Request.Body.P)
+}
+
+// A pointer spec field keeps its own kind for everything but the spec read, so a
+// spec on a pointer Body still runs Decode.
+func TestCustomSpecBody_Kinds_PointerBody(t *testing.T) {
+	type schema struct {
+		Request struct {
+			Body *specName `spec:"spec-name"`
+		}
+	}
+
+	s, err := bindSpecBody[schema](t, "application/json", `"deposit"`)
+	require.NoError(t, err)
+	require.NotNil(t, s.Request.Body)
+	assert.Equal(t, specName("deposit"), *s.Request.Body)
+}
+
+// A client chooses what it sends, so a type assertion that fails inside Decode
+// is a rejected value, wherever the value comes from.
+func TestCustomSpecBody_Kinds_UncheckedDecode(t *testing.T) {
+	const wantMsg = "unexpected value of type"
+
+	t.Run("JSON", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					ID    specID     `json:"id" spec:"spec-unchecked-id"`
+					Ptr   *specID    `json:"ptr" spec:"spec-unchecked-id"`
+					Count specCents  `json:"count" spec:"spec-unchecked-count"`
+					More  *specCents `json:"more" spec:"spec-unchecked-count"`
+				}
+			}
+		}
+		for _, body := range []string{
+			`{"id":123}`, `{"id":true}`, `{"id":{"a":1}}`, `{"id":[1]}`,
+			`{"ptr":123}`,
+			`{"count":"x"}`, `{"count":1.5}`, `{"count":true}`,
+			`{"more":"x"}`,
+		} {
+			t.Run(body, func(t *testing.T) {
+				_, err := bindSpecBody[schema](t, "application/json", body)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), wantMsg)
+			})
+		}
+
+		s, err := bindSpecBody[schema](t, "application/json", `{"count":5,"more":6}`)
+		require.NoError(t, err, "the type the spec expects still binds")
+		assert.Equal(t, specCents(5), s.Request.Body.Count)
+		require.NotNil(t, s.Request.Body.More)
+		assert.Equal(t, specCents(6), *s.Request.Body.More)
+	})
+
+	t.Run("form and multipart", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					Count specCents `json:"count" spec:"spec-unchecked-count"`
+					N     struct {
+						Count specCents `json:"count" spec:"spec-unchecked-count"`
+					} `json:"n"`
+				}
+			}
+		}
+		for _, key := range []string{"count", "n.count"} {
+			t.Run(key, func(t *testing.T) {
+				_, err := bindSpecBody[schema](t, "application/x-www-form-urlencoded", key+"=x")
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), wantMsg)
+
+				_, err = bindSpecBody[schema](t, "multipart/form-data; boundary=XX", specMultipartPart(key))
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), wantMsg)
+			})
+		}
+	})
+
+	t.Run("path, query and header", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Path struct {
+					P specCents `json:"p" spec:"spec-unchecked-count"`
+				}
+				Query struct {
+					Q specCents `json:"q" spec:"spec-unchecked-count"`
+				}
+				Header struct {
+					H specCents `json:"x-h" spec:"spec-unchecked-count"`
+				}
+			}
+		}
+		for name, opts := range map[string]TestOptions{
+			"path":   {Method: "GET", Path: "/t/x"},
+			"query":  {Method: "GET", Path: "/t/x", Query: map[string]string{"q": "x"}},
+			"header": {Method: "GET", Path: "/t/x", Headers: map[string]string{"x-h": "x"}},
+		} {
+			t.Run(name, func(t *testing.T) {
+				m := NewRouter()
+				m.RegisterSpec(specKindSpecs()...)
+				m.Get("/t/:p", RouteOptions{Schema: &schema{}, Handler: func(c Context) error {
+					_, err := ValidateAndBind[schema](c)
+					return err
+				}})
+				resp, err := m.Test(opts)
+				require.NoError(t, err, "must not panic")
+				assert.Equal(t, 400, resp.StatusCode)
+				assert.Contains(t, string(resp.Body), wantMsg)
+			})
+		}
+	})
+
+	t.Run("any other panic is still a server fault", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specName `json:"v" spec:"spec-boom"`
+				}
+			}
+		}
+		m := NewRouter()
+		m.RegisterSpec(DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-boom", Type: "string",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { panic("boom") },
+		}))
+		_, err := m.Inject(InjectOptions{
+			Method:  "POST",
+			Path:    "/test",
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Body:    strings.NewReader(`{"v":"x"}`),
+			Handler: &RouteOptions{
+				Schema: &schema{},
+				Handler: func(c Context) error {
+					_, err := ValidateAndBind[schema](c)
+					return err
+				},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "boom")
+	})
+}
+
+// specInputSchema has one spec field of type F, to record what Decode receives.
+type specInputSchema[F any] struct {
+	Request struct {
+		Body struct {
+			V F `json:"v" spec:"spec-input"`
+		}
+	}
+}
+
+func specDecodeInput[F any](t *testing.T, value string) any {
+	t.Helper()
+
+	var got any
+	m := NewRouter()
+	m.RegisterSpec(DefineCustomSpec(SpecDefinition{
+		SpecID: "spec-input", Type: "string",
+		Encode: func(val any) (string, error) { return "", nil },
+		Decode: func(val any) (any, error) { got = val; return nil, errors.New("recorded") },
+	}))
+
+	_, err := m.Inject(InjectOptions{
+		Method:  "POST",
+		Path:    "/test",
+		Headers: map[string]string{"Content-Type": "application/json"},
+		Body:    strings.NewReader(`{"v":` + value + `}`),
+		Handler: &RouteOptions{
+			Schema: new(specInputSchema[F]),
+			Handler: func(c Context) error {
+				_, bindErr := ValidateAndBind[specInputSchema[F]](c)
+				require.ErrorContains(t, bindErr, "recorded", "Decode must run")
+				return nil
+			},
+		},
+	})
+	require.NoError(t, err, "Inject must not panic")
+
+	return got
+}
+
+// What Decode receives is the contract in README.md's spec section. A pointer
+// field counts as the type it points to.
+func TestCustomSpecBody_Kinds_DecodeInput(t *testing.T) {
+	cases := []struct {
+		field string
+		read  func(*testing.T, string) any
+		value string
+		want  any
+	}{
+		// A string field gets a string; any other type never reaches Decode.
+		{"string", specDecodeInput[string], `"abc"`, "abc"},
+		{"*string", specDecodeInput[*string], `"abc"`, "abc"},
+
+		// A number or bool field gets its own kind when the value fits it.
+		{"int64", specDecodeInput[int64], `9007199254740993`, int64(9007199254740993)},
+		{"*int64", specDecodeInput[*int64], `9007199254740993`, int64(9007199254740993)},
+		{"uint64", specDecodeInput[uint64], `18446744073709551615`, uint64(18446744073709551615)},
+		{"int8", specDecodeInput[int8], `7`, int8(7)},
+		{"float64", specDecodeInput[float64], `1.5`, 1.5},
+		{"bool", specDecodeInput[bool], `true`, true},
+		{"*bool", specDecodeInput[*bool], `true`, true},
+
+		// Otherwise it gets the value as sent, so a spec can take text.
+		{"int64", specDecodeInput[int64], `"12.34"`, "12.34"},
+		{"int64", specDecodeInput[int64], `12.34`, 12.34},
+		{"int64", specDecodeInput[int64], `true`, true},
+		{"int64", specDecodeInput[int64], `{"a":1}`, []byte(`{"a":1}`)},
+		{"int8", specDecodeInput[int8], `300`, float64(300)},
+		{"float64", specDecodeInput[float64], `"1.5"`, "1.5"},
+		{"bool", specDecodeInput[bool], `"yes"`, "yes"},
+
+		// Every other field gets the value as sent.
+		{"[16]byte", specDecodeInput[specID], `"abc"`, "abc"},
+		{"[16]byte", specDecodeInput[specID], `12`, float64(12)},
+		{"[16]byte", specDecodeInput[specID], `true`, true},
+		{"[16]byte", specDecodeInput[specID], `{"a":1}`, []byte(`{"a":1}`)},
+		{"[16]byte", specDecodeInput[specID], `[1,2]`, []byte(`[1,2]`)},
+		{"*[16]byte", specDecodeInput[*specID], `"abc"`, "abc"},
+		{"slice", specDecodeInput[specTags], `"a,b"`, "a,b"},
+		{"slice", specDecodeInput[specTags], `["a"]`, []byte(`["a"]`)},
+		{"map", specDecodeInput[specLabels], `"k=v"`, "k=v"},
+		{"map", specDecodeInput[specLabels], `{"a":"b"}`, []byte(`{"a":"b"}`)},
+		{"struct", specDecodeInput[vendorType], `"x"`, "x"},
+		{"struct", specDecodeInput[vendorType], `7`, float64(7)},
+		{"*struct", specDecodeInput[*vendorType], `"x"`, "x"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.field+" given "+tc.value, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.read(t, tc.value))
+		})
+	}
 }
 
 // =============================================================================

@@ -128,6 +128,10 @@ type RuleDef struct {
 	jsonKeyBytes []byte
 	omitEmpty    bool // json:",omitempty"
 	skipJSON     bool // json:"-"
+
+	// specKind is the kind a custom spec field is read as: a pointer counts as
+	// the kind it points to.
+	specKind reflect.Kind
 }
 
 func preComputeJSONKey(name string) []byte {

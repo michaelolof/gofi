@@ -130,6 +130,28 @@ type fuzzGenericSchema struct {
 	}
 }
 
+// fuzzSpecSchema reaches every custom spec path. Its specs come from
+// specKindSpecs in requests_test.go.
+type fuzzSpecSchema struct {
+	Request struct {
+		Body struct {
+			ID     specID     `json:"id" spec:"spec-id"`
+			Opt    *specID    `json:"opt" spec:"spec-id"`
+			Tags   specTags   `json:"tags" spec:"spec-tags"`
+			Labels specLabels `json:"labels" spec:"spec-labels"`
+			Cents  specCents  `json:"cents" spec:"spec-cents"`
+			More   *specCents `json:"more" spec:"spec-cents"`
+			Count  specCents  `json:"count" spec:"spec-count"`
+			Name   specName   `json:"name" spec:"spec-unchecked"`
+			Alias  *specName  `json:"alias" spec:"spec-unchecked"`
+			Scope  *specName  `json:"scope" spec:"spec-ptr"`
+			Vendor vendorType `json:"vendor" spec:"custom"`
+			UID    specID     `json:"uid" spec:"spec-unchecked-id"`
+			UCount *specCents `json:"ucount" spec:"spec-unchecked-count"`
+		}
+	}
+}
+
 // fuzzBind injects body into a route bound with schema S and fails on a
 // panic or any 5xx: hostile input must be a client error, never a crash.
 func fuzzBind[S any](t *testing.T, r Router, contentType string, body []byte) {
@@ -168,20 +190,35 @@ func FuzzBindJSONBody(f *testing.F) {
 	f.Add([]byte(`{"raw":{"x":[1,2]},"map":{"a":{"b":null}},"any":[1,"2",{}],"ptr":-5,"when":"2026-01-02T03:04:05Z","list":[null,{"a":[1e308,-0]}]}`))
 	f.Add([]byte(`[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]`))
 	f.Add([]byte(`{"name":"\ud800","count":"1","inner":{"items":{"key":1}}}`))
+	f.Add([]byte(`{"id":"0123456789abcdef0123456789abcdef","opt":"0123456789abcdef0123456789abcdef","tags":"a,b","labels":"k=v","cents":"12.34","more":"5","count":9007199254740993,"name":"n","alias":"a","scope":"s","vendor":"v"}`))
+	f.Add([]byte(`{"id":1,"opt":true,"tags":[1],"labels":{},"cents":{},"more":[],"count":"x","vendor":[]}`))
+	f.Add([]byte(`{"name":1}`))
+	f.Add([]byte(`{"alias":{"a":1}}`))
+	f.Add([]byte(`{"scope":[1]}`))
+	f.Add([]byte(`{"uid":1}`))
+	f.Add([]byte(`{"ucount":"x"}`))
 	simple := NewRouter()
 	generic := NewRouter()
+	specs := NewRouter()
+	specs.RegisterSpec(specKindSpecs()...)
 	f.Fuzz(func(t *testing.T, body []byte) {
 		fuzzBind[fuzzSimpleSchema](t, simple, "application/json", body)
 		fuzzBind[fuzzGenericSchema](t, generic, "application/json", body)
+		fuzzBind[fuzzSpecSchema](t, specs, "application/json", body)
 	})
 }
 
 func FuzzBindFormBody(f *testing.F) {
 	f.Add([]byte("name=a&count=1&Tags=x&Tags=y&inner.id=7"))
 	f.Add([]byte("name=%zz&count=-1&count=999999999999999999999&=&&&="))
+	f.Add([]byte("id=0123456789abcdef0123456789abcdef&opt=x&tags=a,b&labels=k=v&cents=12.34&more=5&count=7&name=n&alias=a&scope=s&vendor=v&id.x=1"))
+	f.Add([]byte("ucount=x"))
 	r := NewRouter()
+	specs := NewRouter()
+	specs.RegisterSpec(specKindSpecs()...)
 	f.Fuzz(func(t *testing.T, body []byte) {
 		fuzzBind[fuzzSimpleSchema](t, r, "application/x-www-form-urlencoded", body)
+		fuzzBind[fuzzSpecSchema](t, specs, "application/x-www-form-urlencoded", body)
 	})
 }
 
@@ -208,9 +245,14 @@ func FuzzBindMultipartBody(f *testing.F) {
 	f.Add(seed.Bytes())
 	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nx\r\n--b--\r\n--b\r\n"))
 	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../etc/passwd\"\r\n\r\nx\r\n--b"))
+	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n0123456789abcdef0123456789abcdef\r\n--b\r\nContent-Disposition: form-data; name=\"more\"\r\n\r\n5\r\n--b--\r\n"))
+	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"ucount\"\r\n\r\nx\r\n--b--\r\n"))
 	r := NewRouter()
+	specs := NewRouter()
+	specs.RegisterSpec(specKindSpecs()...)
 	f.Fuzz(func(t *testing.T, body []byte) {
 		fuzzBind[fuzzMultipartSchema](t, r, "multipart/form-data; boundary=b", body)
+		fuzzBind[fuzzSpecSchema](t, specs, "multipart/form-data; boundary=b", body)
 	})
 }
 

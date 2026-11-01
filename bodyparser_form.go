@@ -102,7 +102,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				}
 				// Check custom spec first
 				if spec, ok := customSpecs.Find(string(r.format)); ok {
-					return spec.Decode(v)
+					return decodeSpecValue(spec, v)
 				}
 				return utils.PrimitiveFromStr(r.kind, v)
 			}
@@ -299,7 +299,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			}
 			// Check custom spec first
 			if spec, ok := customSpecs.Find(string(r.format)); ok {
-				return spec.Decode(v)
+				return decodeSpecValue(spec, v)
 			}
 			return utils.PrimitiveFromStr(r.kind, v)
 		}

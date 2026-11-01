@@ -413,6 +413,10 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 		typeStr = v.Type()
 		format = v.Format()
 		ruleDefs.format = utils.ObjectFormats(specTag)
+		ruleDefs.specKind = kind
+		if kind == reflect.Pointer {
+			ruleDefs.specKind = typ.Elem().Kind()
+		}
 		isCustom = true
 	}
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
@@ -416,7 +417,7 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 	var val any
 	var err error
 	if spec, ok := c.serverOpts.customSpecs.Find(string(def.format)); ok {
-		val, err = spec.Decode(qv)
+		val, err = decodeSpecValue(spec, qv)
 		if err != nil {
 			return newErrReport(RequestErr, field, def.field, "typeCast", err)
 		}
@@ -454,6 +455,21 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 	}
 
 	return nil
+}
+
+// decodeSpecValue runs spec.Decode. A client chooses what it sends, so a type
+// assertion that fails on the input is a rejected value, not a server fault. Any
+// other panic is left to surface as one.
+func decodeSpecValue(spec CustomSpec, val any) (decoded any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(*runtime.TypeAssertionError); !ok {
+				panic(r)
+			}
+			err = fmt.Errorf("unexpected value of type %T", val)
+		}
+	}()
+	return spec.Decode(val)
 }
 
 // setParamField stores val, a parsed parameter value, in field. A pointer

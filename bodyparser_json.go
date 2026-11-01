@@ -267,15 +267,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		return nil, newErrReport(RequestErr, schemaField, path.String(), "depth", errors.New("max recursion depth exceeded"))
 	}
 
-	// A custom spec decodes the JSON value itself, so a spec field is never
-	// read by its Go kind: a [16]byte ID, a pointer or an int sent as text
-	// all reach spec.Decode as the value the client sent.
+	// A custom spec decodes the JSON value itself, so a [16]byte ID or an int
+	// sent as text must reach spec.Decode rather than fail a read by Go kind.
 	spec, isSpec := opts.Context.CustomSpecs().Find(string(opts.SchemaRules.format))
 
 	var val any
 	var err error
 	if isSpec {
-		val, err = cont.GetRawNode(node)
+		val, err = cont.GetSpecNode(node, opts.SchemaRules.specKind)
 	} else {
 		val, err = cont.GetNodeByKind(node, opts.SchemaRules.kind, opts.SchemaRules.format)
 	}
@@ -329,7 +328,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 
 	// Check for custom spec types on body fields (e.g., struct fields tagged with spec:"custom")
 	if isSpec {
-		decoded, err := spec.Decode(val)
+		decoded, err := decodeSpecValue(spec, val)
 		if err != nil {
 			return nil, newErrReport(RequestErr, schemaField, path.String(), "typeCast", err)
 		}

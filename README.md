@@ -1052,7 +1052,11 @@ var customIDSpec = gofi.DefineCustomSpec(gofi.SpecDefinition{
         return string(val.(MyCustomID)), nil
     },
     Decode: func(val any) (any, error) {
-        return MyCustomID(val.(string)), nil
+        s, ok := val.(string)
+        if !ok {
+            return nil, errors.New("custom-id must be a string")
+        }
+        return MyCustomID(s), nil
     },
 })
 
@@ -1070,12 +1074,18 @@ type Schema struct {
 ```
 
 A spec field can have any Go type: a struct, a string, a `[16]byte` ID, a slice, a map,
-or a pointer to any of these. `Decode` receives the value as the client sent it:
+or a pointer to any of these. A pointer field counts as the type it points to.
 
 | Where the value comes from | `Decode` receives |
 |---|---|
 | Path, query, header, form or multipart field | `string` |
-| JSON body | `string`, `float64` or `bool` for a scalar; the raw JSON bytes for an object or array |
+| JSON body, string field | `string`. Any other JSON type is a 400, and `Decode` doesn't run |
+| JSON body, number or bool field | that kind, for example `int64`, so large integers stay exact. If the value doesn't fit, the value as sent, as in the next row, so a spec can take an amount sent as text |
+| JSON body, any other field | the value as sent: `string`, `float64` or `bool` for a scalar, the raw JSON bytes for an object or array |
+
+A client chooses what it sends, so check the type in `Decode`, as the example does, and return
+your own error. An unchecked `val.(string)` that fails is also a 400, with a generic message. Any
+other panic in `Decode` is a 500.
 
 `Decode` returns a value of the field's type, or of the type a pointer field points to.
 Register every spec with `RegisterSpec` before the routes that use it. A `spec` tag that

@@ -322,13 +322,27 @@ func GetNodeByKind(node *fastjson.Value, kind reflect.Kind, format utils.ObjectF
 	}
 }
 
-// GetRawNode returns node's JSON value for a custom spec to decode, whatever
-// the Go kind of the field it fills: a string, float64 or bool for a scalar,
-// and the raw JSON bytes for an object or array. A missing or null node
-// returns EOF, as GetNodeByKind does.
-func GetRawNode(node *fastjson.Value) (any, error) {
+// GetSpecNode returns node's JSON value for a custom spec to decode into a
+// field of the given kind. A missing or null node returns EOF, as GetNodeByKind
+// does.
+//
+// A string field only accepts a JSON string, so any other type is rejected here,
+// before Decode runs. A number or bool field is read as its own kind, which keeps
+// large integers exact, and gets the value as sent when that read fails, so a
+// spec can take an amount sent as text. Any other field gets the value as sent:
+// a string, float64 or bool for a scalar, and the raw JSON bytes for an object or
+// array.
+func GetSpecNode(node *fastjson.Value, kind reflect.Kind) (any, error) {
 	if node == nil || node.Type() == fastjson.TypeNull {
 		return EOF, nil
+	}
+	if kind == reflect.String {
+		return GetNodeByKind(node, kind, "")
+	}
+	if utils.IsPrimitiveKind(kind) {
+		if v, err := GetNodeByKind(node, kind, ""); err == nil {
+			return v, nil
+		}
 	}
 	return extractRawValue(node)
 }

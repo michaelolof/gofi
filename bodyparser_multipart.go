@@ -181,7 +181,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 				}
 				// Check custom spec first
 				if spec, ok := customSpecs.Find(string(r.format)); ok {
-					return spec.Decode(v)
+					return decodeSpecValue(spec, v)
 				}
 				return utils.PrimitiveFromStr(r.kind, v)
 			}
@@ -377,7 +377,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 			}
 			// Check custom spec first
 			if spec, ok := customSpecs.Find(string(r.format)); ok {
-				return spec.Decode(v)
+				return decodeSpecValue(spec, v)
 			}
 			return utils.PrimitiveFromStr(r.kind, v)
 		}
