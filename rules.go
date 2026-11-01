@@ -57,6 +57,16 @@ func (o *muxOptions) customValidatorsOrNil() rules.ContextValidators {
 	return o.customValidators
 }
 
+// plainValues returns r for a custom spec field, whose Decode can return a named
+// type whatever the field's own type is. A custom rule keeps the value as it is,
+// so it can assert on its own type.
+func (r ruleOpts) plainValues() ruleOpts {
+	if validators.NeedsPlainValues(r.rule) {
+		r.dator = validators.PlainValues(r.dator)
+	}
+	return r
+}
+
 // skipWhenEmpty returns r with its validator skipped for empty values.
 func (r ruleOpts) skipWhenEmpty() ruleOpts {
 	next := r.dator
@@ -127,11 +137,39 @@ type RuleDef struct {
 	accessor     fieldAccessor
 	jsonKeyBytes []byte
 	omitEmpty    bool // json:",omitempty"
+	omitZero     bool // json:",omitzero"
 	skipJSON     bool // json:"-"
 
 	// specKind is the kind a custom spec field is read as: a pointer counts as
-	// the kind it points to.
+	// the kind it points to. It is reflect.Invalid on any other field.
 	specKind reflect.Kind
+	// specDefault is a custom spec field's default tag, decoded at registration.
+	specDefault any
+}
+
+// defaultValue returns r's default as a value of type t, or an invalid Value if
+// it has none that fits.
+func (r *RuleDef) defaultValue(t reflect.Type) reflect.Value {
+	def := r.defVal
+	if r.specDefault != nil {
+		def = r.specDefault
+	}
+	if def == nil {
+		return reflect.Value{}
+	}
+	v := reflect.ValueOf(def)
+	if v.Type().AssignableTo(t) {
+		return v
+	}
+	if t.Kind() == reflect.Pointer && v.Type().ConvertibleTo(t.Elem()) {
+		p := reflect.New(t.Elem())
+		p.Elem().Set(v.Convert(t.Elem()))
+		return p
+	}
+	if v.Type().ConvertibleTo(t) {
+		return v.Convert(t)
+	}
+	return reflect.Value{}
 }
 
 func preComputeJSONKey(name string) []byte {

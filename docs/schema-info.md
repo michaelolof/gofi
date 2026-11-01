@@ -27,8 +27,12 @@ The `Request` struct defines the expected input. Gofi binds data from the HTTP r
 | **`Path`** | URL Path | Maps to path parameters (e.g., `/users/:id`). |
 | **`Query`** | URL Query | Maps to query string parameters (e.g., `?page=1`). |
 | **`Header`** | HTTP Headers | Maps to request headers. |
-| **`Cookie`** | HTTP Cookies | Maps to request cookies. Supports `string` or `http.Cookie`. |
+| **`Cookie`** | HTTP Cookies | Maps to request cookies. Supports primitive types or `http.Cookie`. |
 | **`Body`** | Request Body | Maps to the request body (JSON, XML, etc.). |
+
+A `Path`, `Query` or `Header` field is a primitive type, `time.Time` or a type with a custom spec. A `Cookie` field is a primitive type or `http.Cookie`, and doesn't use a spec. Anything else panics when the route is registered, because it could never bind.
+
+In a JSON body or response, a `[]byte` or `[N]byte` field with no spec is a base64 string, which is what OpenAPI documents. A `[N]byte` value of the wrong length is a 400.
 
 ### Example
 
@@ -96,7 +100,7 @@ Ok struct {
 
 - **`Body`**: The payload to send (struct, string, etc.).
 - **`Header`**: Headers to set on the response.
-- **`Cookie`**: Cookies to set. Can be `string` values or `http.Cookie` structs.
+- **`Cookie`**: Cookies to set. Can be primitive values or `http.Cookie` structs. Anything else, or a `spec` tag, panics when the route is registered.
 
 ### Supported Response Fields
 

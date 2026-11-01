@@ -196,7 +196,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 							return newErrReport(RequestErr, schemaBody, key, "typeCast", err)
 						}
 
-						if err := runValidation(val, RequestErr, schemaBody, key, rule.rules); err != nil {
+						if err := runSpecValidation(val, RequestErr, schemaBody, key, rule.rules); err != nil {
 							return err
 						}
 
@@ -248,23 +248,7 @@ func (f *FormBodyParser) bindValue(field reflect.Value, val any) error {
 		return nil
 	}
 
-	rv := reflect.ValueOf(val)
-
-	// Try direct assignment first (important for pointers like *multipart.FileHeader)
-	if rv.Type().ConvertibleTo(field.Type()) {
-		field.Set(rv.Convert(field.Type()))
-		return nil
-	}
-
-	if field.Kind() == reflect.Pointer {
-		// If the field is a pointer, allocate memory if it's nil
-		if field.IsNil() {
-			field.Set(reflect.New(field.Type().Elem()))
-		}
-		return f.bindValue(field.Elem(), val)
-	}
-
-	return fmt.Errorf("cannot convert %v to %v", rv.Type(), field.Type())
+	return setParamField(field, val)
 }
 
 // bindStruct binds the nested fields under path. Errors and validation mirror
@@ -310,7 +294,11 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			if err != nil {
 				return newErrReport(RequestErr, schemaBody, name, "typeCast", err)
 			}
-			if err := runValidation(val, RequestErr, schemaBody, name, r.rules); err != nil {
+			validate := runValidation
+			if _, isSpec := customSpecs.Find(string(r.format)); isSpec {
+				validate = runSpecValidation
+			}
+			if err := validate(val, RequestErr, schemaBody, name, r.rules); err != nil {
 				return err
 			}
 			if err := f.bindValue(field, val); err != nil {

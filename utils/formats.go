@@ -38,8 +38,9 @@ func ImplementsJSONUnmarshaler(t reflect.Type) bool {
 	return t.Implements(jsonUnmarshalerType) || reflect.PointerTo(t).Implements(jsonUnmarshalerType)
 }
 
-// IsByteSlice reports whether T is a []byte / [N]byte with NO custom JSON marshaler
-// (i.e. encoding/json would treat it as a base64 string).
+// IsByteSlice reports whether T is a []byte / [N]byte with NO custom JSON marshaler.
+// Gofi reads and writes both as a base64 string. encoding/json does that for []byte
+// only, and writes a [N]byte as an array of numbers.
 func IsByteSlice(t reflect.Type) bool {
 	if ImplementsJSONMarshaler(t) || ImplementsJSONUnmarshaler(t) {
 		return false // e.g. json.RawMessage is []byte but marshals verbatim, not base64

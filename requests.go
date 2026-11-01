@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"reflect"
 	"runtime"
@@ -168,6 +167,9 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 			for _, def := range pdef.properties {
 				hv := c.headerGet(def.field)
 				if err := doValidateStrAndBind(c, schemaHeaders, hv, def, shouldBind, reqStruct); err != nil {
+					if _, ok := err.(*paramBindError); ok {
+						return nil, err
+					}
 					errs = append(errs, err)
 				}
 			}
@@ -183,6 +185,9 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 			for _, def := range pdef.properties {
 				qv := c.queryGet(def.field)
 				if err := doValidateStrAndBind(c, schemaQuery, qv, def, shouldBind, reqStruct); err != nil {
+					if _, ok := err.(*paramBindError); ok {
+						return nil, err
+					}
 					errs = append(errs, err)
 				}
 			}
@@ -203,6 +208,9 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 					pv = strings.Clone(pv)
 				}
 				if err := doValidateStrAndBind(c, schemaPath, pv, def, shouldBind, reqStruct); err != nil {
+					if _, ok := err.(*paramBindError); ok {
+						return nil, err
+					}
 					errs = append(errs, err)
 				}
 			}
@@ -264,9 +272,8 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 
 					if shouldBind {
 						sf := reqStruct.FieldByName(string(schemaCookies)).FieldByName(def.fieldName)
-						if !setParamField(sf, reflect.ValueOf(cvs)) {
-							errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "typeMismatch",
-								fmt.Errorf("cannot convert %T to %s", cvs, sf.Type())))
+						if err := setParamField(sf, cvs); err != nil {
+							errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "typeMismatch", err))
 						}
 					}
 				}
@@ -421,11 +428,14 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 		if err != nil {
 			return newErrReport(RequestErr, field, def.field, "typeCast", err)
 		}
+		if val == nil {
+			return runSpecValidation(nil, RequestErr, field, def.field, def.rules)
+		}
 	} else {
 		val, err = utils.PrimitiveFromStr(def.kind, qv)
 		if err != nil || utils.NotPrimitive(val) {
 			if err == nil {
-				err = errors.New("unsupported header type passed")
+				err = errors.New("unsupported parameter type " + def.kind.String())
 			}
 			// Handle special cases.
 			switch def.format {
@@ -447,23 +457,42 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 
 	if shouldBind {
 		sf := reqStruct.FieldByName(string(field)).FieldByName(def.fieldName)
-		rv := reflect.ValueOf(val)
-		if !setParamField(sf, rv) {
-			slog.Error(newErrReport(RequestErr, field, def.field, "typeMismatch",
-				errors.New("cannot convert "+rv.Type().String()+" to "+sf.Type().String())).Error())
+		if err := setParamField(sf, val); err != nil {
+			return &paramBindError{field: field, name: def.field, err: err}
 		}
 	}
 
 	return nil
 }
 
+// paramBindError means a parsed param can't be stored in its field: the field's
+// type and its spec's Decode disagree. The client can't fix that, so it is not a
+// validation error: it reaches the client as a 500 with its text hidden.
+type paramBindError struct {
+	field schemaField
+	name  string
+	err   error
+}
+
+func (e *paramBindError) Error() string {
+	return fmt.Sprintf("gofi: cannot bind %s(%s): %v", e.field, e.name, e.err)
+}
+
+func (e *paramBindError) Unwrap() error {
+	return e.err
+}
+
 // decodeSpecValue runs spec.Decode. A client chooses what it sends, so a type
 // assertion that fails on the input is a rejected value, not a server fault. Any
-// other panic is left to surface as one.
+// other panic, including an assertion on something else, is left to surface as
+// one. TypeAssertionError has no exported fields, so its text is how the two are
+// told apart; a failed assertion on another value of the input's type still
+// counts as the client's.
 func decodeSpecValue(spec CustomSpec, val any) (decoded any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if _, ok := r.(*runtime.TypeAssertionError); !ok {
+			te, ok := r.(*runtime.TypeAssertionError)
+			if !ok || !strings.Contains(te.Error(), fmt.Sprintf(" is %T, ", val)) {
 				panic(r)
 			}
 			err = fmt.Errorf("unexpected value of type %T", val)
@@ -472,14 +501,15 @@ func decodeSpecValue(spec CustomSpec, val any) (decoded any, err error) {
 	return spec.Decode(val)
 }
 
-// setParamField stores val, a parsed parameter value, in field. A pointer
-// field gets a newly allocated value. It reports false if val cannot be
-// converted to the field's type.
-func setParamField(field reflect.Value, val reflect.Value) bool {
+// setParamField stores val, a parsed parameter value, in field. A pointer field
+// gets a newly allocated value. A conversion that would change the value is
+// refused, as it is for JSON bodies.
+func setParamField(field reflect.Value, val any) error {
+	rv := reflect.ValueOf(val)
 	// A custom spec may return the field's own type, pointer included.
-	if val.Type().AssignableTo(field.Type()) {
-		field.Set(val)
-		return true
+	if rv.Type().AssignableTo(field.Type()) {
+		field.Set(rv)
+		return nil
 	}
 
 	target := field
@@ -488,12 +518,11 @@ func setParamField(field reflect.Value, val reflect.Value) bool {
 		ptr = reflect.New(field.Type().Elem())
 		target = ptr.Elem()
 	}
-	if !val.Type().ConvertibleTo(target.Type()) {
-		return false
+	if err := setConvertedReflectValue(target, val); err != nil {
+		return err
 	}
-	target.Set(val.Convert(target.Type()))
 	if ptr.IsValid() {
 		field.Set(ptr)
 	}
-	return true
+	return nil
 }

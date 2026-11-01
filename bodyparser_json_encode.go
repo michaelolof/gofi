@@ -38,7 +38,9 @@ func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
 	if rules != nil && rules.defStr != "" && val.IsValid() && isEmptyJSONValue(val) {
 		// Encode the default without writing it into the caller's value,
 		// which may be shared with other requests.
-		val = reflect.ValueOf(rules.defVal).Convert(val.Type())
+		if def := rules.defaultValue(val.Type()); def.IsValid() {
+			val = def
+		}
 	}
 
 	if rules != nil && len(rules.rules) > 0 {
@@ -58,6 +60,15 @@ func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
 
 	if rules != nil {
 		if spec, ok := e.specs.Find(string(rules.format)); ok {
+			// A pointer field counts as the type it points to, as it does for
+			// Decode, and a nil one has no value to encode.
+			for val.Kind() == reflect.Pointer {
+				if val.IsNil() {
+					e.buf.WriteString("null")
+					return nil
+				}
+				val = val.Elem()
+			}
 			s, err := spec.Encode(val.Interface())
 			if err != nil {
 				return e.fail("typeMismatch", err)
@@ -99,12 +110,12 @@ func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
 		e.buf.Write(raw)
 		return nil
 	}
-	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 && jsonTypeInfoFor(t).byteSlice {
-		if val.IsNil() {
+	if k := t.Kind(); (k == reflect.Slice || k == reflect.Array) && t.Elem().Kind() == reflect.Uint8 && jsonTypeInfoFor(t).byteSlice {
+		if k == reflect.Slice && val.IsNil() {
 			e.buf.WriteString("null")
 			return nil
 		}
-		b := val.Bytes()
+		b := byteFieldBytes(val)
 		n := base64.StdEncoding.EncodedLen(len(b))
 		e.buf.Grow(n + 2)
 		e.buf.WriteByte('"')
@@ -283,7 +294,7 @@ func (e *jsonEncoder) encodeStruct(val reflect.Value, rules *RuleDef) error {
 			} else {
 				fv = val.FieldByName(f.fieldName)
 			}
-			if f.omitEmpty && isEmptyJSONValue(fv) {
+			if (f.omitEmpty && isEmptyJSONValue(fv)) || (f.omitZero && isZeroJSONValue(fv)) {
 				continue
 			}
 			if !first {
@@ -309,7 +320,7 @@ func (e *jsonEncoder) encodeStruct(val reflect.Value, rules *RuleDef) error {
 			if err != nil {
 				continue // promoted through a nil embedded pointer
 			}
-			if f.omitEmpty && isEmptyJSONValue(fv) {
+			if (f.omitEmpty && isEmptyJSONValue(fv)) || (f.omitZero && isZeroJSONValue(fv)) {
 				continue
 			}
 			if !first {
@@ -352,10 +363,48 @@ func isEmptyJSONValue(v reflect.Value) bool {
 	return false
 }
 
+var jsonIsZeroerType = reflect.TypeFor[interface{ IsZero() bool }]()
+
+// isZeroJSONValue reports the values that omitzero omits, as encoding/json defines
+// them: an IsZero method decides if the type has one, and otherwise the zero value
+// of the type.
+func isZeroJSONValue(v reflect.Value) bool {
+	t := v.Type()
+	if !v.CanInterface() {
+		return v.IsZero()
+	}
+	switch {
+	case t.Implements(jsonIsZeroerType):
+		if k := v.Kind(); (k == reflect.Pointer || k == reflect.Interface) && v.IsNil() {
+			return true
+		}
+		return v.Interface().(interface{ IsZero() bool }).IsZero()
+	case reflect.PointerTo(t).Implements(jsonIsZeroerType):
+		p := reflect.New(t)
+		p.Elem().Set(v)
+		return p.Interface().(interface{ IsZero() bool }).IsZero()
+	default:
+		return v.IsZero()
+	}
+}
+
+// byteFieldBytes returns the bytes of a []byte or [N]byte value. An array that
+// isn't addressable, such as one held in an any, has to be copied.
+func byteFieldBytes(v reflect.Value) []byte {
+	if v.Kind() == reflect.Slice || v.CanAddr() {
+		return v.Bytes()
+	}
+	b := make([]byte, v.Len())
+	for i := range b {
+		b[i] = byte(v.Index(i).Uint())
+	}
+	return b
+}
+
 // jsonTypeInfo caches what the encoder needs to know about a type.
 type jsonTypeInfo struct {
 	marshaler bool
-	byteSlice bool                  // base64-encoded, as encoding/json does
+	byteSlice bool                  // []byte or [N]byte, base64-encoded
 	fields    []jsonSchemalessField // for structs encoded without schema rules
 }
 
@@ -364,6 +413,7 @@ type jsonSchemalessField struct {
 	name      string
 	key       []byte // quoted name and colon
 	omitEmpty bool
+	omitZero  bool
 }
 
 var (
@@ -378,7 +428,7 @@ func jsonTypeInfoFor(t reflect.Type) *jsonTypeInfo {
 	}
 	info := &jsonTypeInfo{
 		marshaler: t.Implements(jsonMarshalerType),
-		byteSlice: t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 && utils.IsByteSlice(t),
+		byteSlice: utils.IsByteSlice(t),
 	}
 	if t.Kind() == reflect.Struct {
 		for _, f := range reflect.VisibleFields(t) {
@@ -398,6 +448,7 @@ func jsonTypeInfoFor(t reflect.Type) *jsonTypeInfo {
 				name:      name,
 				key:       append(appendJSONString(nil, name), ':'),
 				omitEmpty: slices.Contains(strings.Split(opts, ","), "omitempty"),
+				omitZero:  slices.Contains(strings.Split(opts, ","), "omitzero"),
 			})
 		}
 	}
@@ -448,7 +499,7 @@ func appendJSONString(dst []byte, s string) []byte {
 			start = i
 			continue
 		}
-		if r == ' ' || r == ' ' {
+		if r == '\u2028' || r == '\u2029' {
 			dst = append(dst, s[start:i]...)
 			dst = append(dst, '\\', 'u', '2', '0', '2', jsonHex[r&0xF])
 			i += size

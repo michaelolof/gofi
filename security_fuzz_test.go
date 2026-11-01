@@ -122,6 +122,9 @@ type fuzzGenericSchema struct {
 			Map  map[string]any  `json:"map"`
 			Any  any             `json:"any"`
 			Ptr  *int32          `json:"ptr"`
+			Arr  [4]byte         `json:"arr"`
+			PArr *[4]byte        `json:"parr"`
+			Arrs [][4]byte       `json:"arrs"`
 			When time.Time       `json:"when"`
 			List []*struct {
 				A []float64 `json:"a"`
@@ -148,6 +151,15 @@ type fuzzSpecSchema struct {
 			Vendor vendorType `json:"vendor" spec:"custom"`
 			UID    specID     `json:"uid" spec:"spec-unchecked-id"`
 			UCount *specCents `json:"ucount" spec:"spec-unchecked-count"`
+			None   specName   `json:"none" spec:"spec-none"`
+			PNone  *specName  `json:"pnone" spec:"spec-none"`
+			N      struct {
+				V string `json:"v" validate:"min=3"`
+				I int    `json:"i"`
+				L []struct {
+					V string `json:"v" validate:"min=3"`
+				} `json:"l"`
+			} `json:"n"`
 		}
 	}
 }
@@ -195,6 +207,10 @@ func FuzzBindJSONBody(f *testing.F) {
 	f.Add([]byte(`{"name":1}`))
 	f.Add([]byte(`{"alias":{"a":1}}`))
 	f.Add([]byte(`{"scope":[1]}`))
+	f.Add([]byte(`{"arr":"AQIDBA==","parr":"AQIDBA==","arrs":["AQIDBA=="]}`))
+	f.Add([]byte(`{"arr":"AQ=="}`))
+	f.Add([]byte(`{"arrs":["***",1]}`))
+	f.Add([]byte(`{"none":"x","pnone":"y"}`))
 	f.Add([]byte(`{"uid":1}`))
 	f.Add([]byte(`{"ucount":"x"}`))
 	simple := NewRouter()
@@ -247,6 +263,7 @@ func FuzzBindMultipartBody(f *testing.F) {
 	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../etc/passwd\"\r\n\r\nx\r\n--b"))
 	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n0123456789abcdef0123456789abcdef\r\n--b\r\nContent-Disposition: form-data; name=\"more\"\r\n\r\n5\r\n--b--\r\n"))
 	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"ucount\"\r\n\r\nx\r\n--b--\r\n"))
+	f.Add([]byte("--b\r\nContent-Disposition: form-data; name=\"n.v\"\r\n\r\na\r\n--b\r\nContent-Disposition: form-data; name=\"n.i\"\r\n\r\nx\r\n--b\r\nContent-Disposition: form-data; name=\"n.l.0.v\"\r\n\r\na\r\n--b--\r\n"))
 	r := NewRouter()
 	specs := NewRouter()
 	specs.RegisterSpec(specKindSpecs()...)
@@ -315,6 +332,8 @@ type fuzzEncodeItem struct {
 	Attrs map[string]string `json:"attrs"`
 	Any   any               `json:"any"`
 	When  time.Time         `json:"when"`
+	Zero  time.Time         `json:"zero,omitzero"`
+	Opt   int64             `json:"opt,omitzero"`
 }
 
 type fuzzEncodeSchema struct {
@@ -339,7 +358,7 @@ func FuzzEncodeResponse(f *testing.F) {
 	}})
 	f.Fuzz(func(t *testing.T, text, key string, ratio float64, small float32, count, unix int64) {
 		item = fuzzEncodeItem{
-			Text: text, Ratio: ratio, Small: small, Count: count,
+			Text: text, Ratio: ratio, Small: small, Count: count, Opt: count,
 			Tags:  []string{text, key},
 			Attrs: map[string]string{key: text, text: key, "z": ""},
 			Any:   map[string]any{"n": ratio, "s": []any{key, true, nil}},

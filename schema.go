@@ -392,6 +392,33 @@ func runValidation(val any, typ errorType, schema schemaField, keypath string, r
 	return errors.Join(errs...)
 }
 
+// checkPresence runs only the required and present rules on a missing value. No
+// other rule can judge one: length rules such as min and max would panic on nil.
+// It returns the failing rule's name and its error.
+func checkPresence(rules []ruleOpts) (string, error) {
+	for _, rule := range rules {
+		if rule.rule != "required" && rule.rule != "present" {
+			continue
+		}
+		if err := rule.dator(nil); err != nil {
+			return rule.rule, err
+		}
+	}
+	return "", nil
+}
+
+// runSpecValidation is runValidation for a value from spec.Decode. A nil value
+// means the spec found none, so only the presence rules apply.
+func runSpecValidation(val any, typ errorType, schema schemaField, keypath string, rules []ruleOpts) error {
+	if val == nil {
+		if rule, err := checkPresence(rules); err != nil {
+			return newErrReport(typ, schema, keypath, rule, err)
+		}
+		return nil
+	}
+	return runValidation(val, typ, schema, keypath, rules)
+}
+
 // runValidationLazy is like runValidation but defers building the key path
 // until a failure is detected. The JSON walker reuses one path stack across
 // all recursive frames, so successful requests do not allocate path slices.

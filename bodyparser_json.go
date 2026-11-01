@@ -144,7 +144,8 @@ func (j *JSONBodyParser) ValidateAndDecodeRequest(body io.ReadCloser, opts Reque
 
 	// The compiled schema already identifies primitive bodies. Structured JSON
 	// must not stringify the entire payload only to rediscover its schema kind.
-	if utils.IsPrimitiveKind(opts.SchemaRules.kind) {
+	// A custom spec decodes the value itself, so it takes the JSON path below.
+	if utils.IsPrimitiveKind(opts.SchemaRules.kind) && opts.SchemaRules.specKind == reflect.Invalid {
 		val, err := utils.PrimitiveFromStr(opts.SchemaRules.kind, string(bs))
 		if err != nil {
 			return newErrReport(RequestErr, schemaBody, "", "encoder", err)
@@ -247,8 +248,14 @@ func (j *JSONBodyParser) encodeResponse(buf *bytes.Buffer, opts ResponseOptions)
 		return newErrReport(ResponseErr, schemaBody, "", "required", errors.New("value is required for body"))
 	}
 
-	if opts.SchemaRules != nil && opts.SchemaRules.kind != body.Kind() {
-		return newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
+	if opts.SchemaRules != nil {
+		kind := opts.SchemaRules.kind
+		if opts.SchemaRules.specKind != reflect.Invalid {
+			kind = opts.SchemaRules.specKind
+		}
+		if kind != body.Kind() {
+			return newErrReport(ResponseErr, schemaBody, "", "typeMismatch", errors.New("body schema and payload mismatch"))
+		}
 	}
 
 	e := jsonEncoder{buf: buf, specs: opts.Context.CustomSpecs()}
@@ -297,18 +304,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	// panic. Only presence rules are meaningful for a missing value; running
 	// length rules such as min/max against nil would panic in the validator.
 	if val == nil {
-		for _, rule := range opts.SchemaRules.rules {
-			if rule.rule != "required" && rule.rule != "present" {
-				continue
-			}
-			if err := rule.dator(nil); err != nil {
-				return nil, newErrReport(RequestErr, schemaField, path.String(), rule.rule, err)
-			}
+		if rule, err := checkPresence(opts.SchemaRules.rules); err != nil {
+			return nil, newErrReport(RequestErr, schemaField, path.String(), rule, err)
 		}
 		return &walkFinished, nil
 	}
 
-	if opts.ShouldBind && opts.HasBody && opts.Body.Kind() == reflect.Pointer {
+	// A spec field allocates only once Decode has returned a value.
+	if opts.ShouldBind && opts.HasBody && opts.Body.Kind() == reflect.Pointer && !isSpec {
 		opts.Body.Set(reflect.New(opts.Body.Type().Elem()))
 	}
 
@@ -331,6 +334,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		decoded, err := decodeSpecValue(spec, val)
 		if err != nil {
 			return nil, newErrReport(RequestErr, schemaField, path.String(), "typeCast", err)
+		}
+
+		// nil means the spec found no value: the field stays unset.
+		if decoded == nil {
+			if rule, err := checkPresence(opts.SchemaRules.rules); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, path.String(), rule, err)
+			}
+			return &walkFinished, nil
 		}
 
 		if err := runValidationLazy(decoded, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
@@ -378,18 +389,16 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 		}
 
+		if err := checkByteArrayLen(opts.SchemaRules.typ, decoded); err != nil {
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
+		}
+
 		if err := runValidationLazy(decoded, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
 		if opts.ShouldBind && opts.HasBody {
-			if opts.Body.Kind() == reflect.Pointer {
-				ptr := reflect.New(opts.Body.Type().Elem())
-				ptr.Elem().Set(reflect.ValueOf(decoded))
-				opts.Body.Set(ptr)
-			} else {
-				opts.Body.Set(reflect.ValueOf(decoded))
-			}
+			bindDecodedBytes(opts.Body, decoded)
 		}
 
 		return &walkFinished, nil
@@ -669,6 +678,42 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	}
 
 	return &walkFinished, nil
+}
+
+// checkByteArrayLen rejects decoded base64 that doesn't fill a [N]byte field.
+func checkByteArrayLen(t reflect.Type, decoded []byte) error {
+	if t == nil {
+		return nil
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Array && t.Len() != len(decoded) {
+		return fmt.Errorf("expected %d bytes, got %d", t.Len(), len(decoded))
+	}
+	return nil
+}
+
+// bindDecodedBytes stores decoded base64 in a []byte or [N]byte field, or a
+// pointer to one. The caller has checked an array's length.
+func bindDecodedBytes(field reflect.Value, decoded []byte) {
+	target := field
+	if field.Kind() == reflect.Pointer {
+		ptr := reflect.New(field.Type().Elem())
+		field.Set(ptr)
+		target = ptr.Elem()
+	}
+	src := reflect.ValueOf(decoded)
+	if target.Kind() == reflect.Slice {
+		if src.Type().AssignableTo(target.Type()) {
+			target.Set(src)
+			return
+		}
+		target.Set(reflect.MakeSlice(target.Type(), len(decoded), len(decoded)))
+	}
+	for i, b := range decoded {
+		target.Index(i).SetUint(uint64(b))
+	}
 }
 
 // bindSpecValue stores a custom spec's decoded value in field. Decode returns

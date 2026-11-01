@@ -107,6 +107,12 @@ func SafeConvert(v reflect.Value, t reflect.Type) (reflect.Value, error) {
 		return out, nil
 	}
 
+	// Go converts a number to the string of that code point (65 to "A"), which
+	// is never what a value means.
+	if KindIsNumber(v.Kind()) && t.Kind() == reflect.String {
+		return reflect.Value{}, fmt.Errorf("cannot convert %v to %v", v.Type(), t)
+	}
+
 	if v.Type().ConvertibleTo(t) {
 		return v.Convert(t), nil
 	}

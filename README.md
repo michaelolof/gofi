@@ -317,8 +317,8 @@ type processSchema struct {
 
 Use `c.Context()` to obtain a standard library `context.Context`. This is the **recommended, safe entry point** for passing contexts to external libraries (database drivers, HTTP clients, timeouts, etc.).
 
-- On a **live handler context** it delegates to the fasthttp connection context, so cancellation signals (e.g. client disconnect) propagate naturally.
-- On a **`c.Copy()`-ed context** it returns a detached `context.Background()`, ensuring async work is never cancelled by the original connection closing.
+- On a **live handler context** it is cancelled when the request finishes or the router's server shuts down. It is **not** cancelled when the client disconnects, so use the `ContextTimeout` middleware to put a deadline on slow work.
+- On a **`c.Copy()`-ed context** it returns a detached `context.Background()`, ensuring async work is never cancelled by the original request finishing.
 
 Because both cases return a non-nil `context.Context`, `c.Context()` works correctly regardless of whether the consuming code runs synchronously or asynchronously:
 
@@ -1083,13 +1083,31 @@ or a pointer to any of these. A pointer field counts as the type it points to.
 | JSON body, number or bool field | that kind, for example `int64`, so large integers stay exact. If the value doesn't fit, the value as sent, as in the next row, so a spec can take an amount sent as text |
 | JSON body, any other field | the value as sent: `string`, `float64` or `bool` for a scalar, the raw JSON bytes for an object or array |
 
-A client chooses what it sends, so check the type in `Decode`, as the example does, and return
-your own error. An unchecked `val.(string)` that fails is also a 400, with a generic message. Any
-other panic in `Decode` is a 500.
+Integers above 2^53 in a struct, array, slice or map field reach `Decode` as a `float64` and lose
+precision, so a spec on one of those that needs exact large numbers should take them as strings.
 
-`Decode` returns a value of the field's type, or of the type a pointer field points to.
+A client chooses what it sends, so check the type in `Decode`, as the example does, and return
+your own error. An unchecked `val.(string)` that fails on the input is also a 400, with a generic
+message. Any other panic in `Decode`, including a failed assertion on anything but the input, is a
+500 and is logged. `Decode`'s error text is sent to the client, so keep internal detail out of it.
+
+`Decode` returns a value of the field's type, or of the type a pointer field points to. Rules such
+as `min` and `email` check that value, and treat a named type like `type Status string` as its plain
+type. To say there is no value, return `nil, nil`: the field stays unset, and only `required` and
+`present` can reject it. If `Decode` returns a type that can't be stored in a path, query or header
+field without changing the value, the request fails with a 500, because the client can't fix it.
+
+`Encode` receives the field's value, or the value a pointer field points to, so one spec works on
+`T` and `*T`. A nil pointer is written as `null` without calling `Encode`, or left out with
+`omitempty`.
+
+`default` and `example` tags work on every spec field. A default reaches `Decode` as text from a
+param, and as a client's value would from a body, and one that doesn't decode panics when the route
+is registered. An example appears in OpenAPI in the type the spec documents.
+
 Register every spec with `RegisterSpec` before the routes that use it. A `spec` tag that
-names an unregistered spec panics when the route is registered.
+names an unregistered spec panics when the route is registered, and so does a `spec` tag on a
+cookie field.
 
 
 

@@ -265,8 +265,8 @@ type ErrBody struct {
   not apply to an empty value: `validate:"omitempty,email"`. Gofi already
   skips fields the request leaves out; `omitempty` also skips the rules when
   the value is sent but empty (`""`, `0`, `[]`). Never combine it with
-  `required` or `present`. `json:"name,omitempty"` works as in
-  `encoding/json`.
+  `required` or `present`. `json:"name,omitempty"` and `json:"name,omitzero"`
+  work as in `encoding/json`.
 - **TAG-8 (MUST)** Path parameters are `:name` in the route pattern and
   `json:"name"` in `Request.Path`. Never `{name}`.
 - **TAG-9 (SHOULD)** On a `time.Time` field, `pattern` is the Go layout Gofi
@@ -846,7 +846,7 @@ returns.
 
 - **CTX-1 (MUST)** Pass `c.Context()` to anything that takes a
   `context.Context` (database calls, HTTP clients). It is cancelled when the
-  client disconnects.
+  request finishes or the server shuts down, not when the client disconnects.
 - **CTX-2 (MUST NOT)** Do not use `c.Request().Context()`. It returns the raw
   fasthttp request, not the request's `context.Context`. When you genuinely
   need fasthttp itself (the peer address, the raw response), call

@@ -153,7 +153,18 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 		}
 
 		if spec, ok := c.serverOpts.customSpecs.Find(string(val.format)); ok {
-			v, err := spec.Encode(hv)
+			sv := specHeaderValue(hf, val)
+			// A nil pointer has no value to encode, the same as a missing field.
+			if !sv.IsValid() {
+				if val.required && !c.headerAlreadyWritten(key) {
+					if err := runValidation(nil, ResponseErr, schemaHeaders, key, val.rules); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			v, err := spec.Encode(sv.Interface())
 			if err != nil {
 				return newErrReport(ResponseErr, schemaHeaders, key, "typeMismatch", err)
 			}
@@ -363,4 +374,22 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 	}
 
 	return nil
+}
+
+// specHeaderValue returns what a custom spec encodes for a response header field:
+// the field or its default if it is empty, with a pointer replaced by the value it
+// points to. It returns an invalid Value for a nil pointer.
+func specHeaderValue(field reflect.Value, rule *RuleDef) reflect.Value {
+	if rule.defStr != "" && isEmptyJSONValue(field) {
+		if def := rule.defaultValue(field.Type()); def.IsValid() {
+			field = def
+		}
+	}
+	for field.Kind() == reflect.Pointer {
+		if field.IsNil() {
+			return reflect.Value{}
+		}
+		field = field.Elem()
+	}
+	return field
 }

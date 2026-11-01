@@ -73,6 +73,8 @@ Only these rules, `omitempty`, and custom rules you register are accepted. A
 rule Gofi does not know (a typo, or a rule borrowed from another validator
 such as `dive` or `required_if`) makes route registration panic with the rule
 and field name, so a misspelled rule can never silently validate nothing.
+A built-in rule treats a named type like `type Status string` as its plain type;
+a custom rule receives the value as it is.
 The same applies to WebSocket message types declared in `Schema.WebSocket`,
 which also accept your custom rules.
 

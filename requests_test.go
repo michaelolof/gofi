@@ -22,18 +22,13 @@ import (
 
 func TestCookieRequest(t *testing.T) {
 
-	type invType struct {
-		Name string
-	}
-
 	type testSchema struct {
 		Request struct {
 			Cookie struct {
-				One     *string      `json:"one" validate:"required"`
-				Two     int          `json:"two" validate:"required"`
-				Three   http.Cookie  `json:"three" validate:"required"`
-				Four    *http.Cookie `json:"four" validate:"required"`
-				Invalid invType      `json:"invalid" validate:"required"`
+				One   *string      `json:"one" validate:"required"`
+				Two   int          `json:"two" validate:"required"`
+				Three http.Cookie  `json:"three" validate:"required"`
+				Four  *http.Cookie `json:"four" validate:"required"`
 			}
 		}
 	}
@@ -60,7 +55,6 @@ func TestCookieRequest(t *testing.T) {
 			{Name: "two", Value: "2"},
 			{Name: "three", Value: "three stooges"},
 			{Name: "four", Value: "four dogs"},
-			{Name: "invalid", Value: "invalid cookie"},
 		},
 		Method:  "POST",
 		Handler: &handler,
@@ -1757,12 +1751,43 @@ func specKindSpecs() []CustomSpec {
 		DefineCustomSpec(SpecDefinition{
 			SpecID: "spec-unchecked-id", Type: "string",
 			Encode: func(val any) (string, error) { return "", nil },
-			Decode: func(val any) (any, error) { return specID{val.(string)[0]}, nil },
+			Decode: func(val any) (any, error) { _ = val.(string); return specID{1}, nil },
 		}),
 		DefineCustomSpec(SpecDefinition{
 			SpecID: "spec-unchecked-count", Type: "integer",
 			Encode: func(val any) (string, error) { return "", nil },
 			Decode: func(val any) (any, error) { return specCents(val.(int64)), nil },
+		}),
+		// A spec that finds no value.
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-none", Type: "string",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { return nil, nil },
+		}),
+		// Specs whose Decode disagrees with the field they are put on.
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-wrong-id", Type: "string",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { return specID{1}, nil },
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-wrong-float", Type: "number",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { return 12.7, nil },
+		}),
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-wrong-rune", Type: "integer",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) { return 65, nil },
+		}),
+		// A failed assertion on something other than the input: a server bug.
+		DefineCustomSpec(SpecDefinition{
+			SpecID: "spec-bug", Type: "string",
+			Encode: func(val any) (string, error) { return "", nil },
+			Decode: func(val any) (any, error) {
+				var cache any = 42
+				return cache.(string), nil
+			},
 		}),
 		DefineCustomSpec(SpecDefinition{
 			SpecID: "spec-count", Type: "integer",
@@ -2451,6 +2476,767 @@ func TestCustomSpecBody_Kinds_DecodeInput(t *testing.T) {
 			assert.Equal(t, tc.want, tc.read(t, tc.value))
 		})
 	}
+}
+
+// specRouteCall sends opts to a fresh POST /t/:p route with schema T. bound is
+// nil unless the handler got past ValidateAndBind.
+func specRouteCall[T any](t *testing.T, opts TestOptions) (bound *T, resp *InjectResponse, err error) {
+	t.Helper()
+
+	m := NewRouter()
+	m.RegisterSpec(specKindSpecs()...)
+	m.Post("/t/:p", RouteOptions{Schema: new(T), Handler: func(c Context) error {
+		s, err := ValidateAndBind[T](c)
+		if err != nil {
+			return err
+		}
+		bound = s
+		return c.SendString(200, "ok")
+	}})
+
+	opts.Method = "POST"
+	if opts.Path == "" {
+		opts.Path = "/t/x"
+	}
+	resp, err = m.Test(opts)
+	require.NotNil(t, resp)
+	return bound, resp, err
+}
+
+var (
+	specJSONHeaders      = map[string]string{"Content-Type": "application/json"}
+	specFormHeaders      = map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	specMultipartHeaders = map[string]string{"Content-Type": "multipart/form-data; boundary=XX"}
+)
+
+// Rules treat a named type like its plain type: a spec may decode to one.
+func TestCustomSpecBody_RulesOnNamedValues(t *testing.T) {
+	const ct = "application/json"
+
+	t.Run("min", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specName `json:"v" spec:"spec-name" validate:"min=3"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"v":"abc"}`)
+		require.NoError(t, err)
+		assert.Equal(t, specName("abc"), s.Request.Body.V)
+
+		_, err = bindSpecBody[schema](t, ct, `{"v":"ab"}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "minimum")
+	})
+
+	t.Run("email", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V specName `json:"v" spec:"spec-name" validate:"email"`
+				}
+			}
+		}
+		_, err := bindSpecBody[schema](t, ct, `{"v":"a@b.co"}`)
+		require.NoError(t, err)
+
+		_, err = bindSpecBody[schema](t, ct, `{"v":"nope"}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid email value")
+	})
+
+	t.Run("a plain field whose Decode returns a named value", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V string `json:"v" spec:"spec-name" validate:"min=3"`
+				}
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `{"v":"abc"}`)
+		require.NoError(t, err)
+		assert.Equal(t, "abc", s.Request.Body.V)
+	})
+
+	t.Run("a pointer field", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V *specName `json:"v" spec:"spec-name" validate:"min=3"`
+				}
+			}
+		}
+		_, err := bindSpecBody[schema](t, ct, `{"v":"ab"}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "minimum")
+	})
+}
+
+// A spec on a top-level Body runs Decode, as it does on a body field.
+func TestCustomSpecBody_TopLevelBody(t *testing.T) {
+	const ct = "application/json"
+
+	t.Run("named string", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body specName `spec:"spec-name"`
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `"alice"`)
+		require.NoError(t, err)
+		assert.Equal(t, specName("alice"), s.Request.Body)
+
+		_, err = bindSpecBody[schema](t, ct, `123`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "value doesn't contain string")
+	})
+
+	t.Run("pointer", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body *specName `spec:"spec-name"`
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `"alice"`)
+		require.NoError(t, err)
+		require.NotNil(t, s.Request.Body)
+		assert.Equal(t, specName("alice"), *s.Request.Body)
+	})
+
+	t.Run("number", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body specCents `spec:"spec-count"`
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `9007199254740993`)
+		require.NoError(t, err)
+		assert.Equal(t, specCents(9007199254740993), s.Request.Body)
+	})
+
+	t.Run("a plain primitive body is unchanged", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body int
+			}
+		}
+		s, err := bindSpecBody[schema](t, ct, `7`)
+		require.NoError(t, err)
+		assert.Equal(t, 7, s.Request.Body)
+	})
+}
+
+// A default reaches Decode whatever the field's kind.
+func TestCustomSpecBody_Default(t *testing.T) {
+	type body struct {
+		Tags   specTags   `json:"tags" spec:"spec-tags" default:"a,b"`
+		ID     specID     `json:"id" spec:"spec-id" default:"0123456789abcdef0123456789abcdef"`
+		Labels specLabels `json:"labels" spec:"spec-labels" default:"k=v"`
+		Name   *specName  `json:"name" spec:"spec-name" default:"deposit"`
+		Vendor vendorType `json:"vendor" spec:"custom" default:"hello"`
+		Count  *specCents `json:"count" spec:"spec-count" default:"7"`
+		Method specName   `json:"method" spec:"spec-name" default:"POST"`
+	}
+	type schema struct {
+		Request struct {
+			Body body
+		}
+	}
+
+	t.Run("absent fields take the default", func(t *testing.T) {
+		s, err := bindSpecBody[schema](t, "application/json", `{}`)
+		require.NoError(t, err)
+		b := s.Request.Body
+		assert.Equal(t, specTags{"a", "b"}, b.Tags)
+		assert.Equal(t, wantSpecID, b.ID)
+		assert.Equal(t, specLabels{"k": "v"}, b.Labels)
+		require.NotNil(t, b.Name)
+		assert.Equal(t, specName("deposit"), *b.Name)
+		assert.Equal(t, "hello", b.Vendor.Val())
+		require.NotNil(t, b.Count)
+		assert.Equal(t, specCents(7), *b.Count)
+		assert.Equal(t, specName("POST"), b.Method)
+	})
+
+	t.Run("a sent value wins", func(t *testing.T) {
+		s, err := bindSpecBody[schema](t, "application/json", `{"tags":"x","name":"payout"}`)
+		require.NoError(t, err)
+		assert.Equal(t, specTags{"x"}, s.Request.Body.Tags)
+		assert.Equal(t, specName("payout"), *s.Request.Body.Name)
+	})
+
+	t.Run("params read the default as text", func(t *testing.T) {
+		type params struct {
+			Request struct {
+				Query struct {
+					ID    specID    `json:"id" spec:"spec-id" default:"0123456789abcdef0123456789abcdef"`
+					Cents specCents `json:"cents" spec:"spec-cents" default:"12.34"`
+				}
+			}
+		}
+		s, _, err := specRouteCall[params](t, TestOptions{})
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		assert.Equal(t, wantSpecID, s.Request.Query.ID)
+		assert.Equal(t, specCents(1234), s.Request.Query.Cents)
+	})
+
+	t.Run("a default that doesn't decode panics at registration", func(t *testing.T) {
+		type inBody struct {
+			Request struct {
+				Body struct {
+					ID specID `json:"id" spec:"spec-id" default:"nope"`
+				}
+			}
+		}
+		type inQuery struct {
+			Request struct {
+				Query struct {
+					ID specID `json:"id" spec:"spec-id" default:"nope"`
+				}
+			}
+		}
+		for name, s := range map[string]any{"body": &inBody{}, "query": &inQuery{}} {
+			t.Run(name, func(t *testing.T) {
+				m := NewRouter()
+				m.RegisterSpec(specKindSpecs()...)
+				assert.PanicsWithValue(t,
+					`gofi: invalid default "nope" for spec "spec-id" on field ID: want 32 hex digits`,
+					func() { m.Post("/x", RouteOptions{Schema: s, Handler: func(c Context) error { return nil }}) })
+			})
+		}
+	})
+}
+
+// A Decode that returns nil, nil found no value: the field stays unset, and only
+// required and present can reject it.
+func TestCustomSpec_DecodeReturnsNil(t *testing.T) {
+	type bodySchema struct {
+		Request struct {
+			Body struct {
+				P *specName `json:"p" spec:"spec-none" validate:"min=3"`
+				V specName  `json:"v" spec:"spec-none"`
+			}
+		}
+	}
+	type requiredBody struct {
+		Request struct {
+			Body struct {
+				P *specName `json:"p" spec:"spec-none" validate:"required"`
+			}
+		}
+	}
+	part := func(name, value string) string {
+		return "--XX\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"
+	}
+
+	bodies := map[string]TestOptions{
+		"json":      {Headers: specJSONHeaders, Body: strings.NewReader(`{"p":"x","v":"y"}`)},
+		"form":      {Headers: specFormHeaders, Body: strings.NewReader("p=x&v=y")},
+		"multipart": {Headers: specMultipartHeaders, Body: strings.NewReader(part("p", "x") + part("v", "y") + "--XX--\r\n")},
+	}
+	for name, opts := range bodies {
+		t.Run(name, func(t *testing.T) {
+			s, _, err := specRouteCall[bodySchema](t, opts)
+			require.NoError(t, err)
+			require.NotNil(t, s)
+			assert.Nil(t, s.Request.Body.P)
+			assert.Equal(t, specName(""), s.Request.Body.V)
+		})
+	}
+
+	requiredBodies := map[string]TestOptions{
+		"json required":      {Headers: specJSONHeaders, Body: strings.NewReader(`{"p":"x"}`)},
+		"form required":      {Headers: specFormHeaders, Body: strings.NewReader("p=x")},
+		"multipart required": {Headers: specMultipartHeaders, Body: strings.NewReader(part("p", "x") + "--XX--\r\n")},
+	}
+	for name, opts := range requiredBodies {
+		t.Run(name, func(t *testing.T) {
+			s, resp, err := specRouteCall[requiredBody](t, opts)
+			require.NoError(t, err)
+			assert.Nil(t, s)
+			assert.Equal(t, 400, resp.StatusCode)
+		})
+	}
+
+	t.Run("path", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Path struct {
+					P *specName `json:"p" spec:"spec-none"`
+				}
+			}
+		}
+		s, _, err := specRouteCall[schema](t, TestOptions{})
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		assert.Nil(t, s.Request.Path.P)
+	})
+
+	t.Run("query", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					P *specName `json:"p" spec:"spec-none" validate:"min=3"`
+					V specName  `json:"v" spec:"spec-none"`
+				}
+			}
+		}
+		s, _, err := specRouteCall[schema](t, TestOptions{Query: map[string]string{"p": "x", "v": "y"}})
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		assert.Nil(t, s.Request.Query.P)
+		assert.Equal(t, specName(""), s.Request.Query.V)
+	})
+
+	t.Run("header", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Header struct {
+					P *specName `json:"x-p" spec:"spec-none"`
+				}
+			}
+		}
+		s, _, err := specRouteCall[schema](t, TestOptions{Headers: map[string]string{"x-p": "x"}})
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		assert.Nil(t, s.Request.Header.P)
+	})
+
+	t.Run("query required", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					P *specName `json:"p" spec:"spec-none" validate:"required"`
+				}
+			}
+		}
+		s, resp, err := specRouteCall[schema](t, TestOptions{Query: map[string]string{"p": "x"}})
+		require.NoError(t, err)
+		assert.Nil(t, s)
+		assert.Equal(t, 400, resp.StatusCode)
+	})
+}
+
+// A param that can't be stored in its field is the schema's fault, not the
+// client's: a 500 that shows no internal type names, and the handler doesn't run.
+func TestParamBind_FailureIsAServerFault(t *testing.T) {
+	assertServerFault := func(t *testing.T, resp *InjectResponse, bound bool) {
+		t.Helper()
+		assert.False(t, bound, "the handler must not run")
+		assert.Equal(t, 500, resp.StatusCode)
+		assert.NotContains(t, string(resp.Body), "convert")
+		assert.NotContains(t, string(resp.Body), "specID")
+	}
+
+	t.Run("path", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Path struct {
+					P string `json:"p" spec:"spec-wrong-id" validate:"required"`
+				}
+			}
+		}
+		s, resp, err := specRouteCall[schema](t, TestOptions{})
+		require.NoError(t, err)
+		assertServerFault(t, resp, s != nil)
+	})
+
+	t.Run("query", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					V string `json:"v" spec:"spec-wrong-id" validate:"required"`
+				}
+			}
+		}
+		s, resp, err := specRouteCall[schema](t, TestOptions{Query: map[string]string{"v": "x"}})
+		require.NoError(t, err)
+		assertServerFault(t, resp, s != nil)
+	})
+
+	t.Run("header", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Header struct {
+					V string `json:"x-v" spec:"spec-wrong-id" validate:"required"`
+				}
+			}
+		}
+		s, resp, err := specRouteCall[schema](t, TestOptions{Headers: map[string]string{"x-v": "x"}})
+		require.NoError(t, err)
+		assertServerFault(t, resp, s != nil)
+	})
+
+	// Errors in one location are joined, and the first validation error sets the
+	// status. A bind failure must not become a 400 that carries its message.
+	t.Run("alongside a validation error", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					A string `json:"a" validate:"required"`
+					B string `json:"b" spec:"spec-wrong-id"`
+					C string `json:"c" validate:"required"`
+				}
+			}
+		}
+		for range 20 {
+			s, resp, err := specRouteCall[schema](t, TestOptions{Query: map[string]string{"b": "x"}})
+			require.NoError(t, err)
+			assertServerFault(t, resp, s != nil)
+		}
+	})
+
+	t.Run("a conversion that would change the value is refused", func(t *testing.T) {
+		type toInt struct {
+			Request struct {
+				Query struct {
+					V int `json:"v" spec:"spec-wrong-float" validate:"required"`
+				}
+			}
+		}
+		s, resp, err := specRouteCall[toInt](t, TestOptions{Query: map[string]string{"v": "x"}})
+		require.NoError(t, err)
+		assert.Equal(t, 500, resp.StatusCode)
+		assert.Nil(t, s)
+
+		type toString struct {
+			Request struct {
+				Query struct {
+					V string `json:"v" spec:"spec-wrong-rune" validate:"required"`
+				}
+			}
+		}
+		s2, resp, err := specRouteCall[toString](t, TestOptions{Query: map[string]string{"v": "x"}})
+		require.NoError(t, err)
+		assert.Equal(t, 500, resp.StatusCode)
+		assert.Nil(t, s2)
+
+		// JSON bodies refuse it too; they report it as a request error.
+		type inBody struct {
+			Request struct {
+				Body struct {
+					V string `json:"v" spec:"spec-wrong-rune"`
+				}
+			}
+		}
+		_, err = bindSpecBody[inBody](t, "application/json", `{"v":"x"}`)
+		require.Error(t, err)
+	})
+
+	// Form and multipart report it as a request error too, and never bind.
+	t.Run("form and multipart refuse it as well", func(t *testing.T) {
+		type toInt struct {
+			Request struct {
+				Body struct {
+					V int `json:"v" spec:"spec-wrong-float"`
+				}
+			}
+		}
+		type toString struct {
+			Request struct {
+				Body struct {
+					V string `json:"v" spec:"spec-wrong-rune"`
+				}
+			}
+		}
+		const multipartCT = "multipart/form-data; boundary=XX"
+		for name, tc := range map[string]struct{ ct, body string }{
+			"form":      {"application/x-www-form-urlencoded", "v=x"},
+			"multipart": {multipartCT, "--XX\r\nContent-Disposition: form-data; name=\"v\"\r\n\r\nx\r\n--XX--\r\n"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				_, err := bindSpecBody[toInt](t, tc.ct, tc.body)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "not a whole number")
+
+				_, err = bindSpecBody[toString](t, tc.ct, tc.body)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "cannot convert")
+			})
+		}
+	})
+
+	t.Run("conversions that keep the value still bind", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					Named specName  `json:"named" spec:"spec-plain"`
+					Ptr   *specName `json:"ptr" spec:"spec-plain"`
+					ID    specID    `json:"id" spec:"spec-raw-id"`
+					Tags  specTags  `json:"tags" spec:"spec-raw-tags"`
+				}
+			}
+		}
+		m := NewRouter()
+		m.RegisterSpec(
+			DefineCustomSpec(SpecDefinition{SpecID: "spec-plain", Type: "string",
+				Encode: func(val any) (string, error) { return "", nil },
+				Decode: func(val any) (any, error) { return val, nil }}),
+			DefineCustomSpec(SpecDefinition{SpecID: "spec-raw-id", Type: "string",
+				Encode: func(val any) (string, error) { return "", nil },
+				Decode: func(val any) (any, error) { return [16]byte{9}, nil }}),
+			DefineCustomSpec(SpecDefinition{SpecID: "spec-raw-tags", Type: "string",
+				Encode: func(val any) (string, error) { return "", nil },
+				Decode: func(val any) (any, error) { return []string{val.(string)}, nil }}),
+		)
+		var bound *schema
+		m.Get("/t", RouteOptions{Schema: &schema{}, Handler: func(c Context) error {
+			s, err := ValidateAndBind[schema](c)
+			bound = s
+			return err
+		}})
+		_, err := m.Test(TestOptions{Method: "GET", Path: "/t", Query: map[string]string{"named": "a", "ptr": "b", "id": "c", "tags": "d"}})
+		require.NoError(t, err)
+		require.NotNil(t, bound)
+		assert.Equal(t, specName("a"), bound.Request.Query.Named)
+		assert.Equal(t, specName("b"), *bound.Request.Query.Ptr)
+		assert.Equal(t, specID{9}, bound.Request.Query.ID)
+		assert.Equal(t, specTags{"d"}, bound.Request.Query.Tags)
+	})
+}
+
+// A failed assertion on anything but the input is a bug in the server, so it
+// stays a panic: a 500 that gets logged, not a 400 that blames the client.
+func TestCustomSpec_AssertionNotOnInputIsAServerFault(t *testing.T) {
+	assertPanicked := func(t *testing.T, resp *InjectResponse, err error) {
+		t.Helper()
+		require.Error(t, err, "Test reports a recovered panic")
+		assert.Contains(t, err.Error(), "panic recovered")
+		assert.Equal(t, 500, resp.StatusCode)
+	}
+	part := "--XX\r\nContent-Disposition: form-data; name=\"v\"\r\n\r\nx\r\n--XX--\r\n"
+
+	type inBody struct {
+		Request struct {
+			Body struct {
+				V specName `json:"v" spec:"spec-bug"`
+			}
+		}
+	}
+	for name, opts := range map[string]TestOptions{
+		"json":      {Headers: specJSONHeaders, Body: strings.NewReader(`{"v":"x"}`)},
+		"form":      {Headers: specFormHeaders, Body: strings.NewReader("v=x")},
+		"multipart": {Headers: specMultipartHeaders, Body: strings.NewReader(part)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, resp, err := specRouteCall[inBody](t, opts)
+			assertPanicked(t, resp, err)
+		})
+	}
+
+	t.Run("path", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Path struct {
+					P string `json:"p" spec:"spec-bug"`
+				}
+			}
+		}
+		_, resp, err := specRouteCall[schema](t, TestOptions{})
+		assertPanicked(t, resp, err)
+	})
+
+	t.Run("query", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Query struct {
+					V string `json:"v" spec:"spec-bug"`
+				}
+			}
+		}
+		_, resp, err := specRouteCall[schema](t, TestOptions{Query: map[string]string{"v": "x"}})
+		assertPanicked(t, resp, err)
+	})
+
+	t.Run("header", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Header struct {
+					V string `json:"x-v" spec:"spec-bug"`
+				}
+			}
+		}
+		_, resp, err := specRouteCall[schema](t, TestOptions{Headers: map[string]string{"x-v": "x"}})
+		assertPanicked(t, resp, err)
+	})
+}
+
+type specBytes [4]byte
+
+// A [N]byte field is base64 on the wire, as OpenAPI documents it.
+func TestByteArrayField_JSONRequest(t *testing.T) {
+	const (
+		ct  = "application/json"
+		enc = "AQIDBA=="
+	)
+	want := [4]byte{1, 2, 3, 4}
+	type bound struct {
+		Request struct {
+			Body struct {
+				V [4]byte            `json:"v"`
+				P *[4]byte           `json:"p"`
+				N specBytes          `json:"n"`
+				L [][4]byte          `json:"l"`
+				M map[string][4]byte `json:"m"`
+				B []byte             `json:"b"`
+			}
+		}
+	}
+
+	t.Run("binds in every shape", func(t *testing.T) {
+		s, err := bindSpecBody[bound](t, ct, `{"v":"`+enc+`","p":"`+enc+`","n":"`+enc+`","l":["`+enc+`"],"m":{"a":"`+enc+`"},"b":"`+enc+`"}`)
+		require.NoError(t, err)
+		b := s.Request.Body
+		assert.Equal(t, want, b.V)
+		require.NotNil(t, b.P)
+		assert.Equal(t, want, *b.P)
+		assert.Equal(t, specBytes(want), b.N)
+		assert.Equal(t, [][4]byte{want}, b.L)
+		assert.Equal(t, map[string][4]byte{"a": want}, b.M)
+		assert.Equal(t, want[:], b.B)
+	})
+
+	t.Run("absent and null stay empty", func(t *testing.T) {
+		s, err := bindSpecBody[bound](t, ct, `{"v":null}`)
+		require.NoError(t, err)
+		assert.Equal(t, [4]byte{}, s.Request.Body.V)
+		assert.Nil(t, s.Request.Body.P)
+	})
+
+	for name, tc := range map[string]struct{ body, want string }{
+		"too short":       {`{"v":"AQID"}`, "expected 4 bytes, got 3"},
+		"too long":        {`{"v":"AQIDBAU="}`, "expected 4 bytes, got 5"},
+		"empty":           {`{"v":""}`, "expected 4 bytes, got 0"},
+		"not base64":      {`{"v":"***"}`, "illegal base64"},
+		"a number list":   {`{"v":[1,2,3,4]}`, "expected base64-encoded JSON string"},
+		"pointer short":   {`{"p":"AQID"}`, "expected 4 bytes, got 3"},
+		"element short":   {`{"l":["AQID"]}`, "expected 4 bytes, got 3"},
+		"element long":    {`{"l":["AQIDBAU="]}`, "expected 4 bytes, got 5"},
+		"map value short": {`{"m":{"a":"AQID"}}`, "expected 4 bytes, got 3"},
+		"map value long":  {`{"m":{"a":"AQIDBAU="}}`, "expected 4 bytes, got 5"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := bindSpecBody[bound](t, ct, tc.body)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+
+	t.Run("required", func(t *testing.T) {
+		type schema struct {
+			Request struct {
+				Body struct {
+					V [4]byte `json:"v" validate:"required"`
+				}
+			}
+		}
+		_, err := bindSpecBody[schema](t, ct, `{}`)
+		require.Error(t, err)
+
+		s, err := bindSpecBody[schema](t, ct, `{"v":"`+enc+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, want, s.Request.Body.V)
+	})
+}
+
+// Nested fields run their rules, and report their full name, whether the body is
+// a form or multipart.
+func TestFormAndMultipart_NestedFieldsRunRules(t *testing.T) {
+	type schema struct {
+		Request struct {
+			Body struct {
+				N struct {
+					V string   `json:"v" validate:"min=3"`
+					I int      `json:"i"`
+					S specName `json:"s" spec:"spec-name" validate:"min=3"`
+					T []string `json:"t"`
+					M struct {
+						V string `json:"v" validate:"min=3"`
+					} `json:"m"`
+					L []struct {
+						V string `json:"v" validate:"min=3"`
+					} `json:"l"`
+				} `json:"n"`
+			}
+		}
+	}
+	type requiredSchema struct {
+		Request struct {
+			Body struct {
+				N struct {
+					Other string `json:"other"`
+					R     string `json:"r" validate:"required"`
+				} `json:"n"`
+			}
+		}
+	}
+
+	bodies := func(fields [][2]string) map[string]TestOptions {
+		var form []string
+		var multi strings.Builder
+		for _, f := range fields {
+			form = append(form, f[0]+"="+f[1])
+			multi.WriteString("--XX\r\nContent-Disposition: form-data; name=\"" + f[0] + "\"\r\n\r\n" + f[1] + "\r\n")
+		}
+		multi.WriteString("--XX--\r\n")
+		return map[string]TestOptions{
+			"form":      {Headers: specFormHeaders, Body: strings.NewReader(strings.Join(form, "&"))},
+			"multipart": {Headers: specMultipartHeaders, Body: strings.NewReader(multi.String())},
+		}
+	}
+
+	t.Run("valid values bind", func(t *testing.T) {
+		for name, opts := range bodies([][2]string{{"n.v", "abc"}, {"n.i", "5"}, {"n.s", "abc"}, {"n.t", "x"}, {"n.m.v", "abc"}, {"n.l.0.v", "abc"}}) {
+			t.Run(name, func(t *testing.T) {
+				s, resp, err := specRouteCall[schema](t, opts)
+				require.NoError(t, err)
+				require.Equal(t, 200, resp.StatusCode, string(resp.Body))
+				n := s.Request.Body.N
+				assert.Equal(t, "abc", n.V)
+				assert.Equal(t, 5, n.I)
+				assert.Equal(t, specName("abc"), n.S)
+				assert.Equal(t, []string{"x"}, n.T)
+				assert.Equal(t, "abc", n.M.V)
+				require.Len(t, n.L, 1)
+				assert.Equal(t, "abc", n.L[0].V)
+			})
+		}
+	})
+
+	for field, tc := range map[string]struct{ value, want string }{
+		"n.v":     {"a", "minimum"},
+		"n.s":     {"a", "minimum"},
+		"n.m.v":   {"a", "minimum"},
+		"n.l.0.v": {"a", "minimum"},
+		"n.i":     {"abc", "error converting value"},
+	} {
+		t.Run(field, func(t *testing.T) {
+			for name, opts := range bodies([][2]string{{field, tc.value}}) {
+				t.Run(name, func(t *testing.T) {
+					s, resp, err := specRouteCall[schema](t, opts)
+					require.NoError(t, err)
+					assert.Nil(t, s, "the handler must not run")
+					assert.Equal(t, 400, resp.StatusCode)
+					assert.Contains(t, string(resp.Body), tc.want)
+					assert.Contains(t, string(resp.Body), "Body("+field+")", "errors name the full field")
+				})
+			}
+		})
+	}
+
+	t.Run("a required field names its full path", func(t *testing.T) {
+		for name, opts := range bodies([][2]string{{"n.other", "x"}}) {
+			t.Run(name, func(t *testing.T) {
+				s, resp, err := specRouteCall[requiredSchema](t, opts)
+				require.NoError(t, err)
+				assert.Nil(t, s)
+				assert.Equal(t, 400, resp.StatusCode)
+				assert.Contains(t, string(resp.Body), "Body(n.r)")
+			})
+		}
+	})
 }
 
 // =============================================================================

@@ -246,3 +246,56 @@ func TestOpenAPISpec_FreeFormRequestBodies(t *testing.T) {
 	_, hasBody := dig(t, spec, "paths", "/none", "get").(map[string]any)["requestBody"]
 	assert.False(t, hasBody, "a schema without Request.Body documents no request body")
 }
+
+func TestOpenAPISpec_ExampleAndDefaultOnSpecFields(t *testing.T) {
+	type schema struct {
+		Request struct {
+			Query struct {
+				Q specID `json:"q" spec:"spec-id" example:"0123456789abcdef0123456789abcdef"`
+			}
+			Body struct {
+				Array  specID     `json:"array" spec:"spec-id" example:"0123456789abcdef0123456789abcdef" default:"0123456789abcdef0123456789abcdef"`
+				Slice  specTags   `json:"slice" spec:"spec-tags" example:"a,b" default:"a,b"`
+				Map    specLabels `json:"map" spec:"spec-labels" example:"k=v"`
+				Ptr    *specName  `json:"ptr" spec:"spec-name" example:"deposit" default:"deposit"`
+				Struct vendorType `json:"struct" spec:"custom" example:"hello"`
+				Text   specCents  `json:"text" spec:"spec-cents" example:"12.34"`
+				Count  specCents  `json:"count" spec:"spec-count" example:"5"`
+				Name   specName   `json:"name" spec:"spec-name" example:"alice"`
+				Plain  string     `json:"plain" example:"bob"`
+			}
+		}
+	}
+	r := NewRouter()
+	r.RegisterSpec(specKindSpecs()...)
+	r.Post("/s", RouteOptions{Schema: &schema{}, Handler: func(c Context) error { return nil }})
+
+	spec := specJSON(t, r, DocsOptions{})
+	props := dig(t, spec, "paths", "/s", "post", "requestBody", "content", "application/json", "schema", "properties").(map[string]any)
+
+	example := func(field string) any {
+		t.Helper()
+		return props[field].(map[string]any)["example"]
+	}
+	assert.Equal(t, "0123456789abcdef0123456789abcdef", example("array"))
+	assert.Equal(t, "a,b", example("slice"))
+	assert.Equal(t, "k=v", example("map"))
+	assert.Equal(t, "deposit", example("ptr"))
+	assert.Equal(t, "hello", example("struct"))
+	assert.Equal(t, "12.34", example("text"), "the spec's Type says string, so the example is text")
+	assert.EqualValues(t, 5, example("count"), "the spec's Type says integer, so the example is a number")
+	assert.Equal(t, "alice", example("name"))
+	assert.Equal(t, "bob", example("plain"))
+
+	def := func(field string) any {
+		t.Helper()
+		return props[field].(map[string]any)["default"]
+	}
+	assert.Equal(t, "0123456789abcdef0123456789abcdef", def("array"))
+	assert.Equal(t, "a,b", def("slice"))
+	assert.Equal(t, "deposit", def("ptr"))
+
+	raw, err := json.Marshal(dig(t, spec, "paths", "/s", "post", "parameters"))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"example":"0123456789abcdef0123456789abcdef"`, "params keep their example too")
+}

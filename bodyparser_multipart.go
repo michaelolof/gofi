@@ -232,7 +232,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 							}
 						}
 
-						if err := m.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
+						if err := m.bindStruct(subForm, istrct, elemRule, customSpecs, fmt.Sprintf("%s.%d", key, i)); err != nil {
 							return err
 						}
 						nslice = reflect.Append(nslice, istrct)
@@ -280,7 +280,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 							return newErrReport(RequestErr, schemaBody, key, "typeCast", err)
 						}
 
-						if err := runValidation(val, RequestErr, schemaBody, key, rule.rules); err != nil {
+						if err := runSpecValidation(val, RequestErr, schemaBody, key, rule.rules); err != nil {
 							return err
 						}
 
@@ -300,7 +300,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 						subForm[strings.TrimPrefix(k, prefix)] = v
 					}
 				}
-				if err := m.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
+				if err := m.bindStruct(subForm, fieldVal, rule, customSpecs, key); err != nil {
 					return err
 				}
 			} else {
@@ -330,37 +330,24 @@ func (m *MultipartBodyParser) bindValue(field reflect.Value, val any) error {
 		return nil
 	}
 
-	rv := reflect.ValueOf(val)
-
-	// Try direct assignment first (important for pointers like *multipart.FileHeader)
-	if rv.Type().ConvertibleTo(field.Type()) {
-		field.Set(rv.Convert(field.Type()))
-		return nil
-	}
-
-	if field.Kind() == reflect.Pointer {
-		// If the field is a pointer, allocate memory if it's nil
-		if field.IsNil() {
-			field.Set(reflect.New(field.Type().Elem()))
-		}
-		return m.bindValue(field.Elem(), val)
-	}
-
-	return fmt.Errorf("cannot convert %v to %v", rv.Type(), field.Type())
+	return setParamField(field, val)
 }
 
-func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef, customSpecs CustomSpecs) error {
+// bindStruct binds the nested fields under path. Errors and validation mirror
+// the top level, reported against the full dotted field name.
+func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.Value, rules *RuleDef, customSpecs CustomSpecs, path string) error {
 	if dest.Kind() == reflect.Pointer {
 		dest = dest.Elem()
 	}
 	for key, rule := range rules.properties {
+		name := path + "." + key
 		vals, ok := form[key]
 		if !ok {
 			if rule.kind == reflect.Slice || rule.kind == reflect.Array || rule.kind == reflect.Struct {
 				// Continue
 			} else {
 				if rule.required || rule.present {
-					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
+					return newErrReport(RequestErr, schemaBody, name, "required", errors.New("field is required"))
 				}
 				continue
 			}
@@ -380,6 +367,25 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 				return decodeSpecValue(spec, v)
 			}
 			return utils.PrimitiveFromStr(r.kind, v)
+		}
+
+		// bindScalar parses, validates and binds one value.
+		bindScalar := func(field reflect.Value, v string, r *RuleDef, name string) error {
+			val, err := parseVal(v, r)
+			if err != nil {
+				return newErrReport(RequestErr, schemaBody, name, "typeCast", err)
+			}
+			validate := runValidation
+			if _, isSpec := customSpecs.Find(string(r.format)); isSpec {
+				validate = runSpecValidation
+			}
+			if err := validate(val, RequestErr, schemaBody, name, r.rules); err != nil {
+				return err
+			}
+			if err := m.bindValue(field, val); err != nil {
+				return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
+			}
+			return nil
 		}
 
 		// A spec field is one value, whatever its kind; it is bound as a scalar below.
@@ -416,7 +422,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 						}
 					}
 
-					if err := m.bindStruct(subForm, istrct, elemRule, customSpecs); err != nil {
+					if err := m.bindStruct(subForm, istrct, elemRule, customSpecs, fmt.Sprintf("%s.%d", name, i)); err != nil {
 						return err
 					}
 
@@ -424,7 +430,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 					i++
 				}
 				if err := m.bindValue(fieldVal, nslice.Interface()); err != nil {
-					return err
+					return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
 				}
 			} else {
 				sliceType := fieldVal.Type()
@@ -433,31 +439,23 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 				}
 				slice := reflect.MakeSlice(sliceType, len(vals), len(vals))
 				for i, v := range vals {
-					val, err := parseVal(v, elemRule)
-					if err != nil {
-						return err
-					}
-					if err := m.bindValue(slice.Index(i), val); err != nil {
+					if err := bindScalar(slice.Index(i), v, elemRule, fmt.Sprintf("%s.%d", name, i)); err != nil {
 						return err
 					}
 				}
 				if err := m.bindValue(fieldVal, slice.Interface()); err != nil {
-					return err
+					return newErrReport(RequestErr, schemaBody, name, "typeMismatch", err)
 				}
 			}
 		} else if rule.kind == reflect.Struct || isSpecField {
 			// If this struct-like field has a custom spec format, treat it as a scalar
 			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
 				if len(vals) > 0 {
-					val, err := parseVal(vals[0], rule)
-					if err != nil {
-						return err
-					}
-					if err := m.bindValue(fieldVal, val); err != nil {
+					if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 						return err
 					}
 				} else if rule.required || rule.present {
-					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
+					return newErrReport(RequestErr, schemaBody, name, "required", errors.New("field is required"))
 				}
 				continue
 			}
@@ -469,16 +467,12 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 					subForm[strings.TrimPrefix(k, prefix)] = v
 				}
 			}
-			if err := m.bindStruct(subForm, fieldVal, rule, customSpecs); err != nil {
+			if err := m.bindStruct(subForm, fieldVal, rule, customSpecs, name); err != nil {
 				return err
 			}
 		} else {
 			if len(vals) > 0 {
-				val, err := parseVal(vals[0], rule)
-				if err != nil {
-					return err
-				}
-				if err := m.bindValue(fieldVal, val); err != nil {
+				if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 					return err
 				}
 			}

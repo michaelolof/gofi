@@ -2,7 +2,6 @@ package gofi
 
 import (
 	"fmt"
-	"log"
 	"reflect"
 	"regexp"
 	"slices"
@@ -74,19 +73,20 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						if isPromotedEmbed(rqff) {
 							continue // children are emitted as their own promoted entries
 						}
-						if rqn == schemaCookies && !utils.ValidCookieType(rqff.Type) {
-							continue
-						}
 
-						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						name := getFieldName(rqff)
 						if name == "-" {
 							continue
 						}
+						if rqn == schemaCookies && !compileCookieField(rqff) {
+							continue
+						}
+
+						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						if in == "header" {
 							name = strings.ToLower(name)
 						}
-						ruleDefs := s.getFieldRuleDefs(rqff, name, val)
+						ruleDefs := s.getFieldRuleDefs(rqff, true, val)
 						pruleDefs.attach(name, ruleDefs)
 						var required *bool
 						if v := ruleDefs.hasRule("required"); v {
@@ -94,6 +94,9 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						}
 
 						tInfo := s.getTypeInfo(rqff.Type, val, name, ruleDefs)
+						if rqn != schemaCookies && rqff.IsExported() && !paramReadsFromText(ruleDefs) {
+							panic(fmt.Sprintf("gofi: %s field %s of type %s can't be read from text; use a primitive type, time.Time or a custom spec", in, rqff.Name, rqff.Type))
+						}
 						optsObj.Parameters = append(
 							optsObj.Parameters,
 							newOpenapiParameter(in, name, required, tInfo),
@@ -104,7 +107,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 				case schemaBody:
 					val := getPrimitiveValFromParent(obj, rqf)
 					name := getFieldName(rqf)
-					ruleDefs := s.getFieldRuleDefs(rqf, name, val)
+					ruleDefs := s.getFieldRuleDefs(rqf, false, val)
 					optsObj.bodySchema = s.getTypeInfo(rqf.Type, val, name, ruleDefs)
 					optsObj.bodyDeclared = true
 					ruleDefs.jsonBindMaxDepth = compileJSONBindMaxDepth(ruleDefs)
@@ -137,16 +140,17 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						if isPromotedEmbed(rqff) {
 							continue // children are emitted as their own promoted entries
 						}
-						if rqn == schemaCookies && !utils.ValidCookieType(rqff.Type) {
-							continue
-						}
 
-						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
 						name := getFieldName(rqff)
 						if name == "-" {
 							continue
 						}
-						ruleDefs := s.getFieldRuleDefs(rqff, name, val)
+						if rqn == schemaCookies && !compileCookieField(rqff) {
+							continue
+						}
+
+						val := getPrimitiveValFromParent(obj.FieldByName(rqf.Name), rqff)
+						ruleDefs := s.getFieldRuleDefs(rqff, true, val)
 						pruleDefs.attach(name, ruleDefs)
 						var required *bool
 						if v := ruleDefs.hasRule("required"); v {
@@ -165,7 +169,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 				case schemaBody:
 					val := getPrimitiveValFromParent(obj, rqf)
 					name := getFieldName(rqf)
-					ruleDefs := s.getFieldRuleDefs(rqf, name, val)
+					ruleDefs := s.getFieldRuleDefs(rqf, false, val)
 					optsObj.responsesSchema[sf.Name] = s.getTypeInfo(rqf.Type, val, name, ruleDefs)
 					sRules.setResps(sf.Name, ruleDefs)
 				}
@@ -179,7 +183,9 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 	}
 }
 
-func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any) *RuleDef {
+// getFieldRuleDefs builds a field's rules from its tags. fromText says the field's
+// value arrives as text (a param, header or cookie) rather than in a body.
+func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, fromText bool, defVal any) *RuleDef {
 	supportedTags := []string{
 		"json",
 		"validate",
@@ -193,6 +199,8 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 
 	tagList := make(map[string][]string)
 	var defStr string
+	var specID string
+	var fieldSpec CustomSpec
 	var rules []ruleOpts
 	var required bool
 	var present bool
@@ -218,8 +226,9 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 					continue
 				}
 
-				specID := parseTagValue(tag, sf.Type)
-				if _, ok := s.opts.customSpecs.Find(specID); !ok {
+				specID = parseTagValue(tag, sf.Type)
+				var ok bool
+				if fieldSpec, ok = s.opts.customSpecs.Find(specID); !ok {
 					panic(fmt.Sprintf("gofi: unknown spec %q in spec tag on field %s; register custom specs with RegisterSpec before the routes that use them", specID, sf.Name))
 				}
 				tagList[stag] = []string{specID}
@@ -301,6 +310,12 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 					}
 				}
 
+				if sf.Tag.Get("spec") != "" {
+					for i := range rules {
+						rules[i] = rules[i].plainValues()
+					}
+				}
+
 				// omitempty skips every other rule on the field when its value
 				// is empty, so it cannot be combined with rules that demand a value.
 				if omitEmpty {
@@ -321,13 +336,91 @@ func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, _ string, defVal any
 		}
 	}
 
+	// A spec decodes its own default, whatever the field's kind. One that doesn't
+	// decode is a schema mistake, so it fails here rather than on every request.
+	var specDefault any
+	if fieldSpec != nil && defStr != "" {
+		var input any = defStr
+		if !fromText {
+			input = specDefaultInput(sf.Type, defStr)
+			defVal = input
+		}
+		decoded, err := decodeSpecValue(fieldSpec, input)
+		if err != nil {
+			panic(fmt.Sprintf("gofi: invalid default %q for spec %q on field %s: %v", defStr, specID, sf.Name, err))
+		}
+		specDefault = decoded
+	}
+
 	rtn := newRuleDef(sf, defStr, defVal, rules, required, present, max, nil, nil, nil)
 	rtn.tags = tagList
+	rtn.specDefault = specDefault
 	if parts, ok := tagList["json"]; ok {
 		rtn.skipJSON = len(parts) == 1 && parts[0] == "-"
 		rtn.omitEmpty = slices.Contains(parts[1:], "omitempty")
+		rtn.omitZero = slices.Contains(parts[1:], "omitzero")
 	}
 	return rtn
+}
+
+// specDefaultInput returns what Decode receives for a default tag on a body field:
+// what it would receive had the client sent that value. A number or bool field
+// reads as its own kind, and anything else is the tag's text.
+func specDefaultInput(t reflect.Type, text string) any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if k := t.Kind(); k != reflect.String && utils.IsPrimitiveKind(k) {
+		if v, err := utils.PrimitiveFromStr(k, text); err == nil {
+			return v
+		}
+	}
+	return text
+}
+
+// compileCookieField reports whether a cookie field is compiled, and panics on
+// one Gofi can't read or write: a cookie is a primitive type or http.Cookie.
+func compileCookieField(f reflect.StructField) bool {
+	if !f.IsExported() {
+		return utils.ValidCookieType(f.Type)
+	}
+	if f.Tag.Get("spec") != "" {
+		panic(fmt.Sprintf("gofi: spec tag on cookie field %s; a cookie is a primitive type or http.Cookie, and doesn't use a spec", f.Name))
+	}
+	if !utils.ValidCookieType(f.Type) {
+		panic(fmt.Sprintf("gofi: unsupported type %s on cookie field %s; use a primitive type or http.Cookie", f.Type, f.Name))
+	}
+	return true
+}
+
+// paramReadsFromText reports whether a compiled path, query or header field can
+// be read from its text value.
+func paramReadsFromText(r *RuleDef) bool {
+	return r.specKind != reflect.Invalid || utils.IsPrimitiveKind(r.kind) || r.format == utils.TimeObjectFormat
+}
+
+// numericOneOfOption is the panic for a oneof option that isn't a number.
+func numericOneOfOption(option, field string) string {
+	return fmt.Sprintf("gofi: invalid oneof option %q on field %s; it must be a number", option, field)
+}
+
+// specExample returns a spec field's example tag in the type the spec documents.
+func specExample(specType, text string) any {
+	switch specType {
+	case "integer":
+		if v, err := strconv.ParseInt(text, 10, 64); err == nil {
+			return v
+		}
+	case "number":
+		if v, err := strconv.ParseFloat(text, 64); err == nil {
+			return v
+		}
+	case "boolean":
+		if v, err := strconv.ParseBool(text); err == nil {
+			return v
+		}
+	}
+	return text
 }
 
 func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDefs *RuleDef) openapiSchema {
@@ -417,6 +510,12 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 		if kind == reflect.Pointer {
 			ruleDefs.specKind = typ.Elem().Kind()
 		}
+		if tag := ruleDefs.tags["example"]; len(tag) > 0 {
+			example = specExample(v.Type(), tag[0])
+		}
+		if value == nil && ruleDefs.defStr != "" {
+			value = ruleDefs.defStr
+		}
 		isCustom = true
 	}
 
@@ -431,7 +530,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			enum = optsMapper(optStr, func(s string) any {
 				v, err := strconv.Atoi(s)
 				if err != nil {
-					log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+					panic(numericOneOfOption(s, name))
 				}
 				return int32(v)
 			})
@@ -442,7 +541,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			enum = optsMapper(optStr, func(s string) any {
 				v, err := strconv.Atoi(s)
 				if err != nil {
-					log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+					panic(numericOneOfOption(s, name))
 				}
 				return int64(v)
 			})
@@ -453,7 +552,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			enum = optsMapper(optStr, func(s string) any {
 				v, err := strconv.ParseFloat(s, 32)
 				if err != nil {
-					log.Fatalln("unsupported type in schema validate option 'oneof=" + s + "' at " + name)
+					panic(numericOneOfOption(s, name))
 				}
 				return float64(v)
 			})
@@ -534,7 +633,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 						continue
 					}
 
-					_ruleDefs := s.getFieldRuleDefs(sf, name, val)
+					_ruleDefs := s.getFieldRuleDefs(sf, false, val)
 					ruleDefs.attach(name, _ruleDefs)
 					if _ruleDefs.hasRule("required") || _ruleDefs.hasRule("present") {
 						requiredProps = append(requiredProps, name)
