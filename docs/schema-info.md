@@ -32,7 +32,9 @@ The `Request` struct defines the expected input. Gofi binds data from the HTTP r
 
 A `Path`, `Query` or `Header` field is a primitive type, `time.Time` or a type with a custom spec. A `Cookie` field is a primitive type or `http.Cookie`, and doesn't use a spec. Anything else panics when the route is registered, because it could never bind.
 
-In a JSON body or response, a `[]byte` or `[N]byte` field with no spec is a base64 string, which is what OpenAPI documents. A `[N]byte` value of the wrong length is a 400.
+In a JSON, form or multipart body, or a JSON response, a `[]byte` or `[N]byte` field with no spec is a base64 string, which is what OpenAPI documents. A `[N]byte` value of the wrong length is a 400.
+
+Unexported fields aren't part of a schema, in any location. An embedded struct pointer works in a body. In a `Path`, `Query`, `Header` or `Cookie` block it panics when the route is registered; embed the struct by value. The [README](../README.md#how-go-types-map-to-json) lists how other Go types map to JSON, and which ones panic when the route is registered.
 
 ### Example
 
@@ -196,5 +198,5 @@ Gofi supports standard validation tags (inspired by `go-playground/validator`).
     - `email`: Valid email format.
     - `uuid`, `uuid4`: Valid UUID.
     - `oneof=a b c`: Must match one of the values.
-- **`default`**: Sets a default value if the input is missing/empty.
+- **`default`**: Sets a default value if the input is missing/empty. It works in the path, query, header, cookie and JSON, including on pointers and on `time.Time`, where it is text in the field's layout. It isn't applied in form and multipart bodies, and a slice default can only be `[]`. A default that doesn't parse panics when the route is registered.
 - **`json`**: Maps the field to the input source key (query param name, header name, JSON field, etc.).

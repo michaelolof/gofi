@@ -174,7 +174,8 @@ When `Config.MethodNotAllowed` is set to `true` (the default), a request that ma
 ```go
 r := gofi.NewRouter()
 // MethodNotAllowed is enabled by default; use Configure to opt out:
-r.Configure(gofi.Config{MethodNotAllowed: false})
+methodNotAllowed := false
+r.Configure(gofi.Config{MethodNotAllowed: &methodNotAllowed})
 
 r.Get("/users", listHandler)
 // POST /users → 405 Allow: GET

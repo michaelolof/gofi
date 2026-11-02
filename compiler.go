@@ -70,9 +70,10 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
-						if isPromotedEmbed(rqff) {
+						if isPromotedEmbed(rqff) || !rqff.IsExported() {
 							continue // children are emitted as their own promoted entries
 						}
+						mustNotPromoteThroughPointer(rqf.Type, rqff, in)
 
 						name := getFieldName(rqff)
 						if name == "-" {
@@ -94,7 +95,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						}
 
 						tInfo := s.getTypeInfo(rqff.Type, val, name, ruleDefs)
-						if rqn != schemaCookies && rqff.IsExported() && !paramReadsFromText(ruleDefs) {
+						if rqn != schemaCookies && !paramReadsFromText(ruleDefs) {
 							panic(fmt.Sprintf("gofi: %s field %s of type %s can't be read from text; use a primitive type, time.Time or a custom spec", in, rqff.Name, rqff.Type))
 						}
 						optsObj.Parameters = append(
@@ -109,6 +110,7 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					name := getFieldName(rqf)
 					ruleDefs := s.getFieldRuleDefs(rqf, false, val)
 					optsObj.bodySchema = s.getTypeInfo(rqf.Type, val, name, ruleDefs)
+					optsObj.bodySchema.Nullable = false // a request body of null is rejected
 					optsObj.bodyDeclared = true
 					ruleDefs.jsonBindMaxDepth = compileJSONBindMaxDepth(ruleDefs)
 					sRules.setReq(sf.Name, ruleDefs)
@@ -137,9 +139,10 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 					in := rqn.reqSchemaIn()
 
 					for _, rqff := range reflect.VisibleFields(rqf.Type) {
-						if isPromotedEmbed(rqff) {
+						if isPromotedEmbed(rqff) || !rqff.IsExported() {
 							continue // children are emitted as their own promoted entries
 						}
+						mustNotPromoteThroughPointer(rqf.Type, rqff, in)
 
 						name := getFieldName(rqff)
 						if name == "-" {
@@ -158,6 +161,9 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 						}
 
 						tInfo := s.getTypeInfo(rqff.Type, val, name, ruleDefs)
+						if rqn == schemaHeaders && !paramReadsFromText(ruleDefs) {
+							panic(fmt.Sprintf("gofi: response header field %s of type %s can't be written as text; use a primitive type, time.Time or a custom spec", rqff.Name, rqff.Type))
+						}
 						responseParameters = append(
 							responseParameters,
 							newOpenapiParameter(in, name, required, tInfo),
@@ -186,6 +192,9 @@ func (s *serveMux) compileSchema(schema any, info Info) compiledSchema {
 // getFieldRuleDefs builds a field's rules from its tags. fromText says the field's
 // value arrives as text (a param, header or cookie) rather than in a body.
 func (s *serveMux) getFieldRuleDefs(sf reflect.StructField, fromText bool, defVal any) *RuleDef {
+	if _, opts, _ := strings.Cut(sf.Tag.Get("json"), ","); slices.Contains(strings.Split(opts, ","), "string") {
+		panic(fmt.Sprintf("gofi: the json \",string\" option on field %s isn't supported", sf.Name))
+	}
 	supportedTags := []string{
 		"json",
 		"validate",
@@ -395,6 +404,18 @@ func compileCookieField(f reflect.StructField) bool {
 
 // paramReadsFromText reports whether a compiled path, query or header field can
 // be read from its text value.
+// mustNotPromoteThroughPointer rejects a param, header or cookie field promoted
+// through an embedded pointer. Those locations have no value to allocate from.
+func mustNotPromoteThroughPointer(parent reflect.Type, f reflect.StructField, in string) {
+	for _, i := range f.Index[:len(f.Index)-1] {
+		embedded := parent.Field(i)
+		if embedded.Type.Kind() == reflect.Pointer {
+			panic(fmt.Sprintf("gofi: %s field %s is promoted through the embedded pointer %s, which isn't supported; embed the struct by value", in, f.Name, embedded.Type))
+		}
+		parent = embedded.Type
+	}
+}
+
 func paramReadsFromText(r *RuleDef) bool {
 	return r.specKind != reflect.Invalid || utils.IsPrimitiveKind(r.kind) || r.format == utils.TimeObjectFormat
 }
@@ -430,6 +451,16 @@ func (s *serveMux) getTypeInfo(typ reflect.Type, value any, name string, ruleDef
 func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string, ruleDefs *RuleDef) openapiSchema {
 
 	kind := typ.Kind()
+
+	// A type that contains itself would recurse until the process dies, which
+	// no recover can catch.
+	if typ.Name() != "" && (kind == reflect.Struct || kind == reflect.Slice || kind == reflect.Map) {
+		if slices.Contains(s.compiling, typ) {
+			panic(fmt.Sprintf("gofi: recursive type %s isn't supported in a schema; use json.RawMessage or map[string]any for the recursive field", typ))
+		}
+		s.compiling = append(s.compiling, typ)
+		defer func() { s.compiling = s.compiling[:len(s.compiling)-1] }()
+	}
 
 	var typeStr string
 	var pattern string
@@ -557,6 +588,9 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 				return float64(v)
 			})
 			format = "float"
+			if kind == reflect.Float64 {
+				format = "double"
+			}
 			typeStr = "number"
 
 		case reflect.Bool:
@@ -586,6 +620,9 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			items = &i
 
 		case reflect.Map:
+			if typ.Key().Kind() != reflect.String {
+				panic(fmt.Sprintf("gofi: map field %s of type %s isn't supported; a map key must be a string type", name, typ))
+			}
 			typeStr = "object"
 			_ruleDefs := getItemRuleDef(typ.Elem())
 			ruleDefs.addProps(_ruleDefs)
@@ -624,7 +661,7 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 				typeStr = "object"
 				obj := reflect.ValueOf(value)
 				for _, sf := range reflect.VisibleFields(typ) {
-					if isPromotedEmbed(sf) {
+					if isPromotedEmbed(sf) || !sf.IsExported() {
 						continue
 					}
 					val := getPrimitiveValFromParent(obj, sf)
@@ -645,9 +682,21 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 
 		case reflect.Pointer:
 			ruleDefs.kind = typ.Elem().Kind()
-			return s.getTypeInfoRecursive(typ.Elem(), value, name, ruleDefs)
+			elem := s.getTypeInfoRecursive(typ.Elem(), value, name, ruleDefs)
+			// A nil pointer is written as null, so the document says it can be,
+			// unless a rule rejects it.
+			elem.Nullable = !ruleDefs.required && !ruleDefs.present
+			return elem
 
 		}
+	}
+
+	// A type that decodes itself reads the raw JSON value, whatever its kind.
+	if ruleDefs != nil && specTag == "" && typ != utils.TimeType && (typ == jsonNumberType || reflect.PointerTo(typ).Implements(jsonUnmarshalerType)) {
+		ruleDefs.format = utils.RawJSONFormat
+	}
+	if typ == jsonNumberType {
+		typeStr = "number"
 	}
 
 	// The runtime parses and formats times with pattern (a Go layout).
@@ -717,10 +766,39 @@ func getPrimitiveValFromParent(parent reflect.Value, f reflect.StructField) any 
 	tagVal := f.Tag.Get("default")
 	kind := f.Type.Kind()
 
+	// A pointer's default is the value it points to, and a time's is text the
+	// binder parses with the field's layout. Without a tag there is no default.
+	target := f.Type
+	if kind == reflect.Pointer {
+		target = target.Elem()
+	}
+	if tagVal != "" && f.Tag.Get("spec") == "" {
+		if target == utils.TimeType {
+			layout := f.Tag.Get("pattern")
+			if layout == "" {
+				layout = time.RFC3339Nano
+			}
+			if _, err := time.Parse(layout, tagVal); err != nil {
+				panic(fmt.Sprintf("gofi: invalid default %q on time field %s: %v", tagVal, f.Name, err))
+			}
+			return tagVal
+		}
+		if kind == reflect.Pointer && utils.IsPrimitiveKind(target.Kind()) {
+			val, err := utils.PrimitiveFromStr(target.Kind(), tagVal)
+			if err != nil {
+				panic(fmt.Sprintf("gofi: invalid default %q on field %s: %v", tagVal, f.Name, err))
+			}
+			return val
+		}
+	}
+
 	switch true {
 	case utils.IsPrimitiveKind(kind):
 		val, err := utils.PrimitiveFromStr(kind, tagVal)
 		if err != nil {
+			if tagVal != "" && f.Tag.Get("spec") == "" {
+				panic(fmt.Sprintf("gofi: invalid default %q on field %s: %v", tagVal, f.Name, err))
+			}
 			if fieldVal != nil {
 				return fieldVal
 			} else {

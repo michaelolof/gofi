@@ -715,6 +715,21 @@ type UploadSchema struct {
 }
 ```
 
+A file sent to a field that isn't a file field is a 400, including any field inside a nested struct,
+because nested fields only bind text. A file for a field the schema doesn't declare is ignored.
+
+### Field types in forms
+
+Form and multipart fields read these types from text:
+
+| Field | Form value |
+|---|---|
+| `time.Time`, `*time.Time`, `[]time.Time` | Text in the field's `pattern` layout (default RFC 3339). Anything else is a 400. |
+| `[]byte`, `[N]byte` and pointers to them | Base64, as in JSON. A `[N]byte` of the wrong length is a 400. |
+| Any other fixed-size array, such as `[2]int` | Not supported: a 400 when the value is sent. |
+
+`default` tags aren't applied in form and multipart bodies.
+
 ## Serving Static Files
 
 You can serve static files from a directory using the `Static` method:
@@ -724,6 +739,44 @@ You can serve static files from a directory using the `Static` method:
 // e.g. GET /assets/style.css -> ./public/style.css
 r.Static("/assets", "./public")
 ```
+
+## Server Limits
+
+A server from `r.Listen` has no timeouts or connection limit until you set them. Set them with
+`r.Configure` before the routes:
+
+```go
+r := gofi.NewRouter()
+r.Configure(gofi.Config{
+    BodyLimit:      4 << 20,
+    ReadTimeout:    30 * time.Second,
+    WriteTimeout:   60 * time.Second,
+    IdleTimeout:    60 * time.Second,
+    MaxConnections: 5000,
+})
+```
+
+| Field | What it bounds |
+|---|---|
+| `BodyLimit` | The size of a request body. A larger one is a 413. |
+| `ReadTimeout` | Reading a full request, including the body. A request that stalls gets a 408, and a connection that never sends one is closed. |
+| `WriteTimeout` | Writing a full response, including a stream, which is cut off when it runs out. Set it above your slowest download or stream. WebSocket sessions aren't affected. |
+| `IdleTimeout` | Waiting for the next request on a keep-alive connection. It starts after the first request, and zero falls back to `ReadTimeout`. |
+| `MaxConnections` | Concurrent connections. Above it, the server answers 503. Keep it below the process's open-file limit. |
+| `MaxConnsPerIP` | Concurrent connections from one IP. Behind a proxy, every client shares the proxy's IP. |
+
+A zero value leaves a setting as it is, and a negative value panics in `Configure`. The values are
+yours to choose; the ones above are an example, not a recommendation.
+
+These limits apply however the server started. `gofi.NewFasthttpServer(gofi.ServerOptions{...})` has
+the same fields plus lower-level ones such as `ReadBufferSize`. A `Config` value overrides the same
+`ServerOptions` value, and a `Config.BodyLimit` above `ServerOptions.MaxRequestBodySize` makes
+`Listen` return an error. A router from `NewFasthttpServer` and its server are one: `r.Listen` starts
+that server, and `r.ShutdownWithContext` stops it however it started. With `Handler()` you run the
+server yourself, so these limits don't apply.
+
+If the process runs out of open files, the server logs it and retries `Accept` with a backoff, as
+`net/http` does, instead of stopping for good.
 
 ## Graceful Shutdown
 
@@ -1099,7 +1152,8 @@ field without changing the value, the request fails with a 500, because the clie
 
 `Encode` receives the field's value, or the value a pointer field points to, so one spec works on
 `T` and `*T`. A nil pointer is written as `null` without calling `Encode`, or left out with
-`omitempty`.
+`omitempty`. A spec with `Type` `integer`, `number` or `boolean` returns the value as that text, and
+Gofi writes it unquoted, so `{"v":7}` reads back the same way. Text that isn't that type is a 500.
 
 `default` and `example` tags work on every spec field. A default reaches `Decode` as text from a
 param, and as a client's value would from a body, and one that doesn't decode panics when the route
@@ -1112,6 +1166,48 @@ cookie field.
 
 
 ## Decoding Requests and Encoding Responses
+
+### How Go types map to JSON
+
+JSON bodies follow `encoding/json`:
+
+- **Unexported fields** are ignored everywhere, in requests and responses.
+- **A type with `UnmarshalJSON`** decodes itself, whatever its kind, so `*big.Int` and your own types
+  read their value. `validate` rules on the field check the decoded value. Rules inside the type don't
+  run, because Gofi doesn't read its fields. The method's error text is sent to the client, so keep
+  internal detail out of it. `null` and a missing field don't call the method. In a path, query,
+  header, form or multipart field the value is text, and the method doesn't run.
+- **`json.Number`** reads and writes a JSON number with every digit kept. It also accepts the number
+  sent as a string.
+- **A JSON value of the wrong type for a struct**, such as a number or an array, is a 400. `null` leaves
+  the struct unset.
+- **Nested JSON in `any`, `map[string]any` or `[]any`** binds as `encoding/json` would.
+- **An embedded struct pointer** is allocated when a body has a value for one of its fields, and its
+  fields are left out of a response while it is nil. A pointer to an unexported type can't be allocated,
+  so a value for one of its fields is a 400. In a param, header or cookie block, an embedded pointer
+  panics when the route is registered; embed the struct by value.
+- **A nil pointer response body** is written as `null`, unless it is `required`.
+
+Gofi differs from `encoding/json` here:
+
+- **A nil slice is written as `[]`, and a nil map as `{}`.** `encoding/json` writes `null` for both.
+- **The `,string` JSON option panics when the route is registered.** Gofi doesn't support it.
+- **A recursive type panics when the route is registered**, such as
+  ``type Node struct { Next *Node `json:"next"` }``. Use `json.RawMessage` or `map[string]any` for the
+  recursive field, or give it a custom spec.
+- **A map key must be a string type**, including a named one such as `map[Asset]int`. Any other key
+  type panics when the route is registered.
+- **A `null` inside an array of primitives, such as `[]string` or `[]int`, is a 400.** `encoding/json`
+  stores the zero value, which hides the client's mistake. A pointer element, such as `[]*string`, keeps
+  it as nil in its position. Other element types, such as a struct or `time.Time`, hold their zero value,
+  as in `encoding/json`.
+
+A response header must be text: a primitive type, `time.Time`, a custom spec or a pointer to one of
+these. A nil pointer writes nothing, unless the field has a `default`. Anything else panics when the
+route is registered.
+
+### Body parsers
+
 Incoming requests are decoded when you call the `gofi.ValidateAndBind[T](c gofi.Context) error` method and Outgoing responses are encoded when you call the `c.Send(code int, obj any) error` method.
 
 These methods rely on the ContentType defined in the Header of the Schema to determine which BodyParser to use. The Gofi library comes already with a built-in JSON BodyParser

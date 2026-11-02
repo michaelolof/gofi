@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"mime/multipart"
 	"net/http"
 	"reflect"
@@ -3419,7 +3420,7 @@ func TestJSONBinding_CompiledFieldIndexes(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("returns a controlled error for a nil embedded pointer", func(t *testing.T) {
+	t.Run("allocates a nil embedded pointer that has a value to bind", func(t *testing.T) {
 		type PointerPromotedFields struct {
 			Value string `json:"pointer_promoted"`
 		}
@@ -3447,8 +3448,7 @@ func TestJSONBinding_CompiledFieldIndexes(t *testing.T) {
 			Handler: &handler,
 		})
 		require.NoError(t, err)
-		require.Error(t, bindingErr)
-		assert.Contains(t, bindingErr.Error(), "nil or invalid parent")
+		require.NoError(t, bindingErr)
 	})
 }
 
@@ -5202,4 +5202,829 @@ func TestJSONBinding_CompiledPathKeepsComplexSchemasOnGenericWalker(t *testing.T
 		require.NotNil(t, rules)
 		assert.Zero(t, rules.jsonBindMaxDepth)
 	})
+}
+
+// --- Issues from the v0.10.3 sweep (gofi-docs/FEATURE_REQUEST.md) ---
+
+var frInfo = Info{Tags: []string{"x"}, Description: "p"}
+
+// frBind posts body to a route that binds S, and returns the status and what read saw.
+func frBind[S any](t *testing.T, ctype, body string, read func(*S) string) (int, string) {
+	t.Helper()
+	var got string
+	r := NewRouter()
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: new(S), Handler: func(c Context) error {
+		s, err := ValidateAndBind[S](c)
+		if err != nil {
+			return err
+		}
+		got = read(s)
+		return c.SendString(200, "ok")
+	}}))
+	resp, err := r.Test(TestOptions{Method: "POST", Path: "/x", Headers: map[string]string{"Content-Type": ctype}, Body: strings.NewReader(body)})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp.Code(), got
+}
+
+const frJSON = "application/json"
+
+const frForm = "application/x-www-form-urlencoded"
+
+func frMultipart(t *testing.T, field, value string, file bool) (string, string) {
+	t.Helper()
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	if file {
+		f, _ := w.CreateFormFile(field, "a.txt")
+		_, _ = f.Write([]byte(value))
+	} else {
+		_ = w.WriteField(field, value)
+	}
+	_ = w.Close()
+	return w.FormDataContentType(), b.String()
+}
+
+func frPanics(fn func()) (msg string) {
+	defer func() {
+		if p := recover(); p != nil {
+			msg = fmt.Sprint(p)
+		}
+	}()
+	fn()
+	return ""
+}
+
+func frRegister[S any](r Router) {
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: new(S), Handler: func(c Context) error { return nil }}))
+}
+
+func frSend[B any](t *testing.T, v B) string {
+	t.Helper()
+	type S struct {
+		Ok struct{ Body B }
+	}
+	r := NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: new(S), Handler: func(c Context) error {
+		var s S
+		s.Ok.Body = v
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/x"})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return strings.TrimSpace(string(resp.Body))
+}
+
+func frEqual(t *testing.T, want, got any) {
+	t.Helper()
+	if fmt.Sprint(want) != fmt.Sprint(got) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+}
+
+type frStructSpec struct{ X string }
+
+func frSpecRouter() Router {
+	r := NewRouter()
+	r.RegisterSpec(
+		DefineCustomSpec(SpecDefinition{SpecID: "st", Type: "string",
+			Encode: func(v any) (string, error) { return v.(frStructSpec).X, nil },
+			Decode: func(v any) (any, error) { s, _ := v.(string); return frStructSpec{X: s}, nil }}),
+		DefineCustomSpec(SpecDefinition{SpecID: "num", Type: "integer",
+			Encode: func(v any) (string, error) { return fmt.Sprint(v), nil },
+			Decode: func(v any) (any, error) { return v, nil }}),
+	)
+	return r
+}
+
+type frUser struct {
+	Email        string `json:"email"`
+	passwordHash string
+	apiKey       string
+}
+
+type frMoney struct {
+	minor int64
+	asset string
+}
+
+func (m *frMoney) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	_, err := fmt.Sscanf(s, "%d %s", &m.minor, &m.asset)
+	return err
+}
+
+type frColor string
+
+func (c *frColor) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	*c = frColor(strings.ToLower(s))
+	return nil
+}
+
+func TestGF03_NonObjectIsNotAStruct(t *testing.T) {
+	type F struct {
+		Request struct {
+			Body struct {
+				V struct {
+					A string `json:"a"`
+				} `json:"v"`
+			}
+		}
+	}
+	type B struct {
+		Request struct {
+			Body struct {
+				A string `json:"a"`
+			}
+		}
+	}
+	for _, body := range []string{`{"v":1}`, `{"v":"x"}`, `{"v":true}`, `{"v":[1]}`} {
+		code, _ := frBind[F](t, frJSON, body, func(*F) string { return "" })
+		frEqual(t, 400, code)
+	}
+	for _, body := range []string{`[1,2]`, `1`, `"x"`} {
+		code, _ := frBind[B](t, frJSON, body, func(*B) string { return "" })
+		frEqual(t, 400, code)
+	}
+}
+
+func TestGF07_RequiredSpecParamIsRequired(t *testing.T) {
+	type S struct {
+		Request struct {
+			Query struct {
+				V frStructSpec `json:"v" validate:"required" spec:"st"`
+			}
+		}
+	}
+	r := frSpecRouter()
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &S{}, Handler: func(c Context) error {
+		if _, err := ValidateAndBind[S](c); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}}))
+	resp, err := r.Test(TestOptions{Method: "POST", Path: "/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frEqual(t, 400, resp.Code())
+}
+
+func TestGF09_NestedJSONInAny(t *testing.T) {
+	type S struct {
+		Request struct {
+			Body struct {
+				M map[string]any `json:"m"`
+				A any            `json:"a"`
+				L []any          `json:"l"`
+			}
+		}
+	}
+	code, got := frBind[S](t, frJSON, `{"m":{"a":{"b":[1,{"c":2}]}},"a":{"x":1},"l":[{"y":2},[3]]}`, func(s *S) string {
+		b, _ := json.Marshal(s.Request.Body)
+		return string(b)
+	})
+	frEqual(t, `200 {"m":{"a":{"b":[1,{"c":2}]}},"a":{"x":1},"l":[{"y":2},[3]]}`, fmt.Sprint(code, " ", got))
+}
+
+type frKey string
+
+func TestGF10_MapKeys(t *testing.T) {
+	type S struct {
+		Request struct {
+			Body struct {
+				V map[frKey]int `json:"v"`
+			}
+		}
+	}
+	code, got := frBind[S](t, frJSON, `{"v":{"a":1}}`, func(s *S) string { return fmt.Sprint(s.Request.Body.V["a"]) })
+	frEqual(t, "200 1", fmt.Sprint(code, " ", got))
+	type Bad struct {
+		Request struct {
+			Body struct {
+				V map[int]string `json:"v"`
+			}
+		}
+	}
+	if msg := frPanics(func() { frRegister[Bad](NewRouter()) }); !strings.Contains(msg, "map key") {
+		t.Fatalf("an int-keyed map registered: %q", msg)
+	}
+}
+
+func TestGF19_BadCookieIsA400(t *testing.T) {
+	type S struct {
+		Request struct {
+			Cookie struct {
+				C int `json:"c"`
+			}
+		}
+	}
+	r := NewRouter()
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &S{}, Handler: func(c Context) error {
+		if _, err := ValidateAndBind[S](c); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}}))
+	resp, err := r.Test(TestOptions{Method: "POST", Path: "/x", Cookies: []http.Cookie{{Name: "c", Value: "abc"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frEqual(t, 400, resp.Code())
+}
+
+func TestGF01_UnexportedFieldsStayPrivate(t *testing.T) {
+	frEqual(t, `{"email":"a@b"}`, frSend(t, frUser{Email: "a@b", passwordHash: "HASH", apiKey: "KEY"}))
+	type S struct {
+		Request struct{ Body frUser }
+	}
+	code, got := frBind[S](t, frJSON, `{"email":"a@b","passwordHash":"X"}`, func(s *S) string { return s.Request.Body.Email })
+	frEqual(t, "200 a@b", fmt.Sprint(code, " ", got))
+
+	// Params, headers and cookies ignore them too.
+	type P struct {
+		Request struct {
+			Query struct {
+				secret string
+				Pub    string `json:"pub"`
+			}
+			Cookie struct {
+				secret string
+			}
+		}
+		Ok struct {
+			Header struct {
+				secret string
+				Pub    string `json:"x-pub"`
+			}
+		}
+	}
+	var seen string
+	r := NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &P{}, Handler: func(c Context) error {
+		s, err := ValidateAndBind[P](c)
+		if err != nil {
+			return err
+		}
+		seen = s.Request.Query.Pub + s.Request.Query.secret + s.Request.Cookie.secret
+		var out P
+		out.Ok.Header.secret = "HIDDEN"
+		out.Ok.Header.Pub = "shown"
+		return c.Send(200, out.Ok)
+	}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/x?pub=p&secret=X", Cookies: []http.Cookie{{Name: "secret", Value: "X"}}})
+	require.NoError(t, err)
+	frEqual(t, "200 p shown", fmt.Sprint(resp.Code(), " ", seen, " ", resp.Header("x-pub")))
+	frEqual(t, "", resp.Header("secret"))
+}
+
+type frPriority int
+
+func (p *frPriority) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	if s != "HIGH" {
+		return fmt.Errorf("unknown priority %q", s)
+	}
+	*p = 1
+	return nil
+}
+
+func TestGF02_UnmarshalJSONRuns(t *testing.T) {
+	type S struct {
+		Request struct {
+			Body struct {
+				B  *big.Int            `json:"b"`
+				M  frMoney             `json:"m"`
+				C  frColor             `json:"c" validate:"omitempty,oneof=red green"`
+				L  []frColor           `json:"l"`
+				P  frPriority          `json:"p"`
+				LB []*big.Int          `json:"lb"`
+				MB map[string]*big.Int `json:"mb"`
+				MC map[string]frColor  `json:"mc"`
+				A  [2]frColor          `json:"a"`
+			}
+		}
+	}
+	read := func(s *S) string {
+		b := s.Request.Body
+		return fmt.Sprint(b.B, " ", b.M.minor, " ", b.M.asset, " ", b.C, " ", b.L, " ", b.P, " ", b.LB, " ", b.MB, " ", b.MC, " ", b.A)
+	}
+	code, got := frBind[S](t, frJSON, `{"b":12345,"m":"5 USD","c":"RED","l":["RED","Green"],"p":"HIGH","lb":[1,2],"mb":{"k":3},"mc":{"k":"RED"},"a":["RED","GREEN"]}`, read)
+	frEqual(t, "200 12345 5 USD red [red green] 1 [1 2] map[k:3] map[k:red] [red green]", fmt.Sprint(code, " ", got))
+
+	// Validators see the decoded value, and a method's error is a 400.
+	code, _ = frBind[S](t, frJSON, `{"c":"BLUE"}`, read)
+	frEqual(t, 400, code)
+	code, _ = frBind[S](t, frJSON, `{"p":"LOW"}`, read)
+	frEqual(t, 400, code)
+
+	// null and a missing field don't call the method, and leave the value unset.
+	for _, body := range []string{`{}`, `{"b":null,"m":null,"c":null,"p":null}`} {
+		code, got = frBind[S](t, frJSON, body, read)
+		frEqual(t, "200 <nil> 0   [] 0 [] map[] map[] [ ]", fmt.Sprint(code, " ", got))
+	}
+
+	// Only required and present reject them.
+	type R struct {
+		Request struct {
+			Body struct {
+				B *big.Int `json:"b" validate:"required"`
+			}
+		}
+	}
+	for _, body := range []string{`{}`, `{"b":null}`} {
+		code, _ = frBind[R](t, frJSON, body, func(*R) string { return "" })
+		frEqual(t, 400, code)
+	}
+
+	// A top-level body decodes itself too.
+	type T struct {
+		Request struct{ Body frMoney }
+	}
+	code, got = frBind[T](t, frJSON, `"5 USD"`, func(s *T) string { return fmt.Sprint(s.Request.Body.minor, s.Request.Body.asset) })
+	frEqual(t, "200 5USD", fmt.Sprint(code, " ", got))
+
+	// A param or form field is text, so its method doesn't run.
+	type Q struct {
+		Request struct {
+			Query struct {
+				C frColor `json:"c"`
+			}
+		}
+	}
+	code, got = frBind[Q](t, frJSON, "", func(*Q) string { return "bound" })
+	frEqual(t, "200 bound", fmt.Sprint(code, " ", got))
+}
+
+func TestGF04_TimeInFormBodies(t *testing.T) {
+	type In struct {
+		T time.Time   `json:"t"`
+		P *time.Time  `json:"p"`
+		L []time.Time `json:"l"`
+	}
+	type S struct {
+		Request struct {
+			Body struct {
+				T  time.Time   `json:"t" validate:"required"`
+				P  *time.Time  `json:"p"`
+				L  []time.Time `json:"l"`
+				D  time.Time   `json:"d" pattern:"2006-01-02"`
+				In In          `json:"in"`
+			}
+		}
+	}
+	read := func(s *S) string {
+		b := s.Request.Body
+		out := b.T.UTC().Format(time.RFC3339)
+		if b.P != nil {
+			out += " p=" + b.P.UTC().Format(time.RFC3339)
+		}
+		if len(b.L) > 0 {
+			out += fmt.Sprint(" l=", len(b.L))
+		}
+		if !b.D.IsZero() {
+			out += " d=" + b.D.Format(time.DateOnly)
+		}
+		if b.In.P != nil {
+			out += fmt.Sprint(" in=", b.In.T.UTC().Format(time.RFC3339), ",", b.In.P.UTC().Format(time.RFC3339), ",", len(b.In.L))
+		}
+		return out
+	}
+	const v = "2026-11-02T10:00:00Z"
+	for body, want := range map[string]string{
+		"t=" + v:                         "200 " + v,
+		"t=" + v + "&p=" + v:             "200 " + v + " p=" + v,
+		"t=" + v + "&l=" + v + "&l=" + v: "200 " + v + " l=2",
+		"t=" + v + "&d=2026-01-02":       "200 " + v + " d=2026-01-02",
+		"t=" + v + "&in.t=" + v + "&in.p=" + v + "&in.l=" + v: "200 " + v + " in=" + v + "," + v + ",1",
+	} {
+		code, got := frBind[S](t, frForm, body, read)
+		frEqual(t, want, fmt.Sprint(code, " ", got))
+	}
+	for _, body := range []string{"t=notatime", "t=", "t=" + v + "&p=bad", "t=" + v + "&l=bad", "t=" + v + "&d=2026-13-99", "t=" + v + "&in.t=bad"} {
+		code, _ := frBind[S](t, frForm, body, read)
+		frEqual(t, 400, code)
+	}
+	ct, body := frMultipart(t, "t", v, false)
+	code, got := frBind[S](t, ct, body, read)
+	frEqual(t, "200 "+v, fmt.Sprint(code, " ", got))
+	ct, body = frMultipart(t, "t", "notatime", false)
+	code, _ = frBind[S](t, ct, body, read)
+	frEqual(t, 400, code)
+	ct, body = frMultipart(t, "p", v, false) // t is required
+	code, _ = frBind[S](t, ct, body, read)
+	frEqual(t, 400, code)
+}
+
+func TestGF06_DefaultTagsApply(t *testing.T) {
+	type S struct {
+		Request struct {
+			Cookie struct {
+				C int    `json:"c" default:"7"`
+				P *int   `json:"cp" default:"8"`
+				O string `json:"o" default:"dflt" validate:"oneof=dflt other"`
+			}
+			Body struct {
+				P  *string    `json:"p" default:"dflt"`
+				I  *int       `json:"i" default:"7"`
+				F  *float64   `json:"f" default:"1.5"`
+				B  *bool      `json:"b" default:"true"`
+				T  time.Time  `json:"t" default:"2026-01-02T00:00:00Z"`
+				PT *time.Time `json:"pt" default:"2026-01-03T00:00:00Z"`
+				D  time.Time  `json:"d" default:"2026-01-04" pattern:"2006-01-02"`
+			}
+		}
+	}
+	code, got := frBind[S](t, frJSON, `{}`, func(s *S) string {
+		b, c := s.Request.Body, s.Request.Cookie
+		if b.P == nil || b.I == nil || b.F == nil || b.B == nil || b.PT == nil || c.P == nil {
+			return "nil pointer"
+		}
+		return fmt.Sprint(*b.P, " ", *b.I, " ", *b.F, " ", *b.B, " ", b.T.UTC().Format(time.DateOnly), " ", b.PT.UTC().Format(time.DateOnly), " ", b.D.Format(time.DateOnly), " ", c.C, " ", *c.P, " ", c.O)
+	})
+	frEqual(t, "200 dflt 7 1.5 true 2026-01-02 2026-01-03 2026-01-04 7 8 dflt", fmt.Sprint(code, " ", got))
+
+	type Bad struct {
+		Request struct {
+			Query struct {
+				I int `json:"i" default:"abc"`
+			}
+		}
+	}
+	type BadPointer struct {
+		Request struct {
+			Body struct {
+				I *int `json:"i" default:"abc"`
+			}
+		}
+	}
+	type BadTime struct {
+		Request struct {
+			Body struct {
+				T time.Time `json:"t" default:"tomorrow"`
+			}
+		}
+	}
+	for _, register := range []func(Router){frRegister[Bad], frRegister[BadPointer], frRegister[BadTime]} {
+		if msg := frPanics(func() { register(NewRouter()) }); !strings.Contains(msg, "invalid default") {
+			t.Fatalf("an invalid default registered: %q", msg)
+		}
+	}
+}
+
+func TestGF08_FileSentToANonFileField(t *testing.T) {
+	type In struct {
+		Doc  []byte                `json:"doc"`
+		File *multipart.FileHeader `json:"file"`
+	}
+	type S struct {
+		Request struct {
+			Body struct {
+				Doc  []byte `json:"doc"`
+				Name string `json:"name"`
+				In   In     `json:"in"`
+			}
+		}
+	}
+	// A nested field doesn't bind files at all, so each of these would be dropped.
+	for _, field := range []string{"doc", "name", "in.doc", "in.file"} {
+		ct, body := frMultipart(t, field, "hello", true)
+		code, _ := frBind[S](t, ct, body, func(*S) string { return "" })
+		frEqual(t, 400, code)
+	}
+	// A file for a field the schema doesn't declare stays ignored.
+	ct, body := frMultipart(t, "other", "hello", true)
+	code, _ := frBind[S](t, ct, body, func(*S) string { return "" })
+	frEqual(t, 200, code)
+}
+
+func TestGF11_JSONNumber(t *testing.T) {
+	type S struct {
+		Request struct {
+			Body struct {
+				D json.Number            `json:"d"`
+				P *json.Number           `json:"p"`
+				L []json.Number          `json:"l"`
+				M map[string]json.Number `json:"m"`
+			}
+		}
+	}
+	read := func(s *S) string {
+		b := s.Request.Body
+		p := "nil"
+		if b.P != nil {
+			p = b.P.String()
+		}
+		return fmt.Sprint(b.D, " ", p, " ", b.L, " ", b.M)
+	}
+	const digits = "123456789012345678901234567890.50"
+	code, got := frBind[S](t, frJSON, `{"d":`+digits+`,"p":1.5,"l":[1,2.5],"m":{"k":3}}`, read)
+	frEqual(t, "200 "+digits+" 1.5 [1 2.5] map[k:3]", fmt.Sprint(code, " ", got))
+	code, got = frBind[S](t, frJSON, `{"d":"12.50","p":null}`, read)
+	frEqual(t, "200 12.50 nil [] map[]", fmt.Sprint(code, " ", got))
+	for _, body := range []string{`{"d":"abc"}`, `{"d":true}`, `{"d":[1]}`} {
+		code, _ = frBind[S](t, frJSON, body, read)
+		frEqual(t, 400, code)
+	}
+
+	n := json.Number("3.5")
+	frEqual(t, `{"d":12.50,"p":3.5,"l":[1,2.5],"e":0}`, frSend(t, struct {
+		D json.Number   `json:"d"`
+		P *json.Number  `json:"p"`
+		L []json.Number `json:"l"`
+		E json.Number   `json:"e"`
+	}{D: "12.50", P: &n, L: []json.Number{"1", "2.5"}}))
+}
+
+// FrExported is embedded by pointer.
+type FrExported struct {
+	ID string `json:"id"`
+}
+
+type frUnexportedEmbed struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func TestGF12_EmbeddedPointers(t *testing.T) {
+	type E struct {
+		*FrExported
+		Name string `json:"name"`
+	}
+	type S struct {
+		Request struct{ Body E }
+	}
+	read := func(s *S) string {
+		if s.Request.Body.FrExported == nil {
+			return "nil " + s.Request.Body.Name
+		}
+		return s.Request.Body.ID + " " + s.Request.Body.Name
+	}
+	code, got := frBind[S](t, frJSON, `{"id":"i1","name":"n"}`, read)
+	frEqual(t, "200 i1 n", fmt.Sprint(code, " ", got))
+	frEqual(t, `{"name":"n"}`, frSend(t, E{Name: "n"}))
+
+	// Forms bind through the pointer too, and nothing is allocated without a value.
+	code, got = frBind[S](t, frForm, "id=i1&name=n", read)
+	frEqual(t, "200 i1 n", fmt.Sprint(code, " ", got))
+	code, got = frBind[S](t, frForm, "name=n", read)
+	frEqual(t, "200 nil n", fmt.Sprint(code, " ", got))
+	ct, body := frMultipart(t, "id", "i1", false)
+	code, got = frBind[S](t, ct, body, read)
+	frEqual(t, "200 i1 ", fmt.Sprint(code, " ", got))
+	ct, body = frMultipart(t, "name", "n", false)
+	code, got = frBind[S](t, ct, body, read)
+	frEqual(t, "200 nil n", fmt.Sprint(code, " ", got))
+
+	// An embedded pointer to an unexported type can't be allocated, so that is a 400.
+	type U struct {
+		*frUnexportedEmbed
+		Name string `json:"name"`
+	}
+	type US struct {
+		Request struct{ Body U }
+	}
+	code, _ = frBind[US](t, frJSON, `{"id":"x"}`, func(*US) string { return "" })
+	frEqual(t, 400, code)
+	code, _ = frBind[US](t, frForm, "id=x", func(*US) string { return "" })
+	frEqual(t, 400, code)
+
+	// A required field under a nil embedded pointer has no value.
+	type UR struct {
+		Ok struct{ Body U }
+	}
+	r := NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &UR{}, Handler: func(c Context) error {
+		var s UR
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/x"})
+	require.NoError(t, err)
+	frEqual(t, 500, resp.Code())
+
+	// Params and headers have nothing to allocate from, so they say so at registration.
+	type Q struct {
+		Request struct {
+			Query struct{ *FrExported }
+		}
+	}
+	type H struct {
+		Ok struct {
+			Header struct{ *FrExported }
+		}
+	}
+	for _, register := range []func(Router){frRegister[Q], frRegister[H]} {
+		if msg := frPanics(func() { register(NewRouter()) }); !strings.Contains(msg, "embedded pointer") {
+			t.Fatalf("want a clear panic, got %q", msg)
+		}
+	}
+}
+
+func TestGF13_ByteFieldsInForms(t *testing.T) {
+	type In struct {
+		B []byte  `json:"b"`
+		A [2]byte `json:"a"`
+		S string  `json:"s"`
+	}
+	type S struct {
+		Request struct {
+			Body struct {
+				B  []byte   `json:"b"`
+				A  [4]byte  `json:"a"`
+				PB *[]byte  `json:"pb"`
+				PA *[4]byte `json:"pa"`
+				In In       `json:"in"`
+			}
+		}
+	}
+	read := func(s *S) string {
+		b := s.Request.Body
+		out := fmt.Sprint(string(b.B), " ", b.A, " ", string(b.In.B), " ", b.In.A, " ", b.In.S)
+		if b.PB != nil {
+			out += " pb=" + string(*b.PB)
+		}
+		if b.PA != nil {
+			out += fmt.Sprint(" pa=", *b.PA)
+		}
+		return out
+	}
+	const empty = "[0 0 0 0]  [0 0] "
+	for body, want := range map[string]string{
+		"b=aGk%3D&a=AQIDBA%3D%3D": "hi [1 2 3 4]  [0 0] ",
+		"pb=aGk%3D":               " " + empty + " pb=hi",
+		"pa=AQIDBA%3D%3D":         " " + empty + " pa=[1 2 3 4]",
+		"in.b=aGk%3D&in.a=AQI%3D": " [0 0 0 0] hi [1 2] ",
+		"in.s=x":                  " [0 0 0 0]  [0 0] x", // absent byte fields stay empty
+		"b=":                      " " + empty,
+	} {
+		code, got := frBind[S](t, frForm, body, read)
+		frEqual(t, "200 "+want, fmt.Sprint(code, " ", got))
+	}
+	for _, body := range []string{"b=!!!", "a=AQID", "a=", "b=aGk%3D&b=aGk%3D", "in.a=AQID"} {
+		code, _ := frBind[S](t, frForm, body, read)
+		frEqual(t, 400, code)
+	}
+	for _, c := range []struct{ field, value, want string }{
+		{"pa", "AQIDBA==", " " + empty + " pa=[1 2 3 4]"},
+		{"in.b", "aGk=", " [0 0 0 0] hi [0 0] "},
+		{"in.s", "x", " [0 0 0 0]  [0 0] x"},
+	} {
+		ct, body := frMultipart(t, c.field, c.value, false)
+		code, got := frBind[S](t, ct, body, read)
+		frEqual(t, "200 "+c.want, fmt.Sprint(code, " ", got))
+	}
+
+	// Rules run on the decoded bytes, and required counts an absent field.
+	type R struct {
+		Request struct {
+			Body struct {
+				B []byte `json:"b" validate:"max=2"`
+				N struct {
+					Q []byte `json:"q" validate:"required"`
+					S string `json:"s"`
+				} `json:"n"`
+			}
+		}
+	}
+	code, _ := frBind[R](t, frForm, "b=aGVsbG8%3D&n.q=aGk%3D", func(*R) string { return "" })
+	frEqual(t, 400, code)
+	code, _ = frBind[R](t, frForm, "b=aGk%3D&n.s=x", func(*R) string { return "" })
+	frEqual(t, 400, code)
+	code, _ = frBind[R](t, frForm, "b=aGk%3D&n.q=aGk%3D", func(*R) string { return "" })
+	frEqual(t, 200, code)
+
+	type N struct {
+		Request struct {
+			Body struct {
+				V [2]int `json:"v"`
+			}
+		}
+	}
+	code, _ = frBind[N](t, frForm, "v=1&v=2", func(*N) string { return "" })
+	frEqual(t, 400, code)
+}
+
+func TestG31_NullArrayElements(t *testing.T) {
+	type In struct {
+		A string `json:"a"`
+	}
+	type Nest struct {
+		L []string `json:"l"`
+	}
+	type S struct {
+		Request struct {
+			Body struct {
+				Str  []string            `json:"str"`
+				Int  []int               `json:"int"`
+				Bool []bool              `json:"bool"`
+				F    []float64           `json:"f"`
+				Arr  [2]string           `json:"arr"`
+				LL   [][]string          `json:"ll"`
+				MSl  map[string][]string `json:"msl"`
+				Nest Nest                `json:"nest"`
+				C    []frColor           `json:"c"`
+				N    []json.Number       `json:"n"`
+				PS   []*string           `json:"ps"`
+				PI   []*int              `json:"pi"`
+				PA   [2]*string          `json:"pa"`
+				PC   []*frColor          `json:"pc"`
+				Any  []any               `json:"any"`
+				St   []In                `json:"st"`
+				PSt  []*In               `json:"pst"`
+				T    []time.Time         `json:"t"`
+			}
+		}
+	}
+	marshal := func(s *S) string {
+		b, err := json.Marshal(s.Request.Body)
+		require.NoError(t, err)
+		return string(b)
+	}
+
+	// There is nothing to bind a null to in a primitive element, including one
+	// nested in another array, a map or a struct, and one that decodes itself.
+	for _, body := range []string{
+		`{"str":[null,"x"]}`, `{"str":["x",null]}`, `{"str":[null]}`, `{"int":[null,1]}`, `{"bool":[null,true]}`, `{"f":[null,1.5]}`,
+		`{"arr":[null,"x"]}`, `{"ll":[[null,"x"]]}`, `{"msl":{"k":[null]}}`, `{"nest":{"l":[null,"x"]}}`, `{"c":[null,"x"]}`, `{"n":[null,1]}`,
+	} {
+		code, _ := frBind[S](t, frJSON, body, marshal)
+		assert.Equal(t, 400, code, body)
+	}
+
+	// A pointer element holds it as nil, in its own position, as does any type
+	// that already kept it.
+	for _, c := range []struct{ body, field, want string }{
+		{`{"ps":[null,"x"]}`, "ps", `[null,"x"]`},
+		{`{"ps":["x",null,"y"]}`, "ps", `["x",null,"y"]`},
+		{`{"pi":[null,1]}`, "pi", `[null,1]`},
+		{`{"pa":[null,"x"]}`, "pa", `[null,"x"]`},
+		{`{"pc":[null,"x"]}`, "pc", `[null,"x"]`},
+		{`{"any":[null,1]}`, "any", `[null,1]`},
+		{`{"st":[null,{"a":"x"}]}`, "st", `[{"a":""},{"a":"x"}]`},
+		{`{"pst":[null,{"a":"x"}]}`, "pst", `[null,{"a":"x"}]`},
+		{`{"t":[null]}`, "t", `["0001-01-01T00:00:00Z"]`},
+		{`{"ll":[null,["x"]]}`, "ll", `[null,["x"]]`},
+	} {
+		code, got := frBind[S](t, frJSON, c.body, marshal)
+		require.Equal(t, 200, code, c.body)
+		var out map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(got), &out))
+		assert.JSONEq(t, c.want, string(out[c.field]), c.body)
+	}
+
+	// A null array and a missing one are still unset.
+	for _, body := range []string{`{}`, `{"str":null}`, `{"ps":null}`} {
+		code, _ := frBind[S](t, frJSON, body, marshal)
+		assert.Equal(t, 200, code, body)
+	}
+
+	// Rules on the array count a nil element, and don't crash on it.
+	type R struct {
+		Request struct {
+			Body struct {
+				E []*string `json:"e" validate:"omitempty,len=2"`
+				M []*string `json:"m" validate:"omitempty,min=2"`
+				X []*string `json:"x" validate:"omitempty,max=1"`
+				Q []*string `json:"q" validate:"required"`
+			}
+		}
+	}
+	read := func(r *R) string { return strconv.Itoa(len(r.Request.Body.Q)) }
+	code, got := frBind[R](t, frJSON, `{"q":[null]}`, read)
+	assert.Equal(t, "200 1", fmt.Sprint(code, " ", got))
+	code, _ = frBind[R](t, frJSON, `{"q":["a"],"m":[null,null]}`, read)
+	assert.Equal(t, 200, code)
+	code, _ = frBind[R](t, frJSON, `{"q":["a"],"x":[null,null]}`, read)
+	assert.Equal(t, 400, code)
+	code, _ = frBind[R](t, frJSON, `{"q":["a"],"e":[null,"b"]}`, read)
+	assert.Equal(t, 200, code)
+
+	// The compiled fast path gives the same answers as the walker.
+	type Row struct {
+		L []string `json:"l"`
+	}
+	type Top struct {
+		Request struct{ Body []Row }
+	}
+	type TopP struct {
+		Request struct{ Body []string }
+	}
+	code, _ = frBind[Top](t, frJSON, `[{"l":[null,"x"]}]`, func(*Top) string { return "" })
+	assert.Equal(t, 400, code)
+	code, got = frBind[Top](t, frJSON, `[{"l":["x"]}]`, func(s *Top) string { return fmt.Sprint(s.Request.Body[0].L) })
+	assert.Equal(t, "200 [x]", fmt.Sprint(code, " ", got))
+	code, _ = frBind[TopP](t, frJSON, `[null,"x"]`, func(*TopP) string { return "" })
+	assert.Equal(t, 400, code)
 }

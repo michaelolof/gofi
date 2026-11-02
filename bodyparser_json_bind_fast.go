@@ -186,8 +186,7 @@ func bindCompiledJSONNode(rule *RuleDef, value *fastjson.Value, destination refl
 		}
 		collection := reflect.MakeSlice(rule.typ, len(values), len(values))
 		for index, item := range values {
-			// The generic primitive-slice decoder skips JSON null elements.
-			// Fall back so that unusual behavior remains exactly compatible.
+			// The generic walker rejects a null primitive element with a 400.
 			if item != nil && item.Type() == fastjson.TypeNull && isCompiledJSONPrimitive(rule.item) {
 				return false
 			}

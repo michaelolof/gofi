@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,8 @@ func joinPath(prefix, path string) string {
 }
 
 type serveMux struct {
+	// compiling holds the named types being compiled, to catch recursive ones.
+	compiling         []reflect.Type
 	trees             map[string]*node
 	rOpts             *RouteOptions
 	opts              *muxOptions
@@ -71,7 +74,12 @@ type serveMux struct {
 type routerLifecycle struct {
 	mu           sync.Mutex
 	activeServer *FasthttpServer
-	sealed       atomic.Bool
+	// owner is the server NewFasthttpServer built this router for, if any.
+	owner *FasthttpServer
+	// transport holds the limits set through Router.Configure. It is written
+	// before sealing and read when a server starts.
+	transport ServerOptions
+	sealed    atomic.Bool
 	// base is the parent of every request context. Shutdown cancels it; a
 	// server that starts afterwards installs a fresh one.
 	base atomic.Pointer[lifecycleContext]
@@ -591,7 +599,7 @@ func newStaticHandler(prefix, root string) HandlerFunc {
 
 // Listen starts the server on the given address using fasthttp.
 func (s *serveMux) Listen(addr string) error {
-	srv := s.newFasthttpServer()
+	srv := s.listenServer()
 
 	s.lifecycle.setActiveServer(srv)
 
@@ -600,7 +608,7 @@ func (s *serveMux) Listen(addr string) error {
 
 // ListenTLS starts an HTTPS server on the given address.
 func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
-	srv := s.newFasthttpServer()
+	srv := s.listenServer()
 
 	s.lifecycle.setActiveServer(srv)
 
@@ -609,11 +617,23 @@ func (s *serveMux) ListenTLS(addr, certFile, keyFile string) error {
 
 // ListenTLSMutual starts an HTTPS server providing mutual TLS (mTLS) authentication.
 func (s *serveMux) ListenTLSMutual(addr, certFile, keyFile, clientCertFile string) error {
-	srv := s.newFasthttpServer()
+	srv := s.listenServer()
 
 	s.lifecycle.setActiveServer(srv)
 
 	return srv.ListenTLSMutual(addr, certFile, keyFile, clientCertFile)
+}
+
+// listenServer returns the server this router was built for, so its
+// ServerOptions apply, or a new one for a router from NewRouter.
+func (s *serveMux) listenServer() *FasthttpServer {
+	s.lifecycle.mu.Lock()
+	owner := s.lifecycle.owner
+	s.lifecycle.mu.Unlock()
+	if owner != nil {
+		return owner
+	}
+	return s.newFasthttpServer()
 }
 
 // Shutdown gracefully shuts down the server.
@@ -1027,6 +1047,24 @@ func (s *serveMux) Configure(config Config) {
 	}
 	if config.MethodNotAllowed != nil {
 		s.opts.methodNotAllowed = *config.MethodNotAllowed
+	}
+	if config.ReadTimeout < 0 || config.WriteTimeout < 0 || config.IdleTimeout < 0 || config.MaxConnections < 0 || config.MaxConnsPerIP < 0 {
+		panic("gofi: Config timeouts and connection limits must not be negative")
+	}
+	if config.ReadTimeout > 0 {
+		s.lifecycle.transport.ReadTimeout = config.ReadTimeout
+	}
+	if config.WriteTimeout > 0 {
+		s.lifecycle.transport.WriteTimeout = config.WriteTimeout
+	}
+	if config.IdleTimeout > 0 {
+		s.lifecycle.transport.IdleTimeout = config.IdleTimeout
+	}
+	if config.MaxConnections > 0 {
+		s.lifecycle.transport.MaxConnections = config.MaxConnections
+	}
+	if config.MaxConnsPerIP > 0 {
+		s.lifecycle.transport.MaxConnsPerIP = config.MaxConnsPerIP
 	}
 }
 

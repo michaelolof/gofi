@@ -229,7 +229,10 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 					errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "required", err))
 					continue
 				} else if !def.required && cv == nil {
-					continue
+					if def.defStr == "" {
+						continue
+					}
+					cv = &http.Cookie{Name: def.field, Value: def.defStr}
 				} else if err != nil {
 					errs = append(errs, err)
 					continue
@@ -255,7 +258,7 @@ func validateAndOrBindRequest[T any](c *context, shouldBind bool, mask requestPa
 				default:
 					cvs, err := utils.PrimitiveFromStr(def.kind, cv.Value)
 					if err != nil {
-						errs = append(errs, err)
+						errs = append(errs, newErrReport(RequestErr, schemaCookies, def.field, "typeCast", err))
 						continue
 					}
 
@@ -424,6 +427,11 @@ func doValidateStrAndBind(c *context, field schemaField, qv string, def *RuleDef
 	var val any
 	var err error
 	if spec, ok := c.serverOpts.customSpecs.Find(string(def.format)); ok {
+		if qv == "" {
+			if rule, err := checkPresence(def.rules); err != nil {
+				return newErrReport(RequestErr, field, def.field, rule, err)
+			}
+		}
 		val, err = decodeSpecValue(spec, qv)
 		if err != nil {
 			return newErrReport(RequestErr, field, def.field, "typeCast", err)

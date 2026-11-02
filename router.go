@@ -2,6 +2,7 @@ package gofi
 
 import (
 	stdcontext "context"
+	"time"
 
 	"github.com/valyala/fasthttp"
 )
@@ -85,15 +86,13 @@ type Router interface {
 	RegisterBodyParser(l ...BodyParser)
 	Static(prefix, root string)
 
-	// Configure sets router-level configurations (e.g. MaxRequestBodySize)
+	// Configure sets router-level configuration, such as the body limit and the
+	// server's timeouts and connection limits. Call it before the routes.
 	Configure(config Config)
 }
 
 // Config defines the configuration options for a GoFi Router instance.
 type Config struct {
-	// BodyLimit sets the maximum allowed size for a request body (in bytes).
-	// Default: 4 * 1024 * 1024 (4MB) if zero or not provided.
-
 	// MethodNotAllowed controls whether a 405 response is sent when a path matches
 	// a registered route under a different HTTP method. When true (the default),
 	// requests that match no route for the requested method but do match a route
@@ -106,4 +105,20 @@ type Config struct {
 	// BodyLimit sets the maximum allowed size for a request body (in bytes).
 	// Default: 4 * 1024 * 1024 (4MB) if zero or not provided.
 	BodyLimit int
+
+	// ReadTimeout bounds reading a full request, including the body, and also
+	// closes a connection that never sends one. WriteTimeout bounds writing a
+	// full response, so it must allow for the slowest download or stream.
+	// IdleTimeout bounds waiting for the next request on a keep-alive connection;
+	// it starts after the first request, and zero falls back to ReadTimeout.
+	// Zero leaves a setting as it is, which on a plain Listen is unlimited.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+
+	// MaxConnections bounds concurrent connections. Keep it below the process's
+	// open-file limit. MaxConnsPerIP bounds them per client IP; behind a proxy
+	// every client shares the proxy's IP.
+	MaxConnections int
+	MaxConnsPerIP  int
 }

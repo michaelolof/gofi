@@ -1215,14 +1215,27 @@ func TestSecurityServerOptions(t *testing.T) {
 	opts := gofi.DefaultServerOptions()
 	opts.MaxRequestBodySize = 32
 	s := gofi.NewFasthttpServer(opts)
-	// Configure may not raise the ceiling set by ServerOptions.
+	// A body limit above the ServerOptions ceiling stops the server starting.
 	s.Router().Configure(gofi.Config{BodyLimit: 1 << 20})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := s.ListenOnListener(ln); err == nil || !strings.Contains(err.Error(), "BodyLimit") {
+		t.Fatalf("a body limit above the ceiling started the server: %v", err)
+	}
+
+	// A lower one still applies.
+	opts.MaxRequestBodySize = 64
+	s = gofi.NewFasthttpServer(opts)
+	s.Router().Configure(gofi.Config{BodyLimit: 32})
 	s.Router().Post("/p", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
 	addr := startServer(t, s)
-	body := strings.Repeat("a", 64)
+	body := strings.Repeat("a", 48)
 	out := rawRequest(t, addr, fmt.Sprintf("POST /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
 	if !strings.HasPrefix(out, "HTTP/1.1 413") {
-		t.Fatalf("Configure raised the ServerOptions body ceiling: %q", firstLine(out))
+		t.Fatalf("Configure didn't lower the body limit: %q", firstLine(out))
 	}
 }
 
@@ -1978,5 +1991,302 @@ func TestSecurityInjectReportsUnparsableRequests(t *testing.T) {
 	r.Post("/t", *handler)
 	if _, err := r.Test(gofi.TestOptions{Method: "POST", Path: "/t", Headers: map[string]string{"X-Big": big}}); err != nil {
 		t.Fatalf("Test with a large header: %v", err)
+	}
+}
+
+func frStart(t *testing.T, listen func(string) error) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	go func() { _ = listen(addr) }()
+	for i := 0; i < 100; i++ {
+		if c, err := net.DialTimeout("tcp", addr, 50*time.Millisecond); err == nil {
+			c.Close()
+			return addr
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("server didn't start")
+	return ""
+}
+
+// frStalled sends half a request and reports whether the server hung up in time.
+func frStalled(t *testing.T, addr string, within time.Duration) bool {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("GET /p HTTP/1.1\r\nHost: a\r\n"))
+	_ = c.SetReadDeadline(time.Now().Add(within))
+	_, err = c.Read(make([]byte, 64))
+	var ne net.Error
+	return !errors.As(err, &ne) || !ne.Timeout()
+}
+
+func TestGF16_RouterAndServerAreOne(t *testing.T) {
+	opts := gofi.ServerOptions{ReadTimeout: 200 * time.Millisecond, IdleTimeout: 200 * time.Millisecond}
+	s := gofi.NewFasthttpServer(opts)
+	addr := frStart(t, s.Router().Listen)
+	if !frStalled(t, addr, 2*time.Second) {
+		t.Fatal("router.Listen dropped the ServerOptions")
+	}
+	_ = s.Shutdown()
+
+	s2 := gofi.NewFasthttpServer(opts)
+	addr = frStart(t, s2.Listen)
+	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 2*time.Second)
+	defer cancel()
+	if err := s2.Router().ShutdownWithContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+		c.Close()
+		t.Fatal("router.ShutdownWithContext left the server accepting connections")
+	}
+}
+
+func TestGF15_LimitsThroughConfigure(t *testing.T) {
+	start := func(t *testing.T, cfg gofi.Config) (gofi.Router, string) {
+		t.Helper()
+		r := gofi.NewRouter()
+		r.Configure(cfg)
+		r.Get("/p", gofi.RouteOptions{Handler: func(c gofi.Context) error { return c.SendString(200, "ok") }})
+		addr := frStart(t, r.Listen)
+		t.Cleanup(func() {
+			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 2*time.Second)
+			defer cancel()
+			_ = r.ShutdownWithContext(ctx)
+		})
+		return r, addr
+	}
+
+	t.Run("ReadTimeout ends a stalled request", func(t *testing.T) {
+		_, addr := start(t, gofi.Config{ReadTimeout: 200 * time.Millisecond})
+		if !frStalled(t, addr, 2*time.Second) {
+			t.Fatal("a stalled client stayed connected")
+		}
+	})
+
+	// closedWithin reports whether the server hangs up on c in time.
+	closedWithin := func(c net.Conn, d time.Duration) bool {
+		_ = c.SetReadDeadline(time.Now().Add(d))
+		var ne net.Error
+		_, err := io.Copy(io.Discard, c)
+		return !errors.As(err, &ne) || !ne.Timeout()
+	}
+
+	t.Run("ReadTimeout closes a connection that sends nothing", func(t *testing.T) {
+		_, addr := start(t, gofi.Config{ReadTimeout: 200 * time.Millisecond})
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if !closedWithin(c, 2*time.Second) {
+			t.Fatal("a silent client stayed connected")
+		}
+	})
+
+	t.Run("IdleTimeout closes a connection between requests", func(t *testing.T) {
+		_, addr := start(t, gofi.Config{IdleTimeout: 200 * time.Millisecond})
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if _, err := c.Write([]byte("GET /p HTTP/1.1\r\nHost: a\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		if !closedWithin(c, 2*time.Second) {
+			t.Fatal("an idle client stayed connected")
+		}
+	})
+
+	t.Run("IdleTimeout alone doesn't close a connection that sends nothing", func(t *testing.T) {
+		_, addr := start(t, gofi.Config{IdleTimeout: 100 * time.Millisecond})
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if closedWithin(c, 400*time.Millisecond) {
+			t.Fatal("fasthttp now applies IdleTimeout before the first request; update the docs")
+		}
+	})
+
+	t.Run("MaxConnections answers 503 above the limit", func(t *testing.T) {
+		_, addr := start(t, gofi.Config{MaxConnections: 1, ReadTimeout: 5 * time.Second})
+
+		// Take the only slot with a stalled request. start's probe connection can
+		// still hold it for a moment, and then this client gets the 503, so retry
+		// until the server is waiting on this client.
+		var held net.Conn
+		for deadline := time.Now().Add(3 * time.Second); held == nil; {
+			if time.Now().After(deadline) {
+				t.Fatal("couldn't take the only connection slot")
+			}
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Write([]byte("GET /p HTTP/1.1\r\nHost: a\r\n")); err != nil {
+				c.Close()
+				continue
+			}
+			_ = c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			var ne net.Error
+			if _, err := c.Read(make([]byte, 1)); errors.As(err, &ne) && ne.Timeout() {
+				held = c
+				continue
+			}
+			c.Close()
+		}
+		defer held.Close()
+
+		out := rawRequest(t, addr, "GET /p HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+		if !strings.HasPrefix(out, "HTTP/1.1 503") {
+			t.Fatalf("want a 503, got %q", firstLine(out))
+		}
+	})
+
+	t.Run("Shutdown returns with a stalled client", func(t *testing.T) {
+		for name, shutdown := range map[string]func(gofi.Router) error{
+			"Shutdown": func(r gofi.Router) error { return r.Shutdown() },
+			"ShutdownWithContext": func(r gofi.Router) error {
+				ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 3*time.Second)
+				defer cancel()
+				return r.ShutdownWithContext(ctx)
+			},
+		} {
+			r, addr := start(t, gofi.Config{ReadTimeout: 200 * time.Millisecond, IdleTimeout: 200 * time.Millisecond})
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			_, _ = c.Write([]byte("GET /p HTTP/1.1\r\nHost: a\r\n"))
+			time.Sleep(50 * time.Millisecond)
+			done := make(chan error, 1)
+			go func() { done <- shutdown(r) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("%s waited on a stalled client", name)
+			}
+		}
+	})
+
+	t.Run("no limits leaves a stalled client connected", func(t *testing.T) {
+		_, addr := start(t, gofi.Config{})
+		if frStalled(t, addr, 300*time.Millisecond) {
+			t.Fatal("zero values set a limit")
+		}
+	})
+
+	t.Run("a Config limit overrides ServerOptions", func(t *testing.T) {
+		s := gofi.NewFasthttpServer(gofi.ServerOptions{ReadTimeout: time.Hour})
+		s.Router().Configure(gofi.Config{ReadTimeout: 200 * time.Millisecond})
+		addr := startServer(t, s)
+		if !frStalled(t, addr, 2*time.Second) {
+			t.Fatal("the ServerOptions timeout won")
+		}
+	})
+
+	t.Run("negative values panic", func(t *testing.T) {
+		for _, cfg := range []gofi.Config{
+			{ReadTimeout: -1}, {WriteTimeout: -1}, {IdleTimeout: -1}, {MaxConnections: -1}, {MaxConnsPerIP: -1},
+		} {
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatalf("%+v didn't panic", cfg)
+					}
+				}()
+				gofi.NewRouter().Configure(cfg)
+			}()
+		}
+	})
+}
+
+type frCtxKey struct{}
+
+func TestGF23_ErrorHandlerKeepsContextValues(t *testing.T) {
+	r := gofi.NewRouter()
+	ct, err := middleware.ContextTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen any
+	var hasDeadline bool
+	var ctxErr error
+	r.UseErrorHandler(func(err error, c gofi.Context) {
+		seen = c.Context().Value(frCtxKey{})
+		_, hasDeadline = c.Context().Deadline()
+		ctxErr = c.Context().Err()
+		_ = c.SendString(500, "x")
+	})
+	r.Use(ct)
+	r.Use(func(c gofi.Context) error {
+		if err := gofi.SetRequestContext(c, stdcontext.WithValue(c.Context(), frCtxKey{}, "tenant-1")); err != nil {
+			return err
+		}
+		return c.Next()
+	})
+	r.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error { return errors.New("boom") }})
+	if _, err := r.Test(gofi.TestOptions{Method: "GET", Path: "/x"}); err != nil {
+		t.Fatal(err)
+	}
+	if seen != "tenant-1" || hasDeadline || ctxErr != nil {
+		t.Fatalf("value %v, deadline %v, err %v", seen, hasDeadline, ctxErr)
+	}
+}
+
+// The context is only unwound one level: an outer deadline still applies.
+func TestGF23_OuterDeadlineSurvivesUnwinding(t *testing.T) {
+	outer, err := middleware.ContextTimeout(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := middleware.ContextTimeout(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after time.Time
+	var ctxErr error
+	var seen any
+	r := gofi.NewRouter()
+	r.Use(outer)
+	r.Use(func(c gofi.Context) error {
+		err := c.Next()
+		after, _ = c.Context().Deadline()
+		ctxErr = c.Context().Err()
+		seen = c.Context().Value(frCtxKey{})
+		return err
+	})
+	r.Use(inner)
+	r.Get("/x", gofi.RouteOptions{Handler: func(c gofi.Context) error {
+		if err := gofi.SetRequestContext(c, stdcontext.WithValue(c.Context(), frCtxKey{}, "tenant-1")); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}})
+	if _, err := r.Test(gofi.TestOptions{Method: "GET", Path: "/x"}); err != nil {
+		t.Fatal(err)
+	}
+	if time.Until(after) < 30*time.Minute {
+		t.Fatalf("the outer deadline was lost: %v", after)
+	}
+	if ctxErr != nil || seen != "tenant-1" {
+		t.Fatalf("err %v, value %v", ctxErr, seen)
 	}
 }

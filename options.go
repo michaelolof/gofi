@@ -20,7 +20,8 @@ type ServerOptions struct {
 	// connection. Zero falls back to ReadTimeout.
 	IdleTimeout time.Duration
 	// MaxRequestBodySize is the largest request body the transport buffers.
-	// Router.Configure may lower it before the server starts, never raise it.
+	// Router.Configure may lower it. A Config.BodyLimit above it makes Listen
+	// return an error.
 	MaxRequestBodySize int
 	// ReadBufferSize also bounds the total size of request headers.
 	ReadBufferSize int
@@ -145,16 +146,39 @@ func serverTLSConfig(base *tls.Config) *tls.Config {
 	return cfg
 }
 
-// applyRouterConfig freezes the router's body limit into the transport right
-// before serving, so Router().Configure calls made after construction take
-// effect. With ServerOptions, the router may lower but not raise the ceiling.
+// applyRouterConfig freezes the router's body limit
+// and limits into the transport right before serving, so Router().Configure
+// calls made after construction take effect, and registers this server with the
+// router so that Router().Shutdown stops it. With ServerOptions, the router may
+// lower the body ceiling, and a limit above it is an error. A Config timeout or
+// connection limit overrides the same ServerOptions setting.
 func (s *FasthttpServer) applyRouterConfig() error {
+	s.mux.lifecycle.setActiveServer(s)
 	s.mux.lifecycle.seal()
 	s.mux.lifecycle.renewIfCancelled()
 	limit := s.mux.opts.bodyLimit
-	if s.bodyCeiling > 0 && (limit <= 0 || limit > s.bodyCeiling) {
+	if s.bodyCeiling > 0 && limit > s.bodyCeiling {
+		return fmt.Errorf("gofi: Config.BodyLimit %d is above ServerOptions.MaxRequestBodySize %d", limit, s.bodyCeiling)
+	}
+	if s.bodyCeiling > 0 && limit <= 0 {
 		limit = s.bodyCeiling
 	}
 	s.server.MaxRequestBodySize = limit
+	t := s.mux.lifecycle.transport
+	if t.ReadTimeout > 0 {
+		s.server.ReadTimeout = t.ReadTimeout
+	}
+	if t.WriteTimeout > 0 {
+		s.server.WriteTimeout = t.WriteTimeout
+	}
+	if t.IdleTimeout > 0 {
+		s.server.IdleTimeout = t.IdleTimeout
+	}
+	if t.MaxConnections > 0 {
+		s.server.Concurrency = t.MaxConnections
+	}
+	if t.MaxConnsPerIP > 0 {
+		s.server.MaxConnsPerIP = t.MaxConnsPerIP
+	}
 	return nil
 }

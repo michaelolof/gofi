@@ -16,9 +16,10 @@ These failures occur before dispatch: ordinary middleware, body binding, schema
 validation, and route handlers do not run. The underlying request information
 may be incomplete or unavailable. `Pattern()`, route parameters, and route
 metadata are unavailable, and `DataStore()` starts empty. The router's
-`GlobalStore()` remains accessible. Native configuration and fasthttp's rules
-still determine which reads time out and which connection failures receive a
-response; this does not add timeout or header-size configuration options.
+`GlobalStore()` remains accessible. Reads only time out once you set a
+`ReadTimeout` (see [Server Limits](../README.md#server-limits)), and fasthttp's
+rules determine which connection failures receive a response. The size limit on
+headers is `ServerOptions.ReadBufferSize`.
 
 If your interceptor normally reads middleware-provided metadata such as a
 request ID, supply a fallback there when the store value is absent (for example,

@@ -488,3 +488,77 @@ func TestDocsFiltering(t *testing.T) {
 		assert.Len(t, *filtered.Paths, 4)
 	})
 }
+
+func TestGF24_OpenAPINullableAndDouble(t *testing.T) {
+	type S struct {
+		Request struct {
+			Query struct {
+				Q *int `json:"q"`
+			}
+			Body struct {
+				P  *string `json:"p"`
+				R  *string `json:"r" validate:"required"`
+				E  *string `json:"e" validate:"present"`
+				F  float64 `json:"f"`
+				F3 float32 `json:"f3"`
+				L  []*int  `json:"l"`
+			}
+		}
+		Ok struct {
+			Header struct {
+				H *string `json:"x-h"`
+			}
+			Body *struct {
+				P *string `json:"p"`
+				R *string `json:"r" validate:"required"`
+			}
+		}
+	}
+	type B struct {
+		Request struct {
+			Body *struct {
+				V string `json:"v"`
+			}
+		}
+	}
+	r := NewRouter()
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &S{}, Handler: func(c Context) error { return nil }}))
+	r.Post("/b", DefineHandler(RouteOptions{Info: frInfo, Schema: &B{}, Handler: func(c Context) error { return nil }}))
+	require.NoError(t, ServeDocs(r, DocsOptions{Info: DocsInfoOptions{Title: "t", Version: "1"}, Views: []DocsView{{RoutePrefix: "/docs"}}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/docs/q/openapi"})
+	require.NoError(t, err)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(resp.Body, &doc))
+	dig := func(keys ...string) map[string]any {
+		cur := doc
+		for _, k := range keys {
+			next, ok := cur[k].(map[string]any)
+			require.True(t, ok, "missing %q in %v", k, keys)
+			cur = next
+		}
+		return cur
+	}
+	post := dig("paths", "/x", "post")
+	body := dig("paths", "/x", "post", "requestBody", "content", "application/json", "schema", "properties")
+	nullable := func(schema any) bool { return schema.(map[string]any)["nullable"] == true }
+
+	assert.True(t, nullable(body["p"]), "an optional pointer can be null")
+	assert.False(t, nullable(body["r"]), "required rejects null")
+	assert.False(t, nullable(body["e"]), "present rejects null")
+	assert.Equal(t, "double", body["f"].(map[string]any)["format"])
+	assert.Equal(t, "float", body["f3"].(map[string]any)["format"])
+	assert.True(t, nullable(body["l"].(map[string]any)["items"]), "an array item can be null")
+
+	// A param or header can be left out, but it can't be null.
+	assert.False(t, nullable(post["parameters"].([]any)[0].(map[string]any)["schema"]))
+	assert.False(t, nullable(dig("paths", "/x", "post", "responses", "200", "headers", "x-h", "schema")))
+
+	// A nil pointer response body is null, and a request body of null is rejected.
+	out := dig("paths", "/x", "post", "responses", "200", "content", "application/json", "schema")
+	assert.Equal(t, true, out["nullable"])
+	props := out["properties"].(map[string]any)
+	assert.True(t, nullable(props["p"]))
+	assert.False(t, nullable(props["r"]))
+	assert.NotContains(t, dig("paths", "/b", "post", "requestBody", "content", "application/json", "schema"), "nullable")
+}

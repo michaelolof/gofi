@@ -3,10 +3,10 @@ package fluid
 // ResponseObject represents an OpenAPI 3.0.3 Response Object.
 // See: https://spec.openapis.org/oas/v3.0.3#response-object
 type ResponseObject struct {
-	Description string                    `json:"description"`
-	Headers     map[string]HeaderObject   `json:"headers,omitempty"`
+	Description string                     `json:"description"`
+	Headers     map[string]HeaderObject    `json:"headers,omitempty"`
 	Content     map[string]MediaTypeObject `json:"content,omitempty"`
-	Links       map[string]any            `json:"links,omitempty"`
+	Links       map[string]any             `json:"links,omitempty"`
 }
 
 // ---- Convenience Constructors ----

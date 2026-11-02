@@ -144,6 +144,24 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 		}
 
 		hv := hf.Interface()
+		// A pointer writes the value it points to, and a nil one writes nothing.
+		if hf.Kind() == reflect.Pointer && val.format != utils.TimeObjectFormat {
+			if _, isSpec := c.serverOpts.customSpecs.Find(string(val.format)); !isSpec {
+				if hf.IsNil() {
+					if val.defVal == nil {
+						if val.required && !c.headerAlreadyWritten(key) {
+							if err := runValidation(nil, ResponseErr, schemaHeaders, key, val.rules); err != nil {
+								return err
+							}
+						}
+						continue
+					}
+					hv = val.defVal
+				} else {
+					hv = hf.Elem().Interface()
+				}
+			}
+		}
 		checkAndSet := func(val string, key string, rules []ruleOpts) error {
 			err := runValidation(val, ResponseErr, schemaHeaders, key, rules)
 			if err != nil {
@@ -195,44 +213,46 @@ func (c *context) validateAndEncodeHeaders(rules ruleDefMap, headers reflect.Val
 				}
 
 			case val.format == utils.TimeObjectFormat:
-				switch hf.Kind() {
-				case reflect.Pointer:
-					tv, ok := hv.(*time.Time)
-					if !ok {
-						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
+				var tv time.Time
+				isNil := false
+				switch v := hv.(type) {
+				case time.Time:
+					tv = v
+				case *time.Time:
+					if isNil = v == nil; !isNil {
+						tv = *v
 					}
+				default:
+					return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
+				}
 
-					if (tv == nil || tv.IsZero()) && c.headerAlreadyWritten(key) {
-						continue
+				if def, ok := val.defVal.(string); ok && tv.IsZero() {
+					// Registration checked that the default parses.
+					if tv, _ = time.Parse(val.pattern, def); !tv.IsZero() {
+						isNil = false
 					}
+				}
 
-					err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules)
-					if err != nil {
-						return err
-					}
+				if tv.IsZero() && c.headerAlreadyWritten(key) {
+					continue
+				}
 
-					if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
-						return err
+				// A nil pointer writes nothing, and only the presence rules apply.
+				if isNil {
+					if val.required {
+						if err := runValidation(nil, ResponseErr, schemaHeaders, key, val.rules); err != nil {
+							return err
+						}
 					}
+					continue
+				}
 
-				case reflect.Struct:
-					tv, ok := hv.(time.Time)
-					if !ok {
-						return newErrReport(ResponseErr, schemaHeaders, key, "parser", errors.New("unable to parse header"))
-					}
+				if err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules); err != nil {
+					return err
+				}
 
-					if tv.IsZero() && c.headerAlreadyWritten(key) {
-						continue
-					}
-
-					err := runValidation(tv, ResponseErr, schemaHeaders, key, val.rules)
-					if err != nil {
-						return err
-					}
-
-					if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
-						return err
-					}
+				if err := c.setSchemaHeader(key, tv.Format(val.pattern)); err != nil {
+					return err
 				}
 			}
 		}
@@ -315,6 +335,13 @@ func (c *context) validateAndEncodeCookie(rules ruleDefMap, cookies reflect.Valu
 		}
 
 		cv := cf.Interface()
+		// A pointer writes the value it points to, and a nil one writes nothing.
+		if cf.Kind() == reflect.Pointer && utils.IsPrimitiveKind(val.kind) {
+			if cf.IsNil() {
+				continue
+			}
+			cv = cf.Elem().Interface()
+		}
 		switch true {
 		case utils.IsPrimitiveKind(val.kind):
 			if utils.PrimitiveKindIsEmpty(val.kind, cv) && val.defVal != nil {

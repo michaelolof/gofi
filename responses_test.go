@@ -33,9 +33,8 @@ func TestSend(t *testing.T) {
 	type testSchema struct {
 		Ok struct {
 			Header struct {
-				Une  string       `validate:"required" default:"one-in-french"`
-				Duex time.Time    `json:"deux" validate:"required"`
-				Tres customStruct `json:"tres" validate:"required"`
+				Une  string    `validate:"required" default:"one-in-french"`
+				Duex time.Time `json:"deux" validate:"required"`
 			}
 
 			Cookie struct {
@@ -478,7 +477,7 @@ func TestCustomSpecResponse_Default(t *testing.T) {
 		resp, err := sendSpecResponse(t, func(s *plain) any { return s.Ok })
 		require.NoError(t, err)
 		assert.Equal(t, 200, resp.StatusCode)
-		assert.Equal(t, `{"p":null,"s":[]}`, string(resp.Body))
+		assert.Equal(t, `{"p":"x","s":[]}`, string(resp.Body))
 	})
 }
 
@@ -661,4 +660,177 @@ func TestByteArrayField_Response(t *testing.T) {
 		assert.Equal(t, "string", prop["type"])
 		assert.Equal(t, "byte", prop["format"])
 	})
+}
+
+func TestGF05_PointerHeadersWriteTheirValue(t *testing.T) {
+	type S struct {
+		Ok struct {
+			Header struct {
+				V *string `json:"x-v"`
+				I *int    `json:"x-i"`
+				N *string `json:"x-n"`
+				D *string `json:"x-d" default:"dflt"`
+			}
+			Cookie struct {
+				A *string `json:"a"`
+				B *string `json:"b"`
+			}
+		}
+	}
+	v, i := "val", 7
+	r := NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &S{}, Handler: func(c Context) error {
+		var s S
+		s.Ok.Header.V, s.Ok.Header.I = &v, &i
+		s.Ok.Cookie.A = &v
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/x"})
+	require.NoError(t, err)
+	frEqual(t, `"val" "7" "" "dflt"`, fmt.Sprintf("%q %q %q %q", resp.Header("x-v"), resp.Header("x-i"), resp.Header("x-n"), resp.Header("x-d")))
+	assert.Contains(t, resp.Header("set-cookie"), "a=val")
+	assert.NotContains(t, resp.Header("set-cookie"), "b=")
+
+	// A *time.Time writes the time, and a nil one writes nothing.
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	type T struct {
+		Ok struct {
+			Header struct {
+				P *time.Time `json:"x-p"`
+				N *time.Time `json:"x-n"`
+				D *time.Time `json:"x-d" default:"2026-02-03T00:00:00Z"`
+				Z time.Time  `json:"x-z" default:"2026-02-04T00:00:00Z"`
+			}
+		}
+	}
+	r = NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &T{}, Handler: func(c Context) error {
+		var s T
+		s.Ok.Header.P = &at
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err = r.Test(TestOptions{Method: "GET", Path: "/x"})
+	require.NoError(t, err)
+	frEqual(t, `"2026-01-02T03:04:05Z" "" "2026-02-03T00:00:00Z" "2026-02-04T00:00:00Z"`, fmt.Sprintf("%q %q %q %q", resp.Header("x-p"), resp.Header("x-n"), resp.Header("x-d"), resp.Header("x-z")))
+
+	// A required pointer that is nil still fails.
+	type R struct {
+		Ok struct {
+			Header struct {
+				S *string    `json:"x-s" validate:"required"`
+				T *time.Time `json:"x-t" validate:"required"`
+			}
+		}
+	}
+	r = NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &R{}, Handler: func(c Context) error {
+		var s R
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err = r.Test(TestOptions{Method: "GET", Path: "/x"})
+	require.NoError(t, err)
+	frEqual(t, 500, resp.Code())
+
+	type L struct {
+		Ok struct {
+			Header struct {
+				L []string `json:"x-l"`
+			}
+		}
+	}
+	if msg := frPanics(func() { frRegister[L](NewRouter()) }); !strings.Contains(msg, "can't be written as text") {
+		t.Fatalf("a slice header registered: %q", msg)
+	}
+}
+
+func TestGF06_DefaultsInResponseBodies(t *testing.T) {
+	frEqual(t, `{"t":"2026-01-10T00:00:00Z","p":"2026-01-11T00:00:00Z","i":4,"d":"2026-01-12"}`, frSend(t, struct {
+		T time.Time  `json:"t" default:"2026-01-10T00:00:00Z"`
+		P *time.Time `json:"p" default:"2026-01-11T00:00:00Z"`
+		I *int       `json:"i" default:"4"`
+		D time.Time  `json:"d" default:"2026-01-12" pattern:"2006-01-02"`
+	}{}))
+}
+
+func TestGF21_NumberSpecsAreNotQuoted(t *testing.T) {
+	send := func(t *testing.T, specType string, val any) (int, string) {
+		t.Helper()
+		type S struct {
+			Ok struct {
+				Body struct {
+					V any `json:"v" spec:"s"`
+				}
+			}
+		}
+		r := NewRouter()
+		r.RegisterSpec(DefineCustomSpec(SpecDefinition{SpecID: "s", Type: specType,
+			Encode: func(v any) (string, error) { return fmt.Sprint(v), nil },
+			Decode: func(v any) (any, error) { return v, nil }}))
+		r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &S{}, Handler: func(c Context) error {
+			var s S
+			s.Ok.Body.V = val
+			return c.Send(200, s.Ok)
+		}}))
+		resp, err := r.Test(TestOptions{Method: "GET", Path: "/x"})
+		require.NoError(t, err)
+		return resp.Code(), strings.TrimSpace(string(resp.Body))
+	}
+	for _, c := range []struct {
+		specType string
+		val      any
+		want     string
+	}{
+		{"integer", 7, `{"v":7}`},
+		{"number", 12.5, `{"v":12.5}`},
+		{"boolean", true, `{"v":true}`},
+		{"string", 7, `{"v":"7"}`},
+	} {
+		code, got := send(t, c.specType, c.val)
+		frEqual(t, "200 "+c.want, fmt.Sprint(code, " ", got))
+	}
+	// A value that doesn't match the documented type is the server's bug.
+	for _, c := range []struct {
+		specType string
+		val      any
+	}{{"integer", "abc"}, {"number", "NaN"}, {"boolean", "yes"}} {
+		code, _ := send(t, c.specType, c.val)
+		frEqual(t, 500, code)
+	}
+
+	type Top struct {
+		Ok struct {
+			Body int `spec:"num"`
+		}
+	}
+	r := frSpecRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &Top{}, Handler: func(c Context) error {
+		var s Top
+		s.Ok.Body = 7
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/x"})
+	require.NoError(t, err)
+	frEqual(t, "7", strings.TrimSpace(string(resp.Body)))
+}
+
+type frBase struct {
+	ID string `json:"id"`
+}
+
+func TestGF22_NilPointerBodyIsNull(t *testing.T) {
+	frEqual(t, "null", frSend(t, (*frBase)(nil)))
+
+	type R struct {
+		Ok struct {
+			Body *frBase `validate:"required"`
+		}
+	}
+	r := NewRouter()
+	r.Get("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: &R{}, Handler: func(c Context) error {
+		var s R
+		return c.Send(200, s.Ok)
+	}}))
+	resp, err := r.Test(TestOptions{Method: "GET", Path: "/x"})
+	require.NoError(t, err)
+	frEqual(t, 500, resp.Code())
 }

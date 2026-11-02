@@ -113,19 +113,27 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 						break
 					}
 				}
-				if !hasNested {
-					for k := range form.File {
-						if strings.HasPrefix(k, prefix) {
-							hasNested = true
-							break
-						}
+				// Nested binding only reads text, so a file here would be dropped.
+				for k := range form.File {
+					if strings.HasPrefix(k, prefix) {
+						return newErrReport(RequestErr, schemaBody, k, "typeMismatch", errors.New("a nested field doesn't accept a file; declare a top-level *multipart.FileHeader"))
 					}
 				}
 			}
 
+			if !ok && !fileOk && !hasNested {
+				if rule.required || rule.present {
+					return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
+				}
+				continue
+			}
+
 			// Resolve the struct field early so we can classify it before
 			// the presence check.
-			fieldVal := bodyStruct.FieldByName(rule.fieldName)
+			fieldVal, err := formBindField(bodyStruct, rule, key)
+			if err != nil {
+				return err
+			}
 			if !fieldVal.IsValid() {
 				continue
 			}
@@ -141,13 +149,6 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 			// must not satisfy required file validation.
 			if isSingleFile || isMultiFile {
 				if !filePresent {
-					if rule.required || rule.present {
-						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
-					}
-					continue
-				}
-			} else {
-				if !textPresent && !fileOk && !hasNested {
 					if rule.required || rule.present {
 						return newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
 					}
@@ -171,6 +172,8 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 					if err := m.bindValue(fieldVal, files[0]); err != nil {
 						return newErrReport(RequestErr, schemaBody, key, "typeMismatch", err)
 					}
+				} else if !textPresent {
+					return newErrReport(RequestErr, schemaBody, key, "typeMismatch", errors.New("this field doesn't accept a file; declare it as *multipart.FileHeader"))
 				}
 				continue
 			}
@@ -194,7 +197,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 					elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
 				}
 
-				if elemRule.kind == reflect.Struct {
+				if elemRule.kind == reflect.Struct && elemRule.format != utils.TimeObjectFormat {
 					i := 0
 					var nslice reflect.Value
 					sliceType := fieldVal.Type()
@@ -252,6 +255,12 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 				if sliceType.Kind() == reflect.Pointer {
 					sliceType = sliceType.Elem()
 				}
+				if handled, err := bindFormBytes(fieldVal, sliceType, vals, rule, key); handled {
+					if err != nil {
+						return err
+					}
+					continue
+				}
 				slice := reflect.MakeSlice(sliceType, len(vals), len(vals))
 				for i, v := range vals {
 					val, err := parseVal(v, elemRule)
@@ -273,7 +282,7 @@ func (m *MultipartBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts Req
 
 			} else if rule.kind == reflect.Struct || isSpecField {
 				// If this struct-like field has a custom spec format, treat it as a scalar
-				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom || rule.format == utils.TimeObjectFormat {
 					if len(vals) > 0 {
 						val, err := parseVal(vals[0], rule)
 						if err != nil {
@@ -353,7 +362,10 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 			}
 		}
 
-		fieldVal := dest.FieldByName(rule.fieldName)
+		fieldVal, err := formBindField(dest, rule, name)
+		if err != nil {
+			return err
+		}
 		if !fieldVal.IsValid() {
 			continue
 		}
@@ -392,7 +404,10 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 		_, isSpecField := customSpecs.Find(string(rule.format))
 		if (rule.kind == reflect.Slice || rule.kind == reflect.Array) && !isSpecField {
 			elemRule := rule.item
-			if elemRule.kind == reflect.Struct {
+			if elemRule == nil {
+				elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
+			}
+			if elemRule.kind == reflect.Struct && elemRule.format != utils.TimeObjectFormat {
 				i := 0
 				var nslice reflect.Value
 				sliceType := fieldVal.Type()
@@ -437,6 +452,12 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 				if sliceType.Kind() == reflect.Pointer {
 					sliceType = sliceType.Elem()
 				}
+				if handled, err := bindFormBytes(fieldVal, sliceType, vals, rule, name); handled {
+					if err != nil {
+						return err
+					}
+					continue
+				}
 				slice := reflect.MakeSlice(sliceType, len(vals), len(vals))
 				for i, v := range vals {
 					if err := bindScalar(slice.Index(i), v, elemRule, fmt.Sprintf("%s.%d", name, i)); err != nil {
@@ -449,7 +470,7 @@ func (m *MultipartBodyParser) bindStruct(form map[string][]string, dest reflect.
 			}
 		} else if rule.kind == reflect.Struct || isSpecField {
 			// If this struct-like field has a custom spec format, treat it as a scalar
-			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom || rule.format == utils.TimeObjectFormat {
 				if len(vals) > 0 {
 					if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 						return err

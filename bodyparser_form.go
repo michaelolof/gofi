@@ -1,6 +1,7 @@
 package gofi
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -90,7 +91,10 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				continue
 			}
 
-			fieldVal := bodyStruct.FieldByName(rule.fieldName)
+			fieldVal, err := formBindField(bodyStruct, rule, key)
+			if err != nil {
+				return err
+			}
 			if !fieldVal.IsValid() {
 				continue
 			}
@@ -115,7 +119,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 					elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
 				}
 
-				if elemRule.kind == reflect.Struct {
+				if elemRule.kind == reflect.Struct && elemRule.format != utils.TimeObjectFormat {
 					// Struct array (Deep binding)
 					i := 0
 					var nslice reflect.Value
@@ -168,6 +172,12 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 				if sliceType.Kind() == reflect.Pointer {
 					sliceType = sliceType.Elem()
 				}
+				if handled, err := bindFormBytes(fieldVal, sliceType, vals, rule, key); handled {
+					if err != nil {
+						return err
+					}
+					continue
+				}
 				slice := reflect.MakeSlice(sliceType, len(vals), len(vals))
 				for i, v := range vals {
 					val, err := parseVal(v, elemRule)
@@ -189,7 +199,7 @@ func (f *FormBodyParser) ValidateAndDecodeRequest(r io.ReadCloser, opts RequestO
 
 			} else if rule.kind == reflect.Struct || isSpecField {
 				// If this struct-like field has a custom spec format, treat it as a scalar
-				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+				if _, isCustom := customSpecs.Find(string(rule.format)); isCustom || rule.format == utils.TimeObjectFormat {
 					if len(vals) > 0 {
 						val, err := parseVal(vals[0], rule)
 						if err != nil {
@@ -272,7 +282,10 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			}
 		}
 
-		fieldVal := dest.FieldByName(rule.fieldName)
+		fieldVal, err := formBindField(dest, rule, name)
+		if err != nil {
+			return err
+		}
 		if !fieldVal.IsValid() {
 			continue
 		}
@@ -314,7 +327,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			if elemRule == nil {
 				elemRule = &RuleDef{kind: fieldVal.Type().Elem().Kind()}
 			}
-			if elemRule.kind == reflect.Struct {
+			if elemRule.kind == reflect.Struct && elemRule.format != utils.TimeObjectFormat {
 				// Nested struct array
 				i := 0
 				var nslice reflect.Value
@@ -361,6 +374,12 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 				if sliceType.Kind() == reflect.Pointer {
 					sliceType = sliceType.Elem()
 				}
+				if handled, err := bindFormBytes(fieldVal, sliceType, vals, rule, name); handled {
+					if err != nil {
+						return err
+					}
+					continue
+				}
 				slice := reflect.MakeSlice(sliceType, len(vals), len(vals))
 				for i, v := range vals {
 					if err := bindScalar(slice.Index(i), v, elemRule, fmt.Sprintf("%s.%d", name, i)); err != nil {
@@ -373,7 +392,7 @@ func (f *FormBodyParser) bindStruct(form map[string][]string, dest reflect.Value
 			}
 		} else if rule.kind == reflect.Struct || isSpecField {
 			// If this struct-like field has a custom spec format, treat it as a scalar
-			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom {
+			if _, isCustom := customSpecs.Find(string(rule.format)); isCustom || rule.format == utils.TimeObjectFormat {
 				if len(vals) > 0 {
 					if err := bindScalar(fieldVal, vals[0], rule, name); err != nil {
 						return err
@@ -418,4 +437,52 @@ func (f *FormBodyParser) getFieldStruct(strct reflect.Value, fieldname string) r
 		return reflect.Value{}
 	}
 	return strct.FieldByName(fieldname)
+}
+
+// formBindField returns the field a form value binds to. A field promoted through
+// an embedded pointer allocates it, as a JSON body does, so call this only when
+// there is a value to bind.
+func formBindField(parent reflect.Value, rule *RuleDef, key string) (reflect.Value, error) {
+	index := rule.accessor.index
+	if len(index) <= 1 {
+		return parent.FieldByName(rule.fieldName), nil
+	}
+	if !requestFieldParentsReady(parent, index) {
+		return reflect.Value{}, newErrReport(RequestErr, schemaBody, key, "binding", fmt.Errorf("field index %v traverses a nil or invalid parent", index))
+	}
+	return requestCompiledField(parent, index), nil
+}
+
+// bindFormBytes handles []byte and [N]byte fields in form and multipart bodies:
+// their text is base64, as it is in JSON. Any other fixed-size array can't be
+// bound from a form. It reports whether it handled the field.
+func bindFormBytes(field reflect.Value, t reflect.Type, vals []string, rule *RuleDef, key string) (bool, error) {
+	isBytes := t.Elem().Kind() == reflect.Uint8
+	if t.Kind() != reflect.Array && !isBytes {
+		return false, nil
+	}
+	if len(vals) == 0 {
+		if rule.required || rule.present {
+			return true, newErrReport(RequestErr, schemaBody, key, "required", errors.New("field is required"))
+		}
+		return true, nil
+	}
+	if !isBytes {
+		return true, newErrReport(RequestErr, schemaBody, key, "typeMismatch", fmt.Errorf("a form value can't fill %s", t))
+	}
+	if len(vals) != 1 {
+		return true, newErrReport(RequestErr, schemaBody, key, "typeMismatch", errors.New("expected one value"))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(vals[0])
+	if err == nil {
+		err = checkByteArrayLen(t, decoded)
+	}
+	if err != nil {
+		return true, newErrReport(RequestErr, schemaBody, key, "typeCast", err)
+	}
+	if err := runValidation(decoded, RequestErr, schemaBody, key, rule.rules); err != nil {
+		return true, err
+	}
+	bindDecodedBytes(field, decoded)
+	return true, nil
 }

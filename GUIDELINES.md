@@ -111,7 +111,7 @@ var GetProjectHandler = gofi.DefineHandler(gofi.RouteOptions{
 		}
 
 		caller, _ := domain.PrincipalFrom(c.Context())
-		project, err := deps.MustGet(c).Projects().Get(c.Context(), caller.UserID, s.Request.Path.ProjectID)
+		project, err := deps.MustGet(c).Projects().Get(c.Context(), caller.UserID, string(s.Request.Path.ProjectID))
 		if errors.Is(err, domain.ErrNotFound) {
 			return apperr.Wrap(1793299514312, apperr.NotFound, err).WithMsg("project not found")
 		}
@@ -128,7 +128,7 @@ type getProjectSchema struct {
 	Request struct {
 		Header schemas.AuthHeader
 		Path   struct {
-			ProjectID string `json:"project_id" validate:"required" example:"prj_01J9Z3"`
+			ProjectID schemas.ProjectID `json:"project_id" validate:"required" spec:"project-id" example:"prj_01J9Z3"`
 		}
 	}
 
@@ -286,7 +286,66 @@ type ErrBody struct {
   Rules on a pointer field check the value it points to. A nil pointer
   (field left out or sent as `null`) skips every rule except `required` and
   `present`. Pointer fields bind in every location: body, query, path,
-  header and cookie.
+  header and cookie. The same goes for an array's elements: `[]*string` keeps a
+  `null` element as nil, and `[]string` rejects it with a 400.
+- **TAG-12 (MUST NOT)** Do not rely on `default` in a form or multipart body,
+  or on a slice default other than `[]`: both are ignored. `default` fills a
+  missing value in the path, query, header, cookie and JSON, as in
+  ``Status string `json:"status" validate:"required" default:"success"` ``. That
+  includes a pointer, and a `time.Time`, whose default is text in the field's
+  layout. A default that doesn't parse panics when the route is registered.
+
+### Custom specs
+
+A spec tells Gofi how to read and write a type it doesn't know, such as an ID
+type. It lives with the shared schemas:
+
+```go
+// ProjectID identifies a project. A malformed ID never reaches a handler.
+type ProjectID string
+
+// ProjectIDSpec reads and writes a ProjectID. server.New registers it before
+// the routes that use it.
+var ProjectIDSpec = gofi.DefineCustomSpec(gofi.SpecDefinition{
+	SpecID: "project-id",
+	Type:   "string",
+	Encode: func(val any) (string, error) {
+		id, ok := val.(ProjectID)
+		if !ok {
+			return "", errors.New("project-id spec expects a ProjectID")
+		}
+		return string(id), nil
+	},
+	Decode: func(val any) (any, error) {
+		s, ok := val.(string)
+		if !ok || !strings.HasPrefix(s, "prj_") {
+			return nil, errors.New("project ID must start with prj_")
+		}
+		return ProjectID(s), nil
+	},
+})
+```
+
+A field names it in its `spec` tag:
+
+```go
+			ProjectID schemas.ProjectID `json:"project_id" validate:"required" spec:"project-id" example:"prj_01J9Z3"`
+```
+
+- **SPEC-1 (SHOULD)** Use a spec for a vendor or ID type that needs its own
+  wire format.
+- **SPEC-2 (MUST)** Register specs with `RegisterSpec` before the routes that
+  use them. An unknown `spec` tag panics when the route is registered, and so
+  does a `spec` tag on a cookie field.
+- **SPEC-3 (MUST)** `Decode` checks the type of its input and returns the
+  field's type. It receives a `string` from a path, query, header, form or
+  multipart field. From a JSON body it receives the JSON value; the
+  [README](README.md#custom-typesspecs) lists the types. Its error text reaches
+  the client, so keep internal detail out of it.
+- **SPEC-4 (MUST)** `Encode` returns text. It receives the field's value, or
+  the value a pointer field points to. A spec with `Type` `integer`, `number` or
+  `boolean` returns the value as that text, and Gofi writes it unquoted. Text
+  that isn't that type fails the response with a 500.
 
 ---
 
@@ -590,8 +649,8 @@ func PrincipalFrom(ctx context.Context) (Principal, bool) {
 The `server` package builds the router in one function, in a fixed order.
 
 ```go
-// New builds the router: dependencies, global middleware, error handler,
-// routes and docs, in that order.
+// New builds the router: limits, specs, dependencies, global middleware, error
+// handler, routes and docs, in that order.
 func New(args Args) (*Server, error) {
 	cors, err := gofimw.CORS(gofimw.CORSConfig{
 		AllowOrigins: args.CORSOrigins,
@@ -602,6 +661,14 @@ func New(args Args) (*Server, error) {
 	}
 
 	r := gofi.NewRouter()
+	r.Configure(gofi.Config{
+		BodyLimit:      4 << 20,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   60 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxConnections: 5000,
+	})
+	r.RegisterSpec(schemas.ProjectIDSpec)
 	deps.Register(r, args.Deps)
 
 	r.Use(gofimw.Recover())
@@ -651,18 +718,33 @@ signal:
 ```
 
 - **SRV-1 (MUST)** Build the router in `server.New(Args) (*Server, error)` in
-  this order: `gofi.NewRouter`, `Configure` (if needed), `deps.Register`,
-  global `Use`, `UseErrorHandler`, `Register<Area>Routes`, docs.
+  this order: `gofi.NewRouter`, `Configure`, `RegisterSpec` (if needed),
+  `deps.Register`, global `Use`, `UseErrorHandler`, `Register<Area>Routes`,
+  docs.
 - **SRV-2 (MUST)** One router per binary, built once. Tests and the spec
   export tool build it through the same `server.New`.
 - **SRV-3 (MUST)** Start with `Listen` (or `ListenTLS`/`ListenTLSMutual`) and
-  stop with `ShutdownWithContext` and a timeout. Do not use
+  stop through the router, with `ShutdownWithContext` and a timeout. Do not use
   `gofi.ListenAndServe`.
-- **SRV-4 (SHOULD)** Use `gofi.NewFasthttpServer` or `Handler()` only when you
-  need fasthttp server settings Gofi does not expose. You then own body
-  limits, timeouts and shutdown.
-- **SRV-5 (SHOULD)** Set request size limits with
-  `r.Configure(gofi.Config{BodyLimit: ...})` in `server.New`.
+- **SRV-4 (SHOULD)** Use `gofi.NewFasthttpServer` only for settings `Config`
+  doesn't have, such as `ReadBufferSize` or `MaxRequestsPerConn`. The router and
+  the server are then one: `r.Listen` starts that server, and
+  `r.ShutdownWithContext` stops it, however it started. A `Config.BodyLimit`
+  above `ServerOptions.MaxRequestBodySize` makes `Listen` return an error. With
+  `Handler()` you run the server yourself, so you own its limits and shutdown.
+- **SRV-5 (MUST)** Set `BodyLimit`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`
+  and `MaxConnections` with `r.Configure` in `server.New`, sized to the service's
+  traffic. Without them, any client can hold a connection open indefinitely.
+  - `ReadTimeout` bounds reading a request, and also closes a connection that
+    never sends one. `IdleTimeout` only starts after the first request, so it
+    doesn't replace `ReadTimeout`.
+  - `WriteTimeout` bounds a whole response, including a stream: a response still
+    being written when it runs out is cut off. Set it above your slowest download
+    or stream. WebSocket sessions have their own timeouts and aren't affected.
+  - Keep `MaxConnections` below the process's open-file limit. Above it, the
+    server answers 503.
+  - `MaxConnsPerIP` is optional. Behind a proxy, every client shares the proxy's
+    IP, so don't set it there.
 
 ---
 
@@ -809,6 +891,10 @@ You do not write these by hand; knowing them helps you read the document.
 - A `json.RawMessage` or `any` body is documented as free-form JSON; give the
   `Body` field a `description` to say what it holds.
 - `time.Time` fields are documented from their layout (TAG-9).
+- A pointer field is `nullable`, unless `required` or `present` rejects null. A
+  param or header can be left out but can't be null, so it never is.
+- `float64` is `format: double` and `float32` is `format: float`. `json.Number`
+  is `type: number`.
 
 ### Reusable components with fluid
 
@@ -863,7 +949,8 @@ returns.
   `gofi.SetRequestContext(c, ctx)`. Every later `c.Context()` call in the
   request, in middleware and handlers, returns it. The package that owns the
   value owns the key and provides `With<Value>`/`<Value>From` functions
-  (`domain.WithPrincipal`, `domain.PrincipalFrom`).
+  (`domain.WithPrincipal`, `domain.PrincipalFrom`). The error handler sees the
+  value too, even when it was set after `ContextTimeout`.
 - **CTX-6 (MUST NOT)** Do not store values on the fasthttp request
   (`SetUserValue` on `c.Request().Context()` or `FastHTTPContext()`).
   `c.Context()` does not see them. Releases up to v0.8.11 did, so code that
@@ -883,6 +970,7 @@ The handler rules (section 2) apply to both.
   with a response block that declares `content-type: text/event-stream`.
   Return every write and flush error from the callback. Use
   `gofi.SendStreamWithOptions` when the stream needs a size or time limit.
+  `WriteTimeout` ends the whole stream, so set it above the longest one (SRV-5).
 - **STR-2 (MUST)** WebSocket routes are defined with
   `websocket.DefineWebSocket` and declare the handshake in `Schema.Request`
   and the messages in `Schema.WebSocket`. See

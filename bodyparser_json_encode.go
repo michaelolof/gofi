@@ -35,7 +35,7 @@ func (e *jsonEncoder) fail(rule string, err error) error {
 }
 
 func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
-	if rules != nil && rules.defStr != "" && val.IsValid() && isEmptyJSONValue(val) {
+	if rules != nil && rules.defStr != "" && val.IsValid() && (isEmptyJSONValue(val) || isZeroTimeValue(val)) {
 		// Encode the default without writing it into the caller's value,
 		// which may be shared with other requests.
 		if def := rules.defaultValue(val.Type()); def.IsValid() {
@@ -73,6 +73,15 @@ func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
 			if err != nil {
 				return e.fail("typeMismatch", err)
 			}
+			switch spec.Type() {
+			case "integer", "number", "boolean":
+				// The document says this isn't a string, so the value isn't quoted.
+				if !isJSONScalar(s, spec.Type()) {
+					return e.fail("typeMismatch", fmt.Errorf("spec %s encoded %q, which isn't a %s", spec.SpecID(), s, spec.Type()))
+				}
+				e.buf.WriteString(s)
+				return nil
+			}
 			e.writeString(s)
 			return nil
 		}
@@ -88,27 +97,40 @@ func (e *jsonEncoder) encode(val reflect.Value, rules *RuleDef) error {
 		}
 		return e.encodeTime(val)
 	}
-	// Only types with methods can implement json.Marshaler, and only []byte
-	// is base64-encoded, so most values skip the type cache entirely.
-	if t.NumMethod() > 0 && jsonTypeInfoFor(t).marshaler && val.CanInterface() {
-		switch val.Kind() {
-		case reflect.Slice, reflect.Map, reflect.Pointer, reflect.Interface:
-			if val.IsNil() {
-				e.buf.WriteString("null")
-				return nil
+	// Only types with methods can implement json.Marshaler or be a json.Number,
+	// and only []byte is base64-encoded, so most values skip the type cache entirely.
+	if t.NumMethod() > 0 {
+		if t == jsonNumberType {
+			text := val.String()
+			if text == "" {
+				text = "0"
 			}
+			if !isJSONScalar(text, "number") {
+				return e.fail("typeMismatch", fmt.Errorf("%q is not a number", text))
+			}
+			e.buf.WriteString(text)
+			return nil
 		}
-		raw, err := val.Interface().(json.Marshaler).MarshalJSON()
-		if err != nil {
-			return e.fail("typeMismatch", err)
+		if jsonTypeInfoFor(t).marshaler && val.CanInterface() {
+			switch val.Kind() {
+			case reflect.Slice, reflect.Map, reflect.Pointer, reflect.Interface:
+				if val.IsNil() {
+					e.buf.WriteString("null")
+					return nil
+				}
+			}
+			raw, err := val.Interface().(json.Marshaler).MarshalJSON()
+			if err != nil {
+				return e.fail("typeMismatch", err)
+			}
+			// Marshaler output is spliced into the document, so it must be one
+			// complete JSON value; anything else could add or end fields.
+			if !json.Valid(raw) {
+				return e.fail("typeMismatch", fmt.Errorf("MarshalJSON for %s returned invalid JSON", val.Type()))
+			}
+			e.buf.Write(raw)
+			return nil
 		}
-		// Marshaler output is spliced into the document, so it must be one
-		// complete JSON value; anything else could add or end fields.
-		if !json.Valid(raw) {
-			return e.fail("typeMismatch", fmt.Errorf("MarshalJSON for %s returned invalid JSON", val.Type()))
-		}
-		e.buf.Write(raw)
-		return nil
 	}
 	if k := t.Kind(); (k == reflect.Slice || k == reflect.Array) && t.Elem().Kind() == reflect.Uint8 && jsonTypeInfoFor(t).byteSlice {
 		if k == reflect.Slice && val.IsNil() {
@@ -289,10 +311,21 @@ func (e *jsonEncoder) encodeStruct(val reflect.Value, rules *RuleDef) error {
 				continue
 			}
 			var fv reflect.Value
-			if len(f.accessor.index) > 0 {
-				fv = val.FieldByIndex(f.accessor.index)
-			} else {
+			switch index := f.accessor.index; len(index) {
+			case 0:
 				fv = val.FieldByName(f.fieldName)
+			case 1:
+				fv = val.Field(index[0])
+			default:
+				var err error
+				if fv, err = val.FieldByIndexErr(index); err != nil {
+					// Promoted through a nil embedded pointer, so there is no value.
+					if rule, err := checkPresence(f.rules); err != nil {
+						e.path.pushField(f.field)
+						return e.fail(rule, err)
+					}
+					continue
+				}
 			}
 			if (f.omitEmpty && isEmptyJSONValue(fv)) || (f.omitZero && isZeroJSONValue(fv)) {
 				continue
@@ -363,6 +396,10 @@ func isEmptyJSONValue(v reflect.Value) bool {
 	return false
 }
 
+func isZeroTimeValue(v reflect.Value) bool {
+	return v.Type() == timeType && v.Interface().(time.Time).IsZero()
+}
+
 var jsonIsZeroerType = reflect.TypeFor[interface{ IsZero() bool }]()
 
 // isZeroJSONValue reports the values that omitzero omits, as encoding/json defines
@@ -417,9 +454,11 @@ type jsonSchemalessField struct {
 }
 
 var (
-	jsonTypeInfos     sync.Map // reflect.Type -> *jsonTypeInfo
-	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
-	timeType          = reflect.TypeFor[time.Time]()
+	jsonTypeInfos       sync.Map // reflect.Type -> *jsonTypeInfo
+	jsonMarshalerType   = reflect.TypeFor[json.Marshaler]()
+	jsonUnmarshalerType = reflect.TypeFor[json.Unmarshaler]()
+	jsonNumberType      = reflect.TypeFor[json.Number]()
+	timeType            = reflect.TypeFor[time.Time]()
 )
 
 func jsonTypeInfoFor(t reflect.Type) *jsonTypeInfo {
@@ -533,4 +572,15 @@ func appendJSONFloat(dst []byte, f float64, bits int) ([]byte, bool) {
 		}
 	}
 	return dst, true
+}
+
+// isJSONScalar reports whether s is a valid JSON value of the OpenAPI type typ.
+func isJSONScalar(s, typ string) bool {
+	if typ == "boolean" {
+		return s == "true" || s == "false"
+	}
+	if s == "" || s[0] == '"' || s == "true" || s == "false" || s == "null" || !json.Valid([]byte(s)) {
+		return false
+	}
+	return s[0] != '{' && s[0] != '['
 }

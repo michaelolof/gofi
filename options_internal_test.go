@@ -3,7 +3,10 @@ package gofi
 import (
 	stdcontext "context"
 	"crypto/tls"
+	"errors"
 	"net"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -65,5 +68,30 @@ func TestServerTLSListenerRefusesH2(t *testing.T) {
 	if old, err := tls.Dial("tcp", addr, clientCfg); err == nil {
 		old.Close()
 		t.Fatal("TLS 1.1 handshake accepted")
+	}
+}
+
+type frFlakyListener struct {
+	net.Listener
+	fails atomic.Int32
+}
+
+func (l *frFlakyListener) Accept() (net.Conn, error) {
+	if l.fails.Add(-1) >= 0 {
+		return nil, &net.OpError{Op: "accept", Err: syscall.EMFILE}
+	}
+	return nil, net.ErrClosed
+}
+
+// GF-14: running out of file descriptors is retried, and a closed listener still ends the loop.
+func TestGF14_AcceptRetriesWhenOutOfFiles(t *testing.T) {
+	flaky := &frFlakyListener{}
+	flaky.fails.Store(2)
+	_, err := resilientListener{flaky}.Accept()
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("want the closed error after two retries, got %v", err)
+	}
+	if flaky.fails.Load() >= 0 {
+		t.Fatalf("the listener wasn't retried: %d", flaky.fails.Load())
 	}
 }

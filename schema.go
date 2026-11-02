@@ -12,6 +12,7 @@ type openapiSchema struct {
 	Title                string                   `json:"title,omitempty"`
 	Format               string                   `json:"format,omitempty"`
 	Type                 string                   `json:"type,omitempty"`
+	Nullable             bool                     `json:"nullable,omitempty"`
 	Pattern              string                   `json:"pattern,omitempty"`
 	Default              any                      `json:"default,omitempty"`
 	Minimum              *float64                 `json:"minimum,omitempty"`
@@ -113,6 +114,7 @@ type openapiParameter struct {
 }
 
 func newOpenapiParameter(in string, name string, required *bool, schema openapiSchema) openapiParameter {
+	schema.Nullable = false // a param or header can be left out, but it can't be null
 	return openapiParameter{
 		In:       in,
 		Name:     name,

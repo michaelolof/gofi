@@ -4,10 +4,14 @@ import (
 	stdcontext "context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/valyala/fasthttp"
 )
@@ -27,13 +31,19 @@ type FasthttpServer struct {
 // connection counts unbounded. Invalid options panic; check them first with
 // ValidateServerOptions when they come from configuration.
 func NewFasthttpServer(opts ...ServerOptions) *FasthttpServer {
+	var s *FasthttpServer
 	if len(opts) == 0 {
-		return newRouter().newFasthttpServer()
+		s = newRouter().newFasthttpServer()
+	} else {
+		var err error
+		s, err = newFasthttpServerWithOptions(opts[0])
+		if err != nil {
+			panic(err)
+		}
 	}
-	s, err := newFasthttpServerWithOptions(opts[0])
-	if err != nil {
-		panic(err)
-	}
+	s.mux.lifecycle.mu.Lock()
+	s.mux.lifecycle.owner = s
+	s.mux.lifecycle.mu.Unlock()
 	return s
 }
 
@@ -66,7 +76,7 @@ func (s *FasthttpServer) Listen(addr string) error {
 	if err != nil {
 		return err
 	}
-	return s.server.Serve(ln)
+	return s.server.Serve(resilientListener{ln})
 }
 
 // ListenTLS starts the fasthttp server with TLS encryption.
@@ -81,7 +91,7 @@ func (s *FasthttpServer) ListenTLS(addr, certFile, keyFile string) error {
 	if err != nil {
 		return err
 	}
-	return s.server.ServeTLS(ln, certFile, keyFile)
+	return s.server.ServeTLS(resilientListener{ln}, certFile, keyFile)
 }
 
 // ListenTLSMutual starts the fasthttp server with mutual TLS (mTLS) authentication.
@@ -114,7 +124,7 @@ func (s *FasthttpServer) ListenTLSMutual(addr, certFile, keyFile, clientCertFile
 		return err
 	}
 
-	tlsListener := tls.NewListener(ln, tlsConfig)
+	tlsListener := tls.NewListener(resilientListener{ln}, tlsConfig)
 	return s.server.Serve(tlsListener)
 }
 
@@ -124,7 +134,7 @@ func (s *FasthttpServer) ListenOnListener(ln net.Listener) error {
 	if err := s.applyRouterConfig(); err != nil {
 		return err
 	}
-	return s.server.Serve(ln)
+	return s.server.Serve(resilientListener{ln})
 }
 
 // Shutdown gracefully shuts down the server.
@@ -150,4 +160,31 @@ func listenAddr(addr string) string {
 		return ":" + addr
 	}
 	return addr
+}
+
+// resilientListener keeps a server running when the process runs out of file
+// descriptors. fasthttp treats that Accept error as permanent and stops serving
+// for good, although the connections behind it may close moments later. The
+// backoff is the one net/http's Server.Serve uses.
+type resilientListener struct{ net.Listener }
+
+func (l resilientListener) Accept() (net.Conn, error) {
+	var delay time.Duration
+	for {
+		conn, err := l.Listener.Accept()
+		if err == nil || !isTemporaryAcceptError(err) {
+			return conn, err
+		}
+		if delay == 0 {
+			log.Printf("gofi: %v; retrying", err)
+			delay = 5 * time.Millisecond
+		} else if delay *= 2; delay > time.Second {
+			delay = time.Second
+		}
+		time.Sleep(delay)
+	}
+}
+
+func isTemporaryAcceptError(err error) bool {
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ECONNABORTED)
 }

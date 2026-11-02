@@ -3,8 +3,8 @@ package fluid
 // RequestBodyObject represents an OpenAPI 3.0.3 Request Body Object.
 // See: https://spec.openapis.org/oas/v3.0.3#request-body-object
 type RequestBodyObject struct {
-	Description string                    `json:"description,omitempty"`
-	Required    bool                      `json:"required,omitempty"`
+	Description string                     `json:"description,omitempty"`
+	Required    bool                       `json:"required,omitempty"`
 	Content     map[string]MediaTypeObject `json:"content"`
 }
 

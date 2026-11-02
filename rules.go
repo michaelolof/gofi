@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/michaelolof/gofi/cont"
 	"github.com/michaelolof/gofi/utils"
@@ -156,6 +157,14 @@ func (r *RuleDef) defaultValue(t reflect.Type) reflect.Value {
 	}
 	if def == nil {
 		return reflect.Value{}
+	}
+	// A time's default is text in the field's layout. Registration checked it parses.
+	if text, ok := def.(string); ok && r.format == utils.TimeObjectFormat {
+		parsed, err := time.Parse(r.pattern, text)
+		if err != nil {
+			return reflect.Value{}
+		}
+		def = parsed
 	}
 	v := reflect.ValueOf(def)
 	if v.Type().AssignableTo(t) {

@@ -388,7 +388,8 @@ func (p *ParsedJson) GetPrimitiveArrVals(kind reflect.Kind, format utils.ObjectF
 	return arr, nil
 }
 
-// GetPrimitiveArrValsFromNode extracts primitive array values directly from a *fastjson.Value array block.
+// GetPrimitiveArrValsFromNode extracts primitive array values directly from a
+// *fastjson.Value array block. A null element stays in its position as nil.
 func GetPrimitiveArrValsFromNode(nodes []*fastjson.Value, kind reflect.Kind, format utils.ObjectFormats, size int) ([]any, error) {
 	arr := make([]any, 0, len(nodes))
 
@@ -397,8 +398,7 @@ func GetPrimitiveArrValsFromNode(nodes []*fastjson.Value, kind reflect.Kind, for
 		if err != nil {
 			return nil, err
 		} else if v == EOF {
-			// Fastjson nodes array usually won't contain literal missing EOF instances but skips mapped nils,
-			// if it does we skip or break based on reqs.
+			arr = append(arr, nil)
 			continue
 		}
 		arr = append(arr, v)
@@ -483,7 +483,7 @@ func GetAnyValueFromNode(node *fastjson.Value) (any, error) {
 		return nil, nil
 	case fastjson.TypeArray, fastjson.TypeObject:
 		var vany any
-		if err := json.Unmarshal(node.GetStringBytes(), &vany); err != nil {
+		if err := json.Unmarshal(node.MarshalTo(nil), &vany); err != nil {
 			return nil, err
 		}
 		return vany, nil

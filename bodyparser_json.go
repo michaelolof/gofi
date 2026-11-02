@@ -248,6 +248,12 @@ func (j *JSONBodyParser) encodeResponse(buf *bytes.Buffer, opts ResponseOptions)
 		return newErrReport(ResponseErr, schemaBody, "", "required", errors.New("value is required for body"))
 	}
 
+	// A nil pointer body is JSON null, the same as a nil pointer field.
+	if !body.IsValid() {
+		buf.WriteString("null")
+		return nil
+	}
+
 	if opts.SchemaRules != nil {
 		kind := opts.SchemaRules.kind
 		if opts.SchemaRules.specKind != reflect.Invalid {
@@ -282,6 +288,8 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	var err error
 	if isSpec {
 		val, err = cont.GetSpecNode(node, opts.SchemaRules.specKind)
+	} else if opts.SchemaRules.format == utils.RawJSONFormat && node != nil && node.Type() != fastjson.TypeNull {
+		val = node.MarshalTo(nil)
 	} else {
 		val, err = cont.GetNodeByKind(node, opts.SchemaRules.kind, opts.SchemaRules.format)
 	}
@@ -364,11 +372,30 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", errors.New("expected raw JSON bytes"))
 		}
 
-		if err := runValidationLazy(raw, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
+		// A type that decodes itself is validated as the value it decodes to.
+		var checked any = raw
+		var decoded reflect.Value
+		if t := selfDecodingType(opts.SchemaRules.typ); t != nil {
+			decoded = reflect.New(t).Elem()
+			if err := j.decodeRawJSONField(decoded, raw); err != nil {
+				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
+			}
+			checked = decoded.Interface()
+		}
+
+		if err := runValidationLazy(checked, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
 			return nil, err
 		}
 
 		if opts.ShouldBind && opts.HasBody {
+			if decoded.IsValid() {
+				target := opts.Body
+				if target.Kind() == reflect.Pointer {
+					target = target.Elem()
+				}
+				target.Set(decoded)
+				return &walkFinished, nil
+			}
 			if err := j.decodeRawJSONField(opts.Body, raw); err != nil {
 				return nil, newErrReport(RequestErr, schemaField, path.String(), "decode", err)
 			}
@@ -406,6 +433,9 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 
 	switch opts.SchemaRules.kind {
 	case reflect.Struct:
+		if node != nil && node.Type() != fastjson.TypeObject {
+			return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", fmt.Errorf("expected a JSON object, got %s", node.Type()))
+		}
 		// Fast path: use pre-ordered props slice when available
 		if len(opts.SchemaRules.orderedProps) > 0 {
 			for _, childDef := range opts.SchemaRules.orderedProps {
@@ -526,7 +556,7 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			}
 
 			if opts.ShouldBind && opts.HasBody {
-				opts.Body.SetMapIndex(reflect.ValueOf(ckey), cstrct)
+				opts.Body.SetMapIndex(reflect.ValueOf(ckey).Convert(opts.Body.Type().Key()), cstrct)
 			}
 
 		})
@@ -541,11 +571,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		rules := opts.SchemaRules
 
 		switch true {
-		case utils.IsPrimitiveKind(opts.SchemaRules.item.kind):
+		case utils.IsPrimitiveKind(opts.SchemaRules.item.kind) && opts.SchemaRules.item.format != utils.RawJSONFormat:
 			// Handle array of primitive values
 			arrNodes, err := node.Array()
 			if err != nil {
 				return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
+			}
+			if err := rejectNullElements(arrNodes, rules.item, schemaField, path); err != nil {
+				return nil, err
 			}
 			arr, err := cont.GetPrimitiveArrValsFromNode(arrNodes, rules.item.kind, rules.format, len(arrNodes))
 			if err != nil {
@@ -563,11 +596,14 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 
 			return &walkFinished, nil
 
-		case utils.NotPrimitiveKind(opts.SchemaRules.item.kind):
+		case utils.NotPrimitiveKind(opts.SchemaRules.item.kind) || opts.SchemaRules.item.format == utils.RawJSONFormat:
 			// Handle array of Non primitives
 			arrNodes, err := node.Array()
 			if err != nil {
 				return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
+			}
+			if err := rejectNullElements(arrNodes, rules.item, schemaField, path); err != nil {
+				return nil, err
 			}
 
 			if len(arrNodes) == 0 && rules.required && !rules.present {
@@ -678,6 +714,38 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 	}
 
 	return &walkFinished, nil
+}
+
+// rejectNullElements fails an array of a primitive kind that holds a null, which
+// has no value to bind. A pointer element can hold it, and stays nil.
+func rejectNullElements(nodes []*fastjson.Value, item *RuleDef, field schemaField, path *requestPath) error {
+	if !utils.IsPrimitiveKind(item.kind) || (item.typ != nil && item.typ.Kind() == reflect.Pointer) {
+		return nil
+	}
+	for i, node := range nodes {
+		if node.Type() == fastjson.TypeNull {
+			path.pushIndex(i)
+			errPath := path.String()
+			path.pop()
+			return newErrReport(RequestErr, field, errPath, "typeMismatch", errors.New("a null element isn't allowed here; use a pointer element type to accept null"))
+		}
+	}
+	return nil
+}
+
+// selfDecodingType returns t without its pointer if it decodes itself into a
+// value validators can read. Raw JSON bytes such as json.RawMessage return nil.
+func selfDecodingType(t reflect.Type) reflect.Type {
+	if t == nil {
+		return nil
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+		return nil
+	}
+	return t
 }
 
 // checkByteArrayLen rejects decoded base64 that doesn't fill a [N]byte field.
@@ -816,6 +884,10 @@ func bindCollectionValues(field reflect.Value, values []any) error {
 	}
 
 	for i, item := range values {
+		// A null element stays nil. rejectNullElements only lets one through to a pointer.
+		if item == nil {
+			continue
+		}
 		var elem reflect.Value
 		if i < collection.Len() {
 			elem = collection.Index(i)
@@ -847,6 +919,17 @@ func bindCollectionValues(field reflect.Value, values []any) error {
 // decodeRawJSONField binds raw JSON bytes into a field, supporting json.RawMessage
 // and other types implementing json.Unmarshaler.
 func (j *JSONBodyParser) decodeRawJSONField(field reflect.Value, raw []byte) error {
+	if number := field; number.Type() == jsonNumberType || (number.Kind() == reflect.Pointer && number.Type().Elem() == jsonNumberType) {
+		text := strings.Trim(string(raw), `"`)
+		if !isJSONScalar(text, "number") {
+			return fmt.Errorf("%q is not a number", text)
+		}
+		if number.Kind() == reflect.Pointer {
+			number = number.Elem()
+		}
+		number.SetString(text)
+		return nil
+	}
 	// Try json.Unmarshaler on the addressable value (covers non-pointer json.RawMessage)
 	if field.CanAddr() {
 		if u, ok := field.Addr().Interface().(json.Unmarshaler); ok {
@@ -924,7 +1007,10 @@ func requestFieldParentsReady(parent reflect.Value, index []int) bool {
 		parent = parent.Field(fieldIndex)
 		if parent.Kind() == reflect.Pointer {
 			if parent.IsNil() {
-				return false
+				if !parent.CanSet() {
+					return false
+				}
+				parent.Set(reflect.New(parent.Type().Elem()))
 			}
 			parent = parent.Elem()
 		}

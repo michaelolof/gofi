@@ -294,6 +294,18 @@ field left out or sent as `null`, skips every rule except `required` and
 `ValidatorContext.Type` and the pointed-to value at runtime. Pointer fields
 bind in the body, query, path, header and cookie.
 
+In a JSON array, a `null` element of a pointer type stays nil, so
+``Tags []*string `json:"tags"` `` accepts `[null,"a"]` as two elements. In an array
+of primitives, such as `[]string`, a `null` element is a 400. Rules on the array
+count every element, including a nil one.
+
+### Types that decode themselves
+
+Rules on a field whose type has `UnmarshalJSON` check the value it decoded to, so
+``Color MyColor `validate:"oneof=red green"` `` sees what the method produced, not
+what the client sent. Rules on the fields inside such a type don't run, because
+Gofi doesn't read them. Use a rule on the field itself, or check inside the method.
+
 ### Usage Examples
 
 **`present` — field must exist, zero-values allowed:**

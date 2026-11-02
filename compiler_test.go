@@ -6,6 +6,7 @@ import (
 	"log"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -452,8 +453,8 @@ func TestCompileSchema_TwoUntaggedEmbeds(t *testing.T) {
 	type schema struct {
 		Request struct {
 			Header struct {
-				AuthHeader  // promoted
-				MockHeader  // promoted
+				AuthHeader // promoted
+				MockHeader // promoted
 			}
 		}
 	}
@@ -487,7 +488,7 @@ func TestCompileSchema_EmbeddedResponseBody(t *testing.T) {
 	type schema struct {
 		Ok struct {
 			Body struct {
-				Message string `json:"message"`
+				Message  string `json:"message"`
 				RespInfo        // embedded
 			}
 		}
@@ -552,7 +553,7 @@ func TestCompileSchema_NestedEmbeds(t *testing.T) {
 		FieldB string `json:"field_b"`
 	}
 	type A struct {
-		B           // embedded in A
+		B             // embedded in A
 		FieldA string `json:"field_a"`
 	}
 
@@ -619,5 +620,104 @@ func TestCompileSchema_EmbeddedJsonDashField(t *testing.T) {
 	for _, p := range params {
 		assert.NotEqual(t, "DashInfo", p.Name, "carrier name should not appear")
 		assert.NotEqual(t, "dashinfo", p.Name, "lowercased carrier name should not appear")
+	}
+}
+
+func TestGF20_StringOptionIsRejected(t *testing.T) {
+	type S struct {
+		Request struct {
+			Body struct {
+				V int `json:"v,string"`
+			}
+		}
+	}
+	if msg := frPanics(func() { frRegister[S](NewRouter()) }); !strings.Contains(msg, `",string"`) {
+		t.Fatalf("the string option registered: %q", msg)
+	}
+}
+
+type frNode struct {
+	V    string  `json:"v"`
+	Next *frNode `json:"next"`
+}
+
+type frTree struct {
+	Kids []frTree `json:"kids"`
+}
+
+type frA struct {
+	B *frB `json:"b"`
+}
+
+type frB struct {
+	A map[string]frA `json:"a"`
+}
+
+type frUnexportedLoop struct {
+	V    string `json:"v"`
+	next *frUnexportedLoop
+}
+
+type frRepeated struct {
+	V string `json:"v"`
+}
+
+func TestGF17_RecursiveTypes(t *testing.T) {
+	type Node struct {
+		Request struct{ Body frNode }
+	}
+	type Tree struct {
+		Ok struct{ Body frTree }
+	}
+	type Mutual struct {
+		Request struct{ Body frA }
+	}
+	for _, register := range []func(Router){frRegister[Node], frRegister[Tree], frRegister[Mutual]} {
+		if msg := frPanics(func() { register(NewRouter()) }); !strings.Contains(msg, "recursive type") {
+			t.Fatalf("a recursive type registered: %q", msg)
+		}
+	}
+
+	// A panic leaves the router able to register other routes.
+	r := NewRouter()
+	frPanics(func() { frRegister[Node](r) })
+	type Other struct {
+		Request struct {
+			Body struct {
+				N frRepeated `json:"n"`
+			}
+		}
+	}
+	if msg := frPanics(func() { frRegister[Other](r) }); msg != "" {
+		t.Fatalf("the router stayed broken: %q", msg)
+	}
+
+	// A type used twice isn't recursive, and an unexported field isn't in the schema.
+	type Fine struct {
+		Request struct {
+			Body struct {
+				A frRepeated       `json:"a"`
+				B frRepeated       `json:"b"`
+				C []frRepeated     `json:"c"`
+				D frUnexportedLoop `json:"d"`
+			}
+		}
+		Ok struct{ Body frRepeated }
+	}
+	if msg := frPanics(func() { frRegister[Fine](NewRouter()) }); msg != "" {
+		t.Fatalf("a non-recursive schema panicked: %q", msg)
+	}
+	_ = frUnexportedLoop{}.next
+
+	// A spec reads the value itself, so a recursive type can use one.
+	type WithSpec struct {
+		Request struct {
+			Body struct {
+				T frStructSpec `json:"t" spec:"st"`
+			}
+		}
+	}
+	if msg := frPanics(func() { frRegister[WithSpec](frSpecRouter()) }); msg != "" {
+		t.Fatalf("a spec field panicked: %q", msg)
 	}
 }

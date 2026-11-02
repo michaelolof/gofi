@@ -4,16 +4,16 @@ package fluid
 // Follows the same structure as ParameterObject but without "name" and "in".
 // See: https://spec.openapis.org/oas/v3.0.3#header-object
 type HeaderObject struct {
-	Description     string                    `json:"description,omitempty"`
-	Required        *bool                     `json:"required,omitempty"`
-	Deprecated      *bool                     `json:"deprecated,omitempty"`
-	AllowEmptyValue bool                      `json:"allowEmptyValue,omitempty"`
-	Style           string                    `json:"style,omitempty"`
-	Explode         *bool                     `json:"explode,omitempty"`
-	AllowReserved   bool                      `json:"allowReserved,omitempty"`
-	Schema          *SchemaObject             `json:"schema,omitempty"`
-	Example         any                       `json:"example,omitempty"`
-	Examples        map[string]ExampleObject  `json:"examples,omitempty"`
+	Description     string                     `json:"description,omitempty"`
+	Required        *bool                      `json:"required,omitempty"`
+	Deprecated      *bool                      `json:"deprecated,omitempty"`
+	AllowEmptyValue bool                       `json:"allowEmptyValue,omitempty"`
+	Style           string                     `json:"style,omitempty"`
+	Explode         *bool                      `json:"explode,omitempty"`
+	AllowReserved   bool                       `json:"allowReserved,omitempty"`
+	Schema          *SchemaObject              `json:"schema,omitempty"`
+	Example         any                        `json:"example,omitempty"`
+	Examples        map[string]ExampleObject   `json:"examples,omitempty"`
 	Content         map[string]MediaTypeObject `json:"content,omitempty"`
 }
 
