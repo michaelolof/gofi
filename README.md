@@ -1050,7 +1050,7 @@ type TestOptions struct {
     Method  string            // HTTP method (required)
     Query   map[string]string // Query parameters
     Paths   map[string]string // Path parameter overrides (e.g. {"id": "123"})
-    Headers map[string]string // Request headers
+    Headers map[string]string // Request headers. A Host header replaces the default "Host: localhost"
     Cookies []http.Cookie     // Request cookies
     Body    io.Reader         // Request body
 }

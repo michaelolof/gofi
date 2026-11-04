@@ -761,7 +761,9 @@ func (s *serveMux) Test(opts TestOptions) (resp *InjectResponse, err error) {
 	}
 
 	rawReq.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", opts.Method, path))
-	rawReq.WriteString("Host: localhost\r\n")
+	if !hasHostHeader(opts.Headers) {
+		rawReq.WriteString("Host: localhost\r\n")
+	}
 
 	for name, value := range opts.Headers {
 		rawReq.WriteString(fmt.Sprintf("%s: %s\r\n", name, value))
@@ -869,7 +871,9 @@ func (s *serveMux) Inject(opts InjectOptions) (resp *InjectResponse, err error) 
 	}
 
 	rawReq.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", opts.Method, path))
-	rawReq.WriteString("Host: localhost\r\n")
+	if !hasHostHeader(opts.Headers) {
+		rawReq.WriteString("Host: localhost\r\n")
+	}
 
 	for name, value := range opts.Headers {
 		rawReq.WriteString(fmt.Sprintf("%s: %s\r\n", name, value))
@@ -1125,4 +1129,16 @@ func convertFasthttpToHTTPRequest(c Context) (*http.Request, error) {
 		r.Proto, r.ProtoMajor, r.ProtoMinor = "HTTP/1.0", 1, 0
 	}
 	return r, nil
+}
+
+// hasHostHeader reports whether a test request names its own Host. HTTP allows one
+// Host header, and fasthttp refuses a request with two.
+func hasHostHeader(headers map[string]string) bool {
+	for name := range headers {
+		if strings.EqualFold(name, "Host") {
+			return true
+		}
+	}
+
+	return false
 }
