@@ -398,3 +398,35 @@ func TestUseMiddleware_ErrorShortCircuit(t *testing.T) {
 		t.Logf("Expected code 500 for unhandled error, got %d", w.StatusCode)
 	}
 }
+
+// HTTP allows one Host header, so a test request naming its own replaces the
+// helper's default instead of adding a second that the request parser refuses.
+func TestTestAndInject_UseTheCallersHostHeader(t *testing.T) {
+	r := NewRouter()
+
+	handler := DefineHandler(RouteOptions{
+		Handler: func(c Context) error {
+			return c.SendString(200, c.Request().Host)
+		},
+	})
+
+	r.Get("/host", handler)
+
+	tested, err := r.Test(TestOptions{Method: "GET", Path: "/host", Headers: map[string]string{"Host": "webhooks.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if tested.BodyString() != "webhooks.test" {
+		t.Errorf("Test: expected host webhooks.test, got %q", tested.BodyString())
+	}
+
+	injected, err := r.Inject(InjectOptions{Method: "GET", Path: "/host", Handler: &handler, Headers: map[string]string{"host": "webhooks.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if injected.BodyString() != "webhooks.test" {
+		t.Errorf("Inject: expected host webhooks.test, got %q", injected.BodyString())
+	}
+}
