@@ -656,6 +656,9 @@ func (s *serveMux) getTypeInfoRecursive(typ reflect.Type, value any, name string
 			case utils.MultipartFile:
 				typeStr = "string"
 				format = "binary"
+				if v, ok := ruleDefs.tags["example"]; ok && len(v) > 0 {
+					example = v[0]
+				}
 
 			default:
 				typeStr = "object"
