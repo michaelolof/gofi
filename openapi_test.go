@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"strings"
 	"testing"
 
@@ -561,4 +562,29 @@ func TestGF24_OpenAPINullableAndDouble(t *testing.T) {
 	assert.True(t, nullable(props["p"]))
 	assert.False(t, nullable(props["r"]))
 	assert.NotContains(t, dig("paths", "/b", "post", "requestBody", "content", "application/json", "schema"), "nullable")
+}
+
+// A file field keeps its example tag, like any other string field.
+func TestOpenAPIMultipartFileKeepsItsExample(t *testing.T) {
+	type testSchema struct {
+		Request struct {
+			Header struct {
+				ContentType string `json:"content-type" default:"multipart/form-data"`
+			}
+			Body struct {
+				File *multipart.FileHeader `json:"file" validate:"required" example:"passport.jpg"`
+			}
+		}
+	}
+
+	r := NewRouter()
+	r.Post("/documents", DefineHandler(RouteOptions{
+		Schema:  &testSchema{},
+		Handler: func(c Context) error { return nil },
+	}))
+
+	raw, err := json.Marshal(OpenAPISpec(r, DocsOptions{}))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"format":"binary"`)
+	assert.Contains(t, string(raw), `"example":"passport.jpg"`)
 }
