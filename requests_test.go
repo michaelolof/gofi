@@ -5685,6 +5685,155 @@ func TestGF06_DefaultTagsApply(t *testing.T) {
 	}
 }
 
+// A JSON list with default:"[]" binds an empty list when it is left out or
+// sent as null, at any depth, rather than reading a JSON array that isn't there.
+func TestJSONListDefault_FillsAMissingOrNullList(t *testing.T) {
+	type policy struct {
+		Networks []string `json:"networks" validate:"required,allow_zero" default:"[]"`
+		Assets   []string `json:"assets" validate:"required,allow_zero" default:"[]"`
+	}
+	type item struct {
+		N string `json:"n"`
+	}
+	type S struct {
+		Request struct {
+			Body struct {
+				Tags     []string          `json:"tags" default:"[]"`
+				Items    []item            `json:"items" default:"[]"`
+				PtrList  *[]string         `json:"ptr_list" default:"[]"`
+				Policies []policy          `json:"policies"`
+				ByName   map[string]policy `json:"by_name"`
+				Optional *policy           `json:"optional"`
+			}
+		}
+	}
+	// list shows a nil list as nil, so it can't pass for an empty one.
+	list := func(v any) string {
+		if reflect.ValueOf(v).IsNil() {
+			return "nil"
+		}
+		return fmt.Sprint(v)
+	}
+	read := func(s *S) string {
+		b := s.Request.Body
+		out := "tags=" + list(b.Tags) + " items=" + list(b.Items) + " ptr_list=" + list(b.PtrList)
+		for i, p := range b.Policies {
+			out += fmt.Sprintf(" policies.%d=%s,%s", i, list(p.Networks), list(p.Assets))
+		}
+		if p, ok := b.ByName["k"]; ok {
+			out += " by_name.k=" + list(p.Networks) + "," + list(p.Assets)
+		}
+		if p := b.Optional; p != nil {
+			out += " optional=" + list(p.Networks) + "," + list(p.Assets)
+		}
+		return out
+	}
+	post := func(r Router, body string) *InjectResponse {
+		t.Helper()
+		resp, err := r.Test(TestOptions{Method: "POST", Path: "/x", Headers: map[string]string{"Content-Type": frJSON}, Body: strings.NewReader(body)})
+		if err != nil {
+			t.Fatalf("%s: request failed: %v", body, err)
+		}
+		return resp
+	}
+
+	const defaults = "tags=[] items=[] ptr_list=nil"
+	for _, tc := range []struct{ body, want string }{
+		{`{}`, "200 " + defaults},
+		{`{"tags":null}`, "200 " + defaults},
+		{`{"tags":[]}`, "200 " + defaults},
+		{`{"tags":["a"]}`, "200 tags=[a] items=[] ptr_list=nil"},
+		{`{"tags":[],"policies":[{}]}`, "200 " + defaults + " policies.0=[],[]"},
+		{`{"tags":[],"policies":[{"networks":null,"assets":null}]}`, "200 " + defaults + " policies.0=[],[]"},
+		{`{"tags":[],"policies":[{"networks":["a"]}]}`, "200 " + defaults + " policies.0=[a],[]"},
+		{`{"tags":[],"by_name":{"k":{}}}`, "200 " + defaults + " by_name.k=[],[]"},
+		{`{"tags":[],"optional":{}}`, "200 " + defaults + " optional=[],[]"},
+		{`{"tags":[],"policies":[{"networks":[],"assets":[]}]}`, "200 " + defaults + " policies.0=[],[]"},
+		{`{"tags":["a",null]}`, "400 "},
+		// A list of structs takes its default the same way.
+		{`{"items":null}`, "200 " + defaults},
+		{`{"items":[{"n":"a"}]}`, "200 tags=[] items=[{a}] ptr_list=nil"},
+		// default:"[]" applies to []T only. A pointer to a list stays nil.
+		{`{"ptr_list":null}`, "200 " + defaults},
+		{`{"ptr_list":["a"]}`, "200 tags=[] items=[] ptr_list=&[a]"},
+	} {
+		code, got := frBind[S](t, frJSON, tc.body, read)
+		if got := fmt.Sprint(code, " ", got); got != tc.want {
+			t.Errorf("%s: want %q, got %q", tc.body, tc.want, got)
+		}
+	}
+
+	// A list without a default keeps its presence rules, and a default is
+	// checked against the field's rules as a sent [] would be.
+	type Rules struct {
+		Request struct {
+			Body struct {
+				Strings []string `json:"strings" validate:"required,min=1"`
+				Items   []item   `json:"items" validate:"required,min=1"`
+				Min     []string `json:"min" validate:"min=1" default:"[]"`
+			}
+		}
+	}
+	r := NewRouter()
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: new(Rules), Handler: func(c Context) error {
+		if _, err := ValidateAndBind[Rules](c); err != nil {
+			return err
+		}
+		return c.SendString(200, "ok")
+	}}))
+	for _, tc := range []struct{ body, field string }{
+		{`{"strings":["a"],"items":[{"n":"a"}],"min":["a"]}`, ""},
+		{`{"items":[{"n":"a"}],"min":["a"]}`, "strings"},
+		{`{"strings":null,"items":[{"n":"a"}],"min":["a"]}`, "strings"},
+		{`{"strings":["a"],"min":["a"]}`, "items"},
+		{`{"strings":["a"],"items":null,"min":["a"]}`, "items"},
+		{`{"strings":["a"],"items":[{"n":"a"}]}`, "min"},
+		{`{"strings":["a"],"items":[{"n":"a"}],"min":null}`, "min"},
+		{`{"strings":["a"],"items":[{"n":"a"}],"min":[]}`, "min"},
+	} {
+		resp := post(r, tc.body)
+		if tc.field == "" {
+			if resp.Code() != 200 {
+				t.Errorf("%s: want 200, got %d %s", tc.body, resp.Code(), resp.BodyString())
+			}
+			continue
+		}
+		if resp.Code() != 400 || !strings.Contains(resp.BodyString(), "Body("+tc.field+")") {
+			t.Errorf("%s: want a 400 for %s, got %d %s", tc.body, tc.field, resp.Code(), resp.BodyString())
+		}
+	}
+
+	// Requests share the compiled default, so what one handler does to its
+	// list must not reach the next request.
+	r = NewRouter()
+	var seen []string
+	r.Post("/x", DefineHandler(RouteOptions{Info: frInfo, Schema: new(S), Handler: func(c Context) error {
+		s, err := ValidateAndBind[S](c)
+		if err != nil {
+			return err
+		}
+		seen = append(seen, read(s))
+		b := &s.Request.Body
+		for _, l := range [][]string{b.Tags, b.Policies[0].Networks} {
+			full := l[:cap(l)]
+			for i := range full {
+				full[i] = "leak"
+			}
+		}
+		b.Tags = append(b.Tags, "leak")
+		b.Items = append(b.Items, item{N: "leak"})
+		b.Policies[0].Networks = append(b.Policies[0].Networks, "leak")
+		return c.SendString(200, "ok")
+	}}))
+	for range 2 {
+		if resp := post(r, `{"policies":[{}]}`); resp.Code() != 200 {
+			t.Fatalf("want 200, got %d %s", resp.Code(), resp.BodyString())
+		}
+	}
+	frEqual(t, 2, len(seen))
+	frEqual(t, defaults+" policies.0=[],[]", seen[1])
+}
+
 func TestGF08_FileSentToANonFileField(t *testing.T) {
 	type In struct {
 		Doc  []byte                `json:"doc"`
