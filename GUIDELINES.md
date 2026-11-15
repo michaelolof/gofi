@@ -293,7 +293,9 @@ type ErrBody struct {
   missing value in the path, query, header, cookie and JSON, as in
   ``Status string `json:"status" validate:"required" default:"success"` ``. That
   includes a pointer, and a `time.Time`, whose default is text in the field's
-  layout. A default that doesn't parse panics when the route is registered.
+  layout. In a JSON body, a field sent as `null` counts as missing, so its
+  default applies. A default that doesn't parse panics when the route is
+  registered.
 
 ### Custom specs
 

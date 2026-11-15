@@ -297,8 +297,12 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 		return nil, newErrReport(RequestErr, schemaField, path.String(), "parser", err)
 	}
 
+	// fromDefault records that a missing or null value was replaced by the
+	// field's default, so there is no JSON value left to walk.
+	fromDefault := false
 	if (val == nil || val == cont.EOF) && opts.SchemaRules.defVal != nil {
 		val = opts.SchemaRules.defVal
+		fromDefault = true
 	} else if val == cont.EOF {
 		val = nil
 	}
@@ -428,6 +432,26 @@ func (j *JSONBodyParser) walkStruct(node *fastjson.Value, schemaField schemaFiel
 			bindDecodedBytes(opts.Body, decoded)
 		}
 
+		return &walkFinished, nil
+	}
+
+	// A list that was left out or sent as null takes its default. The list
+	// branches below read the JSON array, so the default is checked and bound
+	// here instead. The default is an empty slice with no capacity, so requests
+	// can share it: an append always allocates a new array.
+	if fromDefault && (opts.SchemaRules.kind == reflect.Slice || opts.SchemaRules.kind == reflect.Array) {
+		if err := runValidationLazy(val, RequestErr, schemaField, path, opts.SchemaRules.rules); err != nil {
+			return nil, err
+		}
+		if opts.ShouldBind && opts.HasBody {
+			target := opts.Body
+			if target.Kind() == reflect.Pointer {
+				target = target.Elem()
+			}
+			if def := opts.SchemaRules.defaultValue(target.Type()); def.IsValid() {
+				target.Set(def)
+			}
+		}
 		return &walkFinished, nil
 	}
 
